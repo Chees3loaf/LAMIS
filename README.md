@@ -1,6 +1,6 @@
-# Network Inventory Tool
+# Lightriver Automated Multivendor Inventory System
 
-Network Inventory program for the 7705/7250 devices.
+Network Inventory program for the Nokia 7705/7250/1830 devices.
 
 ## Table of Contents
 
