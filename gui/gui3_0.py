@@ -32,12 +32,12 @@ class InventoryGUI:
         self.is_paused = False
         self.save_location = None
         self.db_file = os.path.join(os.path.dirname(__file__), '..', 'data', 'network_inventory.db')
-        self.template_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'LAMIS_Packing_Slip.xlsx')
+        self.template_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'Device_Report_Template.xlsx')
         self.lock = threading.Lock()
         self.setup_gui()
 
     def setup_gui(self):
-        self.root.title("LAMIS - Inventory System")
+        self.root.title("Lightriver Automated Multivendor Inventory System")
         self.root.geometry('850x650')
         
         main_frame = ttk.Frame(self.root)
@@ -271,7 +271,7 @@ class InventoryGUI:
         # Ask user for filename
         filename = simpledialog.askstring(
             "Filename Input",
-            "Enter filename for the Excel report (without extension):",
+            "Enter filename for the Excel report:",
             initialvalue=default_filename
         )
 
@@ -296,6 +296,18 @@ class InventoryGUI:
         while os.path.exists(self.output_file):
             self.output_file = os.path.join(save_folder, f"{filename}_{counter}.xlsx")
             counter += 1
+
+        # Ask user for Customer, Project, Customer Order, and Sales Order
+        customer = simpledialog.askstring("Customer Name", "Enter the Customer Name:")
+        project = simpledialog.askstring("Project Name", "Enter the Project Name:")
+        customer_po = simpledialog.askstring("Customer PO", "Enter the Customer PO:")
+        sales_order = simpledialog.askstring("Sales Order", "Enter the Sales Order:")
+
+        # Ensure at least some input is provided; default to empty strings if user cancels
+        customer = customer if customer else ""
+        project = project if project else ""
+        customer_po = customer_po if customer_po else ""
+        sales_order = sales_order if sales_order else ""
 
         # Get user input from the GUI
         pod_1 = self.pod_var_1.get()
@@ -354,7 +366,11 @@ class InventoryGUI:
         self.root.after(100, lambda: self.output_to_excel(
             outputs=self.outputs,
             db_file=self.db_file,
-            output_file=self.output_file
+            output_file=self.output_file,
+            customer=customer,
+            project=project,
+            customer_po=customer_po,
+            sales_order=sales_order
         ))
 
         # **Open Excel file after saving**
@@ -368,6 +384,7 @@ class InventoryGUI:
 
         # **Show success message**
         messagebox.showinfo("Success", f"Report saved successfully as:\n{self.output_file}")
+
 
     def process_task_queue(self, queue):
         """Processes the task queue and executes commands on each device."""

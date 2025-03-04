@@ -1,9 +1,10 @@
+import datetime
 import os
 import sqlite3
 import logging
 import re
 import time
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 import pandas as pd
 import paramiko
 import subprocess
@@ -15,12 +16,14 @@ from script_interface import BaseScript
 # Ensure logging is configured
 logging.basicConfig(level=logging.DEBUG)
 
-db_path = os.path.join(os.path.dirname(__file__), "data", "network_inventory.db")
+db_path = os.path.join(os.path.dirname(__file__),"..", "data", "network_inventory.db")
 
 class Script(BaseScript):
     def __init__(self, db_name='network_inventory.db', connection_type='serial', **kwargs):
         self.db_name = db_name
         self.connection_type = connection_type
+        self.device_name = None
+        self.device_type = None
         if connection_type == 'serial':
             self.serial_port = kwargs.get('serial_port')
             self.baud_rate = kwargs.get('baud_rate')
@@ -49,11 +52,16 @@ class Script(BaseScript):
     
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         try:
-            paramiko.Transport._preferred_keys = ['ssh-rsa', 'ssh-dss']
             ssh_client = paramiko.SSHClient()
             ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             logging.info(f"Connecting to {ip_address}")
-            ssh_client.connect(ip_address, username=username, password=password)
+            ssh_client.connect(ip_address,
+                               username=username,
+                               password=password, 
+                               look_for_keys=False,
+                               allow_agent=False,
+                               timeout=10
+                               )
             logging.info(f"Connected to {ip_address}")
 
             shell = ssh_client.invoke_shell()
@@ -186,68 +194,63 @@ class Script(BaseScript):
                 conn.close()
 
 
-
-    def extract_hardware_data(
-            self,
-            output: str,
-            cache_callback: Callable[[pd.DataFrame, str], None],
-            ip: str
-        ) -> None:
+    def extract_hardware_data(self, output: str, cache_callback: Callable[[pd.DataFrame, str], None], ip: str) -> None:
         data = []
         system_info = {}
 
         try:
-            # Regex patterns
-            
-            info_pattern = re.compile(
-                r"^\s*Name\s*:\s*(.+)|^\s*Type\s*:\s*(.+)", re.DOTALL
-            )
-            hardware_pattern = re.compile(
-                r"Part number\s+:\s+([^\r\n]+)|Serial number\s+:\s+([^\r\n]+)", 
-                re.DOTALL)
+            # Extract system info using separate regexes
+            name_match = re.search(r"^\s*Name\s*:\s*(.+)", output, re.MULTILINE)
+            type_match = re.search(r"^\s*Type\s*:\s*(.+)", output, re.MULTILINE)
 
-            # Extract system info
-            info_match = info_pattern.search(output)
-            if info_match:
-                system_info['System Name'] = info_match.group(1).strip()
-                system_info['System Type'] = info_match.group(2).strip()
-                
+            if name_match and type_match:
+                system_info['System Name'] = name_match.group(1).strip()
+                system_info['System Type'] = type_match.group(1).strip()
             else:
                 logging.warning("No system information found in the output.")
 
-            # Extract hardware data using both patterns
-            all_matches = re.finditer(hardware_pattern, output)
-            
+            # Regex pattern to capture hierarchical part data
+            hardware_pattern = re.compile(
+                r"^\s+Part number\s*:\s*(?P<PartNumber>[^\r\n]+)\s*"
+                r"(?:CLEI code\s*:\s*[^\r\n]+\s*)?"  # CLEI code (optional)
+                r"Serial number\s*:\s*(?P<SerialNumber>[^\r\n]+)",
+                re.MULTILINE
+            )
+
+            # Find all matches
+            all_matches = list(re.finditer(hardware_pattern, output))
 
             for match in all_matches:
                 try:
-                        part_number = match.group(1).strip()[:10] if match.group(1) else "Unknown"
-                        serial_number = match.group(2).strip() if match.group(2) else "Unknown"
-                        
-                        if part_number == "3HE11278AARC01":
-                            part_type = "Chassis"
-                            name = "Chassis"
-                        elif part_number == "3HE11279AARC01":
-                            part_type = "Chassis Fan"
-                            name = "Chassis Fan"
-                        else:
-                            part_type = "Unknown"
-                            name = "Unknown"
+                    part_number = match.group("PartNumber").strip()[:10] if match.group("PartNumber") else "Unknown"
+                    serial_number = match.group("SerialNumber").strip() if match.group("SerialNumber") else "Unknown"
 
-                        # Get description from the database
-                        description = self.get_part_description(part_number)
+                    # Identify type dynamically
+                    if part_number == "3HE11278AARC01":
+                        part_type = "Chassis"
+                        name = "Chassis"
+                    elif part_number == "3HE11279AARC01":
+                        part_type = "Chassis Fan"
+                        name = "Chassis Fan"
+                    else:
+                        part_type = "Unknown"
+                        name = "Unknown"
 
-                        # Append fallback data
-                        data.append({
-                            'System Name': system_info['System Name'],
-                            'System Type': system_info['System Type'],
-                            'Type': part_type,
-                            'Part Number': part_number,
-                            'Serial Number': serial_number,
-                            'Description': description,
-                            'Name': name,
-                            'Source': ip
+                    # Get description from the database
+                    description = self.get_part_description(part_number)
+
+                    # Append structured data
+                    data.append({
+                        'System Name': system_info.get('System Name', 'Unknown'),
+                        'System Type': system_info.get('System Type', 'Unknown'),
+                        'Type': part_type,
+                        'Part Number': part_number,
+                        'Serial Number': serial_number,
+                        'Description': description,
+                        'Name': name,
+                        'Source': ip
                     })
+
                 except Exception as match_error:
                     logging.error(f"Error processing hardware match: {match_error}")
                     continue
@@ -281,48 +284,56 @@ class Script(BaseScript):
         cache_callback(df, 'hardware_data')
 
 
-    def extract_card_details(self, device_output: str, slot_names: List[str], card_label: str, cache_callback: Callable[[pd.DataFrame, str], None], ip: str) -> None:
+    def extract_card_details(self, device_output, slot_names, card_label, cache_callback, ip):
+        """
+        Extracts card details (Type, Part Number, Serial Number) for both Card A and Card B using a flexible regex.
+        """
         card_data = []
 
         try:
+            # More flexible regex to match both Card A and B with irregular output structure
             card_detail_pattern = re.compile(
-                r"Slot.+\n([^ ]+) +([^ ]+)[^\n]+\n[^\n]+\n[^\n]+\n +Part number +: ([^\n]+)\n +Serial number +: ([^\n]+)"
-                .format(slot="|".join(slot_names)),
+                r"^[ ]*(?P<Slot>[A-Z])\s+(?P<Type>[^\s]+).*?"          # Match Slot A/B and Type
+                r"Part number\s*:\s*(?P<PartNumber>[^\n]+).*?"         # Match Part Number
+                r"Serial number\s*:\s*(?P<SerialNumber>[^\n]+)",       # Match the correct Serial Number
                 re.MULTILINE | re.DOTALL
             )
-
-            logging.debug(f"Device output for {card_label}:\n{device_output}")
-            logging.debug(f"Using regex pattern: {card_detail_pattern.pattern}")
 
             matches = re.finditer(card_detail_pattern, device_output)
 
             for match in matches:
+                slot = match.group("Slot").strip()
+                if slot not in slot_names:
+                    continue  # Skip if the slot does not match A or B
+
                 try:
-                    part_number = match.group(3)[:10]
-                    part_type = match.group(2)
+                    part_type = match.group("Type").strip() if match.group("Type") else "Unknown"
+                    part_number = match.group("PartNumber").strip()[:10] if match.group("PartNumber") else "Unknown"
+                    serial_number = match.group("SerialNumber").strip() if match.group("SerialNumber") else "Unknown"
                     description = self.get_part_description(part_number)
                 except Exception as e:
-                    logging.error(f"Error in get_part_description for Part Number: {part_number}")
+                    logging.error(f"Error retrieving part description for Part Number: {part_number}")
                     description = "Unknown Description"
 
+                # Create structured data entry for the card
                 card_info = {
-                    'System Name': '',  # Placeholder; fill with actual data if available.
-                    'System Type': '',  # Placeholder; fill with actual data if available.
+                    'System Name': '',
+                    'System Type': '',
                     'Type': part_type,
                     'Part Number': part_number,
-                    'Serial Number': match.group(4),
+                    'Serial Number': serial_number,
                     'Description': description,
                     'Information Type': 'Control Card',
-                    'Name': f"{card_label}",
+                    'Name': f"{slot}",
                     'Source': ip
                 }
                 card_data.append(card_info)
-                logging.debug(f"Extracted info for {match.group(2)}: {card_info}")
+                logging.debug(f"Extracted info for {slot}: {card_info}")
 
             if not card_data:
                 logging.warning(f"No {card_label} data found in output.")
             else:
-                logging.debug(f"Data successfully extracted for {card_label}s: {card_data}")
+                logging.debug(f"Data successfully extracted for {card_label}: {card_data}")
 
         except Exception as e:
             logging.error(f"Error in extract_{card_label.lower()}_details: {e}")
@@ -338,7 +349,7 @@ class Script(BaseScript):
                 'Source': ip,
             })
 
-        # Ensure DataFrame has consistent columns even if empty
+        # Create DataFrame for extracted card data
         expected_columns = ['System Name', 'System Type', 'Type', 'Part Number', 'Serial Number',
                             'Description', 'Information Type', 'Name', 'Source']
         df = pd.DataFrame(card_data, columns=expected_columns)
@@ -346,136 +357,80 @@ class Script(BaseScript):
         if df.empty:
             logging.warning(f"No {card_label} data found or parsing failed. Returning empty DataFrame.")
         else:
-            logging.info(f"DataFrame for {card_label} is populated, preparing to write to Excel:\n{df}")
+            logging.info(f"DataFrame for {card_label} is populated:\n{df}")
 
         logging.debug(df)
 
         # Cache the DataFrame using the provided callback
         cache_callback(df, f"{card_label}_data")
+        return df
 
 
-    def extract_mda_details(self, output: str, cache_callback: Optional[Callable[[pd.DataFrame, str], None]] = None, ip: Optional[str] = None) -> pd.DataFrame:
+    def extract_mda_details(self, output, cache_callback=None, ip=None):
+        """
+        Extracts MDA details using regex to capture relevant fields.
+        """
         mda_data = []
 
         try:
-            logging.debug(f"Raw output: {output}")
             output = output.replace("Press any key to continue (Q to quit)", "").strip()
-            lines = output.split('\n')
 
-            slot_mda_pattern = re.compile(r'^\s*(\d*)\s*(\d+)\s+(?:(\(not provisioned\))|([\w\(\)\-]+))\s+(up|unprovisioned)', re.MULTILINE)
-            part_pattern = re.compile(r'Part number\s*:\s*(.*)', re.MULTILINE)
-            serial_pattern = re.compile(r'Serial number\s*:\s*(.*)', re.MULTILINE)
-            equipped_type_pattern = re.compile(r'^\s+(\w[\w\-]*)\s*$', re.MULTILINE)
+            # Combined regex to capture MDA, Type, Part Number, and Serial Number
+            mda_block_pattern = re.compile(
+                r"^\s*\d*\s+(?P<MDA>\d+)\s+(?P<Type>[\w\(\)\-]+).*?"
+                r"Part number\s*:\s*(?P<PartNumber>[^\r\n]+).*?"
+                r"Serial number\s*:\s*(?P<SerialNumber>[^\r\n]+)",
+                re.DOTALL | re.MULTILINE
+            )
 
-            current_equipped_type = None
-            current_slot = None
-            current_provisioned_type = None
-            current_part_number = None
-            current_serial_number = None
+            logging.debug(f"Raw MDA output:\n{output}")
 
-            for line in lines:
-                logging.debug(f"Processing line: {line.strip()}")
+            match_found = False  # Flag to check if at least one match was found
 
-                slot_mda_match = slot_mda_pattern.match(line)
-                if slot_mda_match:
-                    if current_slot is not None:
-                        # Save previous MDA details before updating
-                        part_number = current_part_number
-                        part_type = current_provisioned_type or current_equipped_type or 'Unknown'
+            for match in mda_block_pattern.finditer(output):
+                match_found = True
+                part_number = match.group("PartNumber").strip()[:10] if match.group("PartNumber") else "Unknown"
+                serial_number = match.group("SerialNumber").strip() if match.group("SerialNumber") else "Unknown"
+                mda_type = match.group("Type").strip() if match.group("Type") else "Unknown"
 
-                        try:
-                            description = self.get_part_description(part_number)
-                        except Exception as e:
-                            logging.error(f"Error retrieving part description for {part_number}, {part_type}: {e}")
-                            description = "Unknown"
+                # Get part description
+                description = self.get_part_description(part_number)
 
-                        mda_info = {
-                            'System Name': '',
-                            'System Type': '',
-                            'Type': part_type,
-                            'Part Number': part_number or '',
-                            'Serial Number': current_serial_number or '',
-                            'Description': description,
-                            'Information Type': "MDA Card",
-                            'Name': f'MDA {current_slot}',
-                            'Source': ip or 'Unknown'
-                        }
-                        mda_data.append(mda_info)
-                        logging.debug(f"Extracted info: {mda_info}")
-
-                    # Reset fields for the next MDA entry
-                    current_slot = slot_mda_match.group(2) or None
-                    current_provisioned_type = slot_mda_match.group(4)  # Not provisioned if this is None
-                    current_equipped_type = None
-                    if slot_mda_match.group(3):
-                        current_equipped_type = None  # "(not provisioned)" case
-                    current_part_number = None
-                    current_serial_number = None
-                    continue
-
-                part_match = part_pattern.search(line)
-                if part_match:
-                    current_part_number = part_match.group(1).strip()[:10]
-                    logging.debug(f"Matched Part Number: {current_part_number}")
-                    continue
-
-                serial_match = serial_pattern.search(line)
-                if serial_match:
-                    current_serial_number = serial_match.group(1).strip()
-                    logging.debug(f"Matched Serial Number: {current_serial_number}")
-                    continue
-
-                if current_provisioned_type is None:
-                    equipped_type_match = equipped_type_pattern.search(line)
-                    if equipped_type_match:
-                        current_equipped_type = equipped_type_match.group(1).strip()
-                        logging.debug(f"Matched Equipped Type: {current_equipped_type}")
-                        continue
-
-            # Save the last MDA details
-            if current_slot is not None:
-                part_number = current_part_number[:10]
-                part_type = current_provisioned_type or current_equipped_type or 'Unknown'
-
-                try:
-                    description = self.get_part_description(part_number)
-                except Exception as e:
-                    logging.error(f"Error retrieving part description for {part_number}, {part_type}: {e}")
-                    description = "Unknown"
-
-                mda_info = {
+                entry = {
                     'System Name': '',
                     'System Type': '',
-                    'Type': part_type,
-                    'Part Number': part_number or '',
-                    'Serial Number': current_serial_number or '',
-                    'Description': description,
+                    'Type': mda_type,
+                    'Part Number': part_number,
+                    'Serial Number': serial_number,
+                    'Description': description,  # ✅ Fixed function call
                     'Information Type': "MDA Card",
-                    'Name': f"MDA {current_slot}",
+                    'Name': match.group("MDA"),
                     'Source': ip or 'Unknown'
                 }
-                mda_data.append(mda_info)
-                logging.debug(f"Extracted info: {mda_info}")
 
-            if not mda_data:
-                logging.warning("No MDA data found in output.")
-            else:
-                logging.debug(f"Data successfully extracted: {mda_data}")
+                logging.debug(f"Extracted MDA entry: {entry}")
+                mda_data.append(entry)
+
+            # If no matches were found, log an error
+            if not match_found:
+                logging.error("No MDA details found in the provided output.")
+                return None  # Prevent further processing if no matches were found
 
         except Exception as e:
-            logging.error(f"Error in extract_mda_details: {e}")
+            logging.error(f"Error extracting MDA details: {e}")
             mda_data.append({
-                'System Name': '',
-                'System Type': '',
+                'System Name': 'Error',
+                'System Type': 'Error',
                 'Type': 'Error',
-                'Part Number': "Error",
-                'Serial Number': "Error",
-                'Description': "Error",
+                'Part Number': 'Error',
+                'Serial Number': 'Error',
+                'Description': 'Error',
                 'Information Type': 'Error',
                 'Name': 'Error',
-                'Source': ip or 'Unknown'
+                'Source': 'Error'
             })
 
+        # Convert to DataFrame
         df = pd.DataFrame(mda_data)
         if df.empty:
             logging.warning("No MDA data found or parsing failed. Returning empty DataFrame.")
@@ -487,9 +442,8 @@ class Script(BaseScript):
         if cache_callback:
             cache_callback(df, 'mda_data')
 
-        print(df.to_string(index=False))
-
         return df
+
 
 
     def extract_port_detail(self, output: str, cache_callback: Optional[Callable[[pd.DataFrame, str], None]] = None, ip: Optional[str] = None) -> pd.DataFrame:
@@ -554,7 +508,7 @@ class Script(BaseScript):
                             "System Name": '',
                             "System Type": '',
                             "Type": current_optical_compliance,
-                            "Part Number": current_model_number,
+                            "Part Number": current_model_number[:10],
                             "Serial Number": current_serial_number,
                             "Description": description,
                             "Information Type": "Plugable Optical Transceiver",
@@ -614,6 +568,12 @@ class Script(BaseScript):
         if not outputs_from_device:
             logging.warning(f"No outputs received from device at {ip_address}. Skipping processing.")
             return
+        
+        # Set device_name and device_type properly
+        self.device_name = self.device_name or "Unknown"
+        self.device_type = self.device_type or "Unknown"
+
+        system_info = {'System Name': self.device_name, 'System Type': self.device_type}
 
         processing_functions = [
             lambda output, callback: self.extract_hardware_data(output, callback, ip_address),
@@ -773,109 +733,3 @@ class Script(BaseScript):
     
         return combined_df
             
-            
-    def output_to_excel(
-        self,
-        outputs: Dict[str, Dict[str, Dict]],
-        template_file: str,
-        output_file: str,
-        db_file: str,
-        customer: str = '',
-        project: str = '',
-        sales_order: str = '',
-        customer_po: str = ''
-    ) -> None:
-        """
-        Writes processed data to an Excel file using a provided template, with metadata from GUI inputs.
-        """
-        conn = None
-        try:
-            # Resolve template path
-            template_path = os.path.abspath(template_file)
-            if not os.path.exists(template_path):
-                raise FileNotFoundError(f"Template file not found at {template_path}")
-
-            # Load the template workbook
-            wb = load_workbook(template_path)
-            sheet = wb.active  # Assuming the first sheet is the template
-
-            # Open the SQLite database
-            conn = sqlite3.connect(db_file)
-            cursor = conn.cursor()
-
-            logging.info(f"Starting Excel output for {len(outputs)} devices.")
-            for ip, data_dict in outputs.items():
-                try:
-                    logging.info(f"Processing data for IP {ip}.")
-                    combined_df = self.combine_and_format_data(data_dict)  # Prepare combined data for each IP
-                    if combined_df.empty:
-                        logging.warning(f"No data to write for IP {ip}")
-                        continue
-
-                    # Sanitize and validate system name for sheet title
-                    system_name = combined_df.iloc[0].get('System Name', '').strip()
-                    if not system_name:
-                        system_name = f"System_{ip.replace('.', '_')}"
-
-                    # Replace invalid characters and truncate to 31 characters (Excel constraints)
-                    system_name = system_name.replace(':', '_').replace('/', '_')[:31]
-
-                    logging.info(f"Creating sheet for system '{system_name}' with {len(combined_df)} rows.")
-
-                    # Create and reference the new sheet
-                    new_sheet = wb.copy_worksheet(sheet)
-                    new_sheet.title = system_name
-
-                    # Populate metadata (user-defined fields and static fields)
-                    new_sheet['F6'] = combined_df.iloc[0].get('System Name', '')
-                    new_sheet['F7'] = combined_df.iloc[0].get('System Type', '')
-                    new_sheet['C5'] = customer
-                    new_sheet['F5'] = combined_df.iloc[0].get('Source', '')
-                    new_sheet['C6'] = project
-                    new_sheet['D7'] = sales_order
-                    new_sheet['C7'] = customer_po
-
-                    # Populate equipment details (row by row, starting at row 15)
-                    start_row = 15
-                    for idx, row in combined_df.iterrows():
-                        row_num = start_row + idx
-                        part_number = row.get('Part Number', row.get('Model Number', ''))
-
-                        # Fetch description from SQLite database using part number
-                        description = ''
-                        if part_number:
-                            cursor.execute("SELECT description FROM parts WHERE part_number = ?", (part_number,))
-                            result = cursor.fetchone()
-                            if result:
-                                description = result[0]
-
-                        # Write data into the Excel sheet
-                        new_sheet[f'B{row_num}'] = row.get('Name', '')
-                        new_sheet[f'C{row_num}'] = row.get('Type', '')
-                        new_sheet[f'D{row_num}'] = part_number
-                        new_sheet[f'E{row_num}'] = row.get('Serial Number', '')
-                        new_sheet[f'F{row_num}'] = description
-
-                except Exception as e:
-                    logging.error(f"Failed to process data for IP {ip}. Error: {e}")
-
-            # Remove the original template sheet
-            wb.remove(sheet)
-
-            # Save the workbook
-            wb.save(output_file)
-            logging.info(f"Data successfully saved to {output_file}")
-
-            # Open the file (platform-specific handling)
-            if os.name == 'nt':  # Windows
-                subprocess.run(["start", output_file], check=True, shell=True)
-            else:  # macOS/Linux
-                subprocess.run(["open", output_file], check=True, shell=True)
-
-        except Exception as e:
-            logging.error(f"Failed to save data to Excel: {e}")
-            messagebox.showerror("Export Error", f"Failed to save Excel file:\n{e}")
-        finally:
-            # Close the SQLite connection
-            if conn:
-                conn.close()
