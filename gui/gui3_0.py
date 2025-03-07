@@ -1,18 +1,18 @@
 from datetime import datetime
 import os
 import logging
+import shutil
 import sqlite3
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from queue import Queue
-from tkinter import simpledialog, filedialog
+from tkinter import filedialog
 from typing import Dict
-
+import time
 import openpyxl
 import pandas as pd
 import script_interface
-
 
 command_tracker = script_interface.CommandTracker()
 db_cache = script_interface.DatabaseCache(os.path.join(os.path.dirname(__file__), "..", "data", "network_inventory.db"))
@@ -33,8 +33,18 @@ class InventoryGUI:
         self.save_location = None
         self.db_file = os.path.join(os.path.dirname(__file__), '..', 'data', 'network_inventory.db')
         self.template_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'Device_Report_Template.xlsx')
+        self.packing_slip_template = os.path.join(os.path.dirname(__file__), '..', 'data', 'LAMIS_Packing_Slip.xlsx')
+        self.summary_sheet = os.path.join(os.path.dirname(__file__), '..', 'data', 'Summary_Template.xlsx')
         self.lock = threading.Lock()
+
+        # 🔹 Setup GUI Components
         self.setup_gui()
+
+        # 🔹 Initialize ScrolledText for Output
+        self.output_screen = scrolledtext.ScrolledText(self.root, height=15, width=120)
+        self.output_screen.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.output_screen.insert(tk.END, "Lightriver Automated Multivendor Inventory System Started\n")
+        self.output_screen.insert(tk.END, "Please select pod(s) and enter the IP of your device(s) above\n")
 
     def setup_gui(self):
         self.root.title("Lightriver Automated Multivendor Inventory System")
@@ -118,14 +128,21 @@ class InventoryGUI:
         self.status_label = tk.Label(control_frame, text="Status: Ready", anchor="w")
         self.status_label.pack(side=tk.RIGHT, padx=10)
         
-        # Output Screen at the Bottom
+        '''# Output Screen at the Bottom
         output_frame = ttk.LabelFrame(main_frame, text="Output Screen")
         output_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Create a ScrolledText widget inside the output frame
         self.output_screen = scrolledtext.ScrolledText(output_frame, height=15, width=120)
         self.output_screen.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
+        # Insert Initial Messages (Corrected Usage)
+        self.output_screen.insert(tk.END, "Lightriver Automated Multivendor Inventory System Started\n")
+        self.output_screen.insert(tk.END, "Please select pod(s) and enter the IP of your device(s) above\n")'''
+
+        
     def update_ip_labels(self, pod_var, start_ip_label, end_ip_label):
-        """Update IP labels when the pod selection changes."""
+        # Update IP labels when the pod selection changes
         pod_number = pod_var.get()
         start_ip_label.config(text=f"Start IP: 172.21.{pod_number}.")
         end_ip_label.config(text=f"End IP: 172.21.{pod_number}.")
@@ -135,7 +152,7 @@ class InventoryGUI:
         self.root.update_idletasks()
         
     def combine_and_format_data(self, ip_data: Dict[str, Dict]) -> pd.DataFrame:
-        """Combines all data for an IP into a single DataFrame."""
+        # Combines all data for an IP into a single DataFrame
         all_data = []
         logging.info(f"Starting combination of {len(ip_data)} data entries.")
         
@@ -154,111 +171,264 @@ class InventoryGUI:
         return combined_df
 
         
-    def output_to_excel(self, outputs: Dict[str, Dict[str, Dict]], db_file: str, output_file: str) -> None:
-        """
-        Writes processed data to an Excel file using a provided template.
-        Each IP gets its own sheet. Ensures files do not overwrite existing data.
-        """
+    def output_to_excel(self, outputs, db_file, output_file, customer="", project="", customer_po="", sales_order=""):
+        
+        # Writes processed data to an Excel file using a provided template.
+        # Preserves the DataFrame and prompts the user for packing slips.
+        
         conn = None
         try:
-            # Ensure template file exists
             if not os.path.exists(self.template_path):
                 raise FileNotFoundError(f"Template file not found at {self.template_path}")
 
-            # Load the template workbook
             wb = openpyxl.load_workbook(self.template_path)
-            sheet = wb.active  # First sheet is the template
+            sheet = wb.active
 
-            # Open the SQLite database
             conn = sqlite3.connect(db_file)
             cursor = conn.cursor()
 
             logging.info(f"Starting Excel export for {len(outputs)} devices.")
-            sheet_created = False  # Track if any new sheet is created
             
+            processed_data = {}  # ✅ Dictionary to store processed DataFrame
+
             for ip, data_dict in outputs.items():
                 try:
                     logging.info(f"Processing data for IP {ip}.")
-                    
-                    # Combine data into one DataFrame per IP
                     combined_df = self.combine_and_format_data(data_dict)
-                    
+
                     if combined_df.empty:
                         logging.warning(f"No data to write for IP {ip}")
                         continue
 
-                    # Sanitize system name for sheet title
                     system_name = combined_df.iloc[0].get('System Name', '').strip() or f"System_{ip.replace('.', '_')}"
-                    system_name = system_name.replace(':', '_').replace('/', '_')[:31]  # Excel sheet name limit
+                    system_name = system_name.replace(":", "_").replace("/", "_")[:31]
 
                     logging.info(f"Creating sheet for system '{system_name}' with {len(combined_df)} rows.")
 
-                    # Create and reference the new sheet
                     new_sheet = wb.copy_worksheet(sheet)
                     new_sheet.title = system_name
-                    sheet_created = True  # Mark that a new sheet was created
 
-                    # Populate metadata
-                    new_sheet['F6'] = combined_df.iloc[0].get('System Name', '')
-                    new_sheet['F7'] = combined_df.iloc[0].get('System Type', '')
-                    new_sheet['F5'] = combined_df.iloc[0].get('Source', '')
+                    # Populate User Imputed Data 
+                    new_sheet["C5"] = customer
+                    new_sheet["C6"] = project
+                    new_sheet["C7"] = customer_po
+                    new_sheet["D7"] = sales_order
+                    new_sheet["F5"] = combined_df.iloc[0].get("Source", "")
+                    new_sheet["F6"] = system_name
 
-                    # Populate equipment details (starting at row 15)
                     start_row = 15
                     for idx, row in combined_df.iterrows():
                         row_num = start_row + idx
-                        part_number = row.get('Part Number' or row.get('Model Number', ''), '')
+                        part_number = row.get("Part Number", row.get("Model Number", ""))
 
-                        # Fetch description from SQLite database using part number
-                        description = ''
+                        description = ""
                         if part_number:
                             cursor.execute("SELECT description FROM parts WHERE part_number = ?", (part_number,))
                             result = cursor.fetchone()
                             if result:
                                 description = result[0]
 
-                        # Write data into the Excel sheet
-                        new_sheet[f'B{row_num}'] = row.get('Name', '')
-                        new_sheet[f'C{row_num}'] = row.get('Type', '')
-                        new_sheet[f'D{row_num}'] = part_number
-                        new_sheet[f'E{row_num}'] = row.get('Serial Number', '')
-                        new_sheet[f'F{row_num}'] = description
+                        new_sheet[f"B{row_num}"], new_sheet[f"C{row_num}"], new_sheet[f"D{row_num}"], new_sheet[f"E{row_num}"], new_sheet[f"F{row_num}"] = row.get("Name", ""), row.get("Type", ""), part_number, row.get("Serial Number", ""), description
+                    
+                    # ✅ Store DataFrame for use in packing slip generation
+                    processed_data[ip] = combined_df
 
                 except Exception as e:
                     logging.error(f"Failed to process data for IP {ip}. Error: {e}")
 
-            # Ensure at least one sheet is present before removing the template
-            if sheet_created:
+            if len(wb.sheetnames) > 1:
                 wb.remove(sheet)
+
+            # Ensure file isn't locked
+            while True:
+                try:
+                    wb.save(output_file)
+                    logging.info(f"Data successfully saved to {output_file}")
+                    break
+                except PermissionError:
+                    logging.warning(f"File is locked: {output_file}")
+                    if not messagebox.askretrycancel("File Locked", f"Close '{output_file}' and retry."):
+                        return
+                    time.sleep(3)
+
+            # Show success message and prompt user for packing slips
+            user_wants_packing_slips = messagebox.askyesno(
+                "Success",
+                f"Report saved successfully as:\n{output_file}\n\nDo you need packing slips?"
+            )
+
+            # ✅ Pass in-memory DataFrame instead of reading from Excel again
+            if user_wants_packing_slips:
+                logging.info("User requested packing slips. Generating now...")
+                self.generate_packing_slips(processed_data, output_file, list(outputs.keys()), customer, project, customer_po, sales_order)
             else:
-                logging.error("No sheets were created. Cannot remove the template sheet.")
-                messagebox.showerror("Export Error", "No data available to export. The Excel file was not saved.")
-                return
-
-            # Save the workbook
-            wb.save(output_file)
-            logging.info(f"Data successfully saved to {output_file}")
-
-            # Open the file automatically
-            try:
-                if os.name == "nt":  # Windows
-                    os.startfile(output_file)
-                elif os.name == "posix":  # macOS/Linux
-                    subprocess.run(["open", output_file], check=True)
-            except Exception as e:
-                logging.error(f"Failed to open Excel file: {e}")
-
-            # Show success message
-            messagebox.showinfo("Success", f"Report saved successfully as:\n{output_file}")
+                logging.info("User skipped packing slip generation.")
 
         except Exception as e:
             logging.error(f"Failed to save data to Excel: {e}")
             messagebox.showerror("Export Error", f"Failed to save Excel file:\n{e}")
+
         finally:
             if conn:
                 conn.close()
 
-    
+    def generate_packing_slips(self, processed_data, file_path, ip_list, customer, project, customer_po, sales_order):
+        # Generates a single packing slip workbook.
+        # The summary sheet comes from one template
+        # Each device gets its own sheet from another template.
+
+        try:
+            # ✅ Load template file paths
+            packing_template_path = self.packing_slip_template
+            summary_template_path = self.summary_sheet
+
+            logging.debug(f"Loading templates:\n - Packing Slip: {packing_template_path}\n - Summary: {summary_template_path}")
+
+            # ✅ **Copy templates to create new working files**
+            temp_packing_slip = os.path.join(os.getcwd(), "PackingSlip_Temp.xlsx")
+            temp_summary_sheet = os.path.join(os.getcwd(), "Summary_Template.xlsx")
+
+            shutil.copy(summary_template_path, temp_summary_sheet)
+            shutil.copy(packing_template_path, temp_packing_slip)
+
+            # ✅ **Load the copied workbooks**
+            wb_summary = openpyxl.load_workbook(temp_summary_sheet)
+            wb_packing = openpyxl.load_workbook(temp_packing_slip)
+
+            # ✅ **Create a new workbook and merge the templates**
+            wb_final = openpyxl.Workbook()
+            wb_final.remove(wb_final.active)  # Remove default sheet
+
+            # ✅ **Copy the summary sheet properly**
+            summary_sheet = wb_summary.active  # Assume first sheet is summary
+            summary_copy = wb_final.copy_worksheet(summary_sheet)
+            summary_copy.title = "Summary"
+            logging.debug("Summary sheet added to final workbook.")
+
+            # ✅ **Copy the packing slip template sheets properly**
+            for sheet_name in wb_packing.sheetnames:
+                template_sheet = wb_packing[sheet_name]
+                template_copy = wb_final.copy_worksheet(template_sheet)
+                template_copy.title = sheet_name
+            logging.debug("Packing slip template added to final workbook.")
+
+            # ✅ **Find the summary sheet**
+            summary_sheet = wb_final["Summary"]  # We know it exists now
+
+            # ✅ **Prompt user for save location**
+            save_folder = filedialog.askdirectory(title="Select Packing Slip Save Location")
+            if not save_folder:
+                logging.warning("No folder selected, using current directory.")
+                save_folder = os.getcwd()
+
+            # ✅ **Format the filename**
+            filename = f"PackingSlip_{customer}_{project}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
+            save_path = os.path.join(save_folder, filename)
+            logging.debug(f"Packing slip will be saved to: {save_path}")
+
+            # ✅ **Write customer details on the summary page**
+            summary_sheet["B4"] = "Customer:"
+            summary_sheet["C4"] = customer
+            summary_sheet["B5"] = "Project:"
+            summary_sheet["C5"] = project
+            summary_sheet["B6"] = "Sales Order:"
+            summary_sheet["C6"] = sales_order
+            summary_sheet["B7"] = "Customer PO:"
+            summary_sheet["C7"] = customer_po
+            summary_sheet["B8"] = "IP Addresses:"
+            summary_sheet["C8"] = ", ".join(ip_list)
+
+            logging.debug("Customer details written to summary sheet.")
+
+            # ✅ **Extract Device Column from processed_data**
+            device_column = next((col for col in processed_data[next(iter(processed_data))].columns if "system name" in col.lower() or "device id" in col.lower()), None)
+
+            if not device_column:
+                error_msg = "Packing slip failed: No 'Device ID' column found in processed data."
+                logging.error(error_msg)
+                messagebox.showerror("Packing Slip Error", error_msg)
+                return
+
+            logging.debug(f"Device identifier column found: {device_column}")
+
+            # ✅ **Generate Packing Slips for Each Device**
+            logging.debug(f"Found {len(processed_data)} devices for packing slips.")
+
+            for ip, device_data in processed_data.items():
+                try:
+                    device_name = device_data.iloc[0].get(device_column, f"Unknown_{ip}")
+                    logging.debug(f"Creating packing slip for device: {device_name}")
+
+                    # ✅ **Create a new sheet for the device**
+                    ws = wb_final.create_sheet(title=f"Device_{device_name.replace(' ', '_')}")
+                    logging.debug(f"Created sheet: {ws.title}")
+
+                    # ✅ **Assign device-specific values**
+                    ws.append(["Customer:", customer, "", "Project:", project])
+                    ws.append(["Device ID:", device_name, "", "Sales Order:", sales_order])
+                    ws.append(["Customer PO:", customer_po])
+
+                    # ✅ **Write headers**
+                    ws.append(["Item #", "Part Number", "Serial Number", "Description"])
+
+                    # ✅ **Write device data**
+                    for idx, row in device_data.iterrows():
+                        ws.append([idx + 1, row.get("Part Number", ""), row.get("Serial Number", ""), row.get("Description", "")])
+
+                except Exception as e:
+                    logging.error(f"Failed to create packing slip for {device_name}: {e}")
+
+            # ✅ **Save the Workbook**
+            wb_final.save(save_path)
+            logging.info(f"Packing slips saved to {save_path}")
+
+        except Exception as e:
+            logging.error(f"Failed to generate packing slips: {e}")
+            messagebox.showerror("Packing Slip Error", f"An error occurred while generating packing slips: {e}")
+
+  
+    def get_user_inputs(self, default_filename):
+        
+        #Prompt user for project information in a popup
+        root = tk.Toplevel()  # Create a new popup window
+        root.title("User Inputs")
+
+        # Dictionary to store input values
+        user_inputs = {
+            "Customer": tk.StringVar(),
+            "Project": tk.StringVar(),
+            "Purchase Order": tk.StringVar(),
+            "Sales Order": tk.StringVar(),
+            "Filename": tk.StringVar(value=default_filename),
+        }
+
+        # Create input fields
+        row = 0
+        for label, var in user_inputs.items():
+            tk.Label(root, text=label + ":").grid(row=row, column=0, padx=10, pady=5, sticky="w")
+            tk.Entry(root, textvariable=var, width=40).grid(row=row, column=1, padx=10, pady=5)
+            row += 1
+
+        # Handle window closing event to prevent errors
+        def on_close():
+            root.quit()  # Ensure the event loop quits properly
+            root.destroy()
+
+        root.protocol("WM_DELETE_WINDOW", on_close)
+
+        # Button to submit inputs
+        def submit():
+            root.quit()  # Quit the popup loop
+            root.destroy()  # Close the popup safely
+
+        tk.Button(root, text="Submit", command=submit).grid(row=row, column=0, columnspan=2, pady=10)
+
+        root.grab_set()  # Make the popup modal
+        root.wait_window(root)  # Ensure the window waits before proceeding
+
+        # Extract values
+        return {key: var.get().strip() for key, var in user_inputs.items()}
+
     def run_script(self):
         self.outputs.clear()
         self.update_status("Running...")
@@ -268,46 +438,47 @@ class InventoryGUI:
         # Generate default filename with timestamp
         default_filename = f"LAMIS_Output_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 
-        # Ask user for filename
-        filename = simpledialog.askstring(
-            "Filename Input",
-            "Enter filename for the Excel report:",
-            initialvalue=default_filename
-        )
+        # Get user inputs from a single input popup
+        user_inputs = self.get_user_inputs(default_filename)
+        
+        if not user_inputs:  # Ensure the window wasn't closed
+            messagebox.showerror("Input Error", "User input window was closed without entering details.")
+            return
 
-        # If user cancels, use default filename
+        # Ensure all fields are provided
+        for key, value in user_inputs.items():
+            if not value.strip():  # Ensures no empty fields
+                messagebox.showerror("Input Error", f"{key} is required.")
+                return
+
+        # Assign user inputs
+        customer = user_inputs["Customer"]
+        project = user_inputs["Project"]
+        customer_po = user_inputs["Purchase Order"]
+        sales_order = user_inputs["Sales Order"]
+        filename = user_inputs["Filename"]
+
+        # Validate filename (remove invalid characters)
+        filename = "".join(c for c in filename if c.isalnum() or c in (" ", "_", "-")).strip()
         if not filename:
-            logging.warning("No filename entered, using default.")
-            filename = default_filename
+            messagebox.showerror("Input Error", "Invalid filename entered.")
+            return
 
         # Ask user for save folder
         save_folder = filedialog.askdirectory(title="Select Save Location")
 
         # If user cancels, use current directory
         if not save_folder:
-            logging.warning("No folder selected, using current directory.")
             save_folder = os.getcwd()
 
-        # Ensure filename is unique by appending numbers if needed
-        base_path = os.path.join(save_folder, f"{filename}.xlsx")
+        # Ensure filename is unique
+        base_path = os.path.normpath(os.path.join(save_folder, f"{filename}.xlsx"))
         counter = 1
         self.output_file = base_path
 
         while os.path.exists(self.output_file):
             self.output_file = os.path.join(save_folder, f"{filename}_{counter}.xlsx")
             counter += 1
-
-        # Ask user for Customer, Project, Customer Order, and Sales Order
-        customer = simpledialog.askstring("Customer Name", "Enter the Customer Name:")
-        project = simpledialog.askstring("Project Name", "Enter the Project Name:")
-        customer_po = simpledialog.askstring("Customer PO", "Enter the Customer PO:")
-        sales_order = simpledialog.askstring("Sales Order", "Enter the Sales Order:")
-
-        # Ensure at least some input is provided; default to empty strings if user cancels
-        customer = customer if customer else ""
-        project = project if project else ""
-        customer_po = customer_po if customer_po else ""
-        sales_order = sales_order if sales_order else ""
 
         # Get user input from the GUI
         pod_1 = self.pod_var_1.get()
@@ -373,7 +544,7 @@ class InventoryGUI:
             sales_order=sales_order
         ))
 
-        # **Open Excel file after saving**
+        # Open Excel file after saving
         try:
             if os.name == "nt":  # Windows
                 os.startfile(self.output_file)
@@ -382,12 +553,13 @@ class InventoryGUI:
         except Exception as e:
             logging.error(f"Failed to open Excel file: {e}")
 
-        # **Show success message**
-        messagebox.showinfo("Success", f"Report saved successfully as:\n{self.output_file}")
+        # Show success message
+        self.output_screen.insert(tk.END, f"Report saved successfully as:\n{self.output_file}\n")
+        self.output_screen.see(tk.END)  # Auto-scroll to the latest log
 
 
     def process_task_queue(self, queue):
-        """Processes the task queue and executes commands on each device."""
+        # Processes the task queue and executes commands on each device
         while not self.task_queue.empty():
             ip, script_class = self.task_queue.get()
             try:
@@ -422,7 +594,6 @@ class InventoryGUI:
 
         self.update_gui_from_queue(queue)  # Ensure GUI updates with results
 
-    
     def update_gui_from_queue(self, queue):
         while not queue.empty():
             try:
@@ -442,8 +613,19 @@ class InventoryGUI:
             self.stop_threads = True
             self.update_status("Aborted")
         messagebox.showinfo("Aborted", "The program has been aborted.")
-    
+        
+# Redirect Console Output to GUI Output Screen
+class ConsoleRedirector:
+    def __init__(self, widget):
+        self.widget = widget
 
+    def write(self, message):
+        self.widget.insert(tk.END, message)
+        self.widget.see(tk.END)  # Auto-scroll to the latest message
+
+    def flush(self):
+        pass  # Required for compatibility with logging
+    
 def main():
     logging.info("Starting LAMIS Inventory System")
     root = tk.Tk()

@@ -555,13 +555,12 @@ class Script(BaseScript):
         return df
 
     def process_outputs(self, outputs_from_device: List[str], ip_address: str, outputs: Dict[str, Dict[str, Dict]]) -> None:
-        """
-        Processes outputs from a device and caches parsed data.
-
-        :param outputs_from_device: List of command outputs from the device.
-        :param ip_address: IP address or identifier of the device.
-        :param outputs: Shared data structure for storing results.
-        """
+        
+        # Processes outputs from a device and caches parsed data.
+        # param outputs_from_device: List of command outputs from the device.
+        # param ip_address: IP address or identifier of the device.
+        # param outputs: Shared data structure for storing results.
+        
         if not outputs_from_device:
             logging.warning(f"No outputs received from device at {ip_address}. Skipping processing.")
             return
