@@ -10,7 +10,7 @@ debug_mode = False  # Toggle this for verbose logging
 logging.basicConfig(level=logging.DEBUG if debug_mode else logging.INFO)
 
 def is_reachable(ip):
-    """Ping an IP address to check if it is reachable."""
+    # Ping an IP address to check if it is reachable
     try:
         result = subprocess.run(["ping", "-n", "1", ip], capture_output=True, text=True)
         return result.returncode == 0
@@ -20,15 +20,15 @@ def is_reachable(ip):
 
 class BaseScript:
     def execute_commands(self, commands):
-        """
-        Executes a list of commands and returns their output.
-        """
+        
+        # Executes a list of commands and returns their output.
+        
         raise NotImplementedError("Subclasses must implement this method")
 
     def process_outputs(self, outputs_from_device, ip_address, outputs):
-        """
-        Processes outputs from a device and caches parsed data.
-        """
+        
+        # Processes outputs from a device and caches parsed data.
+        
         raise NotImplementedError("Subclasses must implement this method")
 
 
@@ -80,9 +80,9 @@ class DatabaseCache:
 
 class DeviceIdentifier:    
     def identify_device(self, ip, queue, output_screen):
-        """
-        Identifies the device type and name based on command output.
-        """
+        
+        # Identifies the device type and name based on command output.
+        
         username, password = 'admin', 'admin'
         logging.debug(f"Attempting to identify device at {ip} with SSH.")
         queue.put(f"Attempting to identify device at {ip} with SSH...\n")
@@ -152,9 +152,9 @@ class DeviceIdentifier:
 
 class ScriptSelector:
     def select_script(self, device_type, connection_type='ssh'):
-        """
-        Select a script class based on device type and connection type.
-        """
+        
+        # Select a script class based on device type and connection type.
+        
         from scripts.Nokia_SAR import Script as Sar
         from scripts.Nokia_IXR import Script as Ixr
         from scripts.Nokia_1830 import Script as Pss

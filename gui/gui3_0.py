@@ -1,6 +1,7 @@
 from datetime import datetime
 import os
 import logging
+import re
 import shutil
 import sqlite3
 import threading
@@ -11,6 +12,8 @@ from tkinter import filedialog
 from typing import Dict
 import time
 import openpyxl
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font
 import pandas as pd
 import script_interface
 
@@ -34,7 +37,6 @@ class InventoryGUI:
         self.db_file = os.path.join(os.path.dirname(__file__), '..', 'data', 'network_inventory.db')
         self.template_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'Device_Report_Template.xlsx')
         self.packing_slip_template = os.path.join(os.path.dirname(__file__), '..', 'data', 'LAMIS_Packing_Slip.xlsx')
-        self.summary_sheet = os.path.join(os.path.dirname(__file__), '..', 'data', 'Summary_Template.xlsx')
         self.lock = threading.Lock()
 
         # 🔹 Setup GUI Components
@@ -128,19 +130,6 @@ class InventoryGUI:
         self.status_label = tk.Label(control_frame, text="Status: Ready", anchor="w")
         self.status_label.pack(side=tk.RIGHT, padx=10)
         
-        '''# Output Screen at the Bottom
-        output_frame = ttk.LabelFrame(main_frame, text="Output Screen")
-        output_frame.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        # Create a ScrolledText widget inside the output frame
-        self.output_screen = scrolledtext.ScrolledText(output_frame, height=15, width=120)
-        self.output_screen.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-
-        # Insert Initial Messages (Corrected Usage)
-        self.output_screen.insert(tk.END, "Lightriver Automated Multivendor Inventory System Started\n")
-        self.output_screen.insert(tk.END, "Please select pod(s) and enter the IP of your device(s) above\n")'''
-
-        
     def update_ip_labels(self, pod_var, start_ip_label, end_ip_label):
         # Update IP labels when the pod selection changes
         pod_number = pod_var.get()
@@ -189,7 +178,7 @@ class InventoryGUI:
 
             logging.info(f"Starting Excel export for {len(outputs)} devices.")
             
-            processed_data = {}  # ✅ Dictionary to store processed DataFrame
+            processed_data = {}  #  Dictionary to store processed DataFrame
 
             for ip, data_dict in outputs.items():
                 try:
@@ -202,6 +191,9 @@ class InventoryGUI:
 
                     system_name = combined_df.iloc[0].get('System Name', '').strip() or f"System_{ip.replace('.', '_')}"
                     system_name = system_name.replace(":", "_").replace("/", "_")[:31]
+                    
+                    system_type = combined_df.iloc[0].get('System Type', '').strip()
+                    system_type = system_type.replace(":", "_").replace("/", "_")[:31]
 
                     logging.info(f"Creating sheet for system '{system_name}' with {len(combined_df)} rows.")
 
@@ -215,6 +207,7 @@ class InventoryGUI:
                     new_sheet["D7"] = sales_order
                     new_sheet["F5"] = combined_df.iloc[0].get("Source", "")
                     new_sheet["F6"] = system_name
+                    new_sheet["F7"] = system_type
 
                     start_row = 15
                     for idx, row in combined_df.iterrows():
@@ -228,9 +221,24 @@ class InventoryGUI:
                             if result:
                                 description = result[0]
 
-                        new_sheet[f"B{row_num}"], new_sheet[f"C{row_num}"], new_sheet[f"D{row_num}"], new_sheet[f"E{row_num}"], new_sheet[f"F{row_num}"] = row.get("Name", ""), row.get("Type", ""), part_number, row.get("Serial Number", ""), description
-                    
-                    # ✅ Store DataFrame for use in packing slip generation
+                        # ✅ Convert "Information Type" to string safely
+                        info_type = str(row.get("Information Type", "")).lower() if row.get("Information Type") is not None else ""
+
+                        # ✅ If it's an MDA row, format the Name field properly
+                        name_value = row.get("Name", "")
+                        if "mda card" in info_type:
+                            match = re.search(r"\d+", str(name_value))  # Extracts the number safely
+                            mda_number = match.group() if match else "Unknown"
+                            name_value = f"MDA {mda_number}"  # ✅ Format name as "MDA 1", "MDA 5", etc.
+
+                        # ✅ Insert Data into Excel
+                        new_sheet[f"B{row_num}"] = name_value
+                        new_sheet[f"C{row_num}"] = row.get("Type", "")
+                        new_sheet[f"D{row_num}"] = part_number
+                        new_sheet[f"E{row_num}"] = row.get("Serial Number", "")
+                        new_sheet[f"F{row_num}"] = description
+    
+                    #  Store DataFrame for use in packing slip generation
                     processed_data[ip] = combined_df
 
                 except Exception as e:
@@ -257,7 +265,7 @@ class InventoryGUI:
                 f"Report saved successfully as:\n{output_file}\n\nDo you need packing slips?"
             )
 
-            # ✅ Pass in-memory DataFrame instead of reading from Excel again
+            #  Pass in-memory DataFrame instead of reading from Excel again
             if user_wants_packing_slips:
                 logging.info("User requested packing slips. Generating now...")
                 self.generate_packing_slips(processed_data, output_file, list(outputs.keys()), customer, project, customer_po, sales_order)
@@ -272,64 +280,52 @@ class InventoryGUI:
             if conn:
                 conn.close()
 
+    def copy_sheet(self, source_sheet, target_wb, new_sheet_name):
+    
+        # Copies an entire sheet from one workbook to another while preserving formatting.
+        
+        new_sheet = target_wb.create_sheet(title=new_sheet_name)
+
+        for row in source_sheet.iter_rows():
+            for cell in row:
+                new_sheet[cell.coordinate].value = cell.value  # ✅ Copy cell values
+
+                # ✅ Copy formatting
+                if cell.has_style:
+                    new_sheet[cell.coordinate].font = cell.font
+                    new_sheet[cell.coordinate].border = cell.border
+                    new_sheet[cell.coordinate].fill = cell.fill
+                    new_sheet[cell.coordinate].number_format = cell.number_format
+                    new_sheet[cell.coordinate].protection = cell.protection
+                    new_sheet[cell.coordinate].alignment = cell.alignment
+
+        return new_sheet
+
+
     def generate_packing_slips(self, processed_data, file_path, ip_list, customer, project, customer_po, sales_order):
         """
         Generates a single packing slip workbook.
-        The summary sheet and packing slip template are copied properly to preserve formatting.
+        Each device gets its own sheet based on the packing slip template.
         """
 
         try:
-            # Load template file paths
+            # ✅ **Load the template**
             packing_template_path = self.packing_slip_template
-            summary_template_path = self.summary_sheet
+            logging.debug(f"Loading template: {packing_template_path}")
 
-            logging.debug(f"Loading templates:\n - Packing Slip: {packing_template_path}\n - Summary: {summary_template_path}")
-
-            # ✅ **Copy templates to prevent modification of originals**
+            # ✅ **Copy template to prevent modification of the original**
             temp_packing_slip = os.path.join(os.getcwd(), "PackingSlip_Temp.xlsx")
-            temp_summary_sheet = os.path.join(os.getcwd(), "Summary_Template.xlsx")
-
-            shutil.copy(summary_template_path, temp_summary_sheet)
             shutil.copy(packing_template_path, temp_packing_slip)
 
-            # ✅ **Load the copied workbooks**
-            wb_summary = openpyxl.load_workbook(temp_summary_sheet)
-            wb_packing = openpyxl.load_workbook(temp_packing_slip)
-            wb_final = openpyxl.Workbook()
+            # ✅ **Load the copied workbook**
+            wb_final = openpyxl.load_workbook(temp_packing_slip)
 
-            # ✅ **Remove default blank sheet in new workbook**
-            if "Sheet" in wb_final.sheetnames:
-                wb_final.remove(wb_final["Sheet"])
-
-            # ✅ **Copy the summary sheet**
-            for sheet_name in wb_summary.sheetnames:
-                source_sheet = wb_summary[sheet_name]
-                new_sheet = wb_final.create_sheet(title=sheet_name)
-                
-                for row in source_sheet.iter_rows():
-                    for cell in row:
-                        new_sheet[cell.coordinate].value = cell.value  # Copy values
-
-                # Preserve merged cells
-                for merged_range in source_sheet.merged_cells.ranges:
-                    new_sheet.merge_cells(str(merged_range))
-
-            logging.debug("Summary sheet copied to final workbook.")
-
-            # ✅ **Copy the packing slip template sheets**
-            for sheet_name in wb_packing.sheetnames:
-                source_sheet = wb_packing[sheet_name]
-                new_sheet = wb_final.create_sheet(title=sheet_name)
-
-                for row in source_sheet.iter_rows():
-                    for cell in row:
-                        new_sheet[cell.coordinate].value = cell.value  # Copy values
-
-                # Preserve merged cells
-                for merged_range in source_sheet.merged_cells.ranges:
-                    new_sheet.merge_cells(str(merged_range))
-
-            logging.debug("Packing slip template copied to final workbook.")
+            # ✅ **Find the packing slip template sheet**
+            template_sheet = wb_final["Packing Slip"]  # Ensure this sheet exists
+            if not template_sheet:
+                logging.error("Packing Slip template not found in workbook.")
+                messagebox.showerror("Packing Slip Error", "Packing Slip template sheet not found.")
+                return
 
             # ✅ **Find the summary sheet**
             summary_sheet_name = next((s for s in wb_final.sheetnames if "summary" in s.lower()), None)
@@ -354,16 +350,9 @@ class InventoryGUI:
             logging.debug(f"Packing slip will be saved to: {save_path}")
 
             # ✅ **Write customer details on the summary page**
-            summary_sheet["B4"] = "Customer:"
-            summary_sheet["C4"] = customer
-            summary_sheet["B5"] = "Project:"
-            summary_sheet["C5"] = project
-            summary_sheet["B6"] = "Sales Order:"
-            summary_sheet["C6"] = sales_order
-            summary_sheet["B7"] = "Customer PO:"
-            summary_sheet["C7"] = customer_po
-            summary_sheet["B8"] = "IP Addresses:"
-            summary_sheet["C8"] = ", ".join(ip_list)
+            summary_sheet["B5"], summary_sheet["B7"] = "Customer", customer
+            summary_sheet["D5"], summary_sheet["D7"] = "Project", project
+            summary_sheet["F5"], summary_sheet["F7"] = "IP Addresses", ", ".join(ip_list)
 
             logging.debug("Customer details written to summary sheet.")
 
@@ -380,8 +369,7 @@ class InventoryGUI:
                 messagebox.showerror("Packing Slip Error", error_msg)
                 return
 
-            summary_sheet["B9"] = "Device ID Column:"
-            summary_sheet["C9"] = device_column
+            summary_sheet["H5"], summary_sheet["H7"] = "Device ID", device_column
             logging.debug(f"Device identifier column found: {device_column}")
 
             # ✅ **Generate Packing Slips for Each Device**
@@ -392,38 +380,53 @@ class InventoryGUI:
                     device_name = device_data.iloc[0].get(device_column, f"Unknown_{ip}")
                     logging.debug(f"Creating packing slip for device: {device_name}")
 
-                    # ✅ **Copy the packing slip template**
-                    template_sheet = wb_packing.active
+                    # ✅ **Duplicate the existing packing slip sheet to retain formatting**
                     new_sheet = wb_final.copy_worksheet(template_sheet)
-                    new_sheet.title = f"Device_{device_name.replace(' ', '_')}"
+                    new_sheet.title = f"{device_name.replace(' ', '_')}"
                     logging.debug(f"Copied template to create: {new_sheet.title}")
 
+                    # ✅ **Ensure merged cells are copied**
+                    for merged_range in template_sheet.merged_cells.ranges:
+                        new_sheet.merge_cells(str(merged_range))
+                    logging.debug(f"Merged cells copied for {new_sheet.title}")
+
                     # ✅ **Assign device-specific values**
-                    new_sheet["B4"] = "Customer:"
-                    new_sheet["C4"] = customer
-                    new_sheet["B5"] = "Project:"
-                    new_sheet["C5"] = project
-                    new_sheet["B6"] = "Device ID:"
-                    new_sheet["C6"] = device_name
-                    new_sheet["B7"] = "Sales Order:"
-                    new_sheet["C7"] = sales_order
-                    new_sheet["B8"] = "Customer PO:"
-                    new_sheet["C8"] = customer_po
+                    new_sheet["B5"], new_sheet["C5"] = "Customer", customer
+                    new_sheet["B6"], new_sheet["C6"] = "Project", project
+                    new_sheet["B7"], new_sheet["C7"] = "Device ID", device_name
+                    new_sheet["B14"], new_sheet["B15"] = "Sales Order", sales_order
+                    new_sheet["C14"], new_sheet["C15"] = "Customer PO", customer_po
 
-                    # ✅ **Write headers**
-                    new_sheet.append(["Item #", "Part Number", "Serial Number", "Description"])
+                    # ✅ **Write each entry to its own row in the packing slip**
+                    start_row = 15  # Data starts from this row
 
-                    # ✅ **Write device data**
-                    item_number = 1
-                    for _, row in device_data.iterrows():
-                        part_number = row.get("Part Number", "")
-                        serial_number = row.get("Serial Number", "")
-                        description = row.get("Description", "")
+                    # 🔹 **Validate Column Names Before Writing Data**
+                    try:
+                        part_number_col = device_data.columns.get_loc("Part Number")
+                        serial_number_col = device_data.columns.get_loc("Serial Number")
+                        description_col = device_data.columns.get_loc("Description")
+                    except KeyError as e:
+                        logging.error(f"Column missing in DataFrame: {e}")
+                        messagebox.showerror("Packing Slip Error", f"Missing expected column: {e}")
+                        continue
 
-                        new_sheet.append([item_number, part_number, serial_number, description])
-                        item_number += 1
+                    for idx, row in enumerate(device_data.itertuples(index=False), start=0):
+                        try:
+                            part_number = row[part_number_col]
+                            serial_number = row[serial_number_col]
+                            description = row[description_col]
+                        except IndexError:
+                            logging.warning(f"Missing data in row {idx}. Skipping row.")
+                            continue
 
-                    logging.debug(f"Packing slip for {device_name} added to workbook with {item_number-1} items.")
+                        row_num = start_row + idx  # Ensure each entry gets a new row
+
+                        # ✅ **Write to correct columns**
+                        new_sheet[f"D{row_num}"] = part_number
+                        new_sheet[f"E{row_num}"] = serial_number
+                        new_sheet[f"F{row_num}"] = description
+
+                    logging.debug(f"Packing slip for {device_name} added to workbook with {len(device_data)} items.")
 
                 except Exception as e:
                     logging.error(f"Failed to create packing slip for {device_name}: {e}")
@@ -435,6 +438,11 @@ class InventoryGUI:
                 wb_final._sheets.insert(0, wb_final._sheets.pop(summary_index))
                 logging.debug("Summary sheet moved to first sheet.")
 
+            # ✅ **Remove the template sheet after copying**
+            if "Packing Slip" in wb_final.sheetnames:
+                del wb_final["Packing Slip"]
+                logging.debug("Removed the original Packing Slip template sheet from the final workbook.")
+
             # ✅ **Save Workbook**
             wb_final.save(save_path)
             logging.info(f"Packing slips saved to {save_path}")
@@ -444,7 +452,6 @@ class InventoryGUI:
             logging.error(f"Failed to generate packing slips: {e}")
             messagebox.showerror("Packing Slip Error", f"An error occurred while generating packing slips: {e}")
 
-  
     def get_user_inputs(self, default_filename):
         
         #Prompt user for project information in a popup

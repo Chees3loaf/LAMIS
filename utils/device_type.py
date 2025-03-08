@@ -11,9 +11,9 @@ logging.basicConfig(level=logging.DEBUG if debug_mode else logging.INFO)
 
 class DeviceIdentifier:
     def identify_device(self, ip, queue):
-        """
-        Identifies the device type and name based on command output.
-        """
+        
+        # Identifies the device type and name based on command output.
+        
         username, password = 'admin', 'admin'
         logging.debug(f"Attempting to identify device at {ip} with SSH.")
         
@@ -44,9 +44,9 @@ class DeviceIdentifier:
 
     @staticmethod
     def parse_device_info(output):
-        """
-        Extracts both 'Type' and 'Name' from the command output.
-        """
+        
+        # Extracts both 'Type' and 'Name' from the command output.
+        
         try:
             type_match = re.search(r"Type\s+:\s+(.+)", output)
             name_match = re.search(r"Name\s+:\s+(.+)", output)
@@ -72,9 +72,9 @@ class ScriptSelector:
     }
 
     def select_script(self, device_type, connection_type='ssh'):
-        """
-        Select a script class based on device type and connection type.
-        """
+        
+        # Select a script class based on device type and connection type.
+        
         normalized_device_type = device_type.strip().lower() if device_type else 'unknown'
         script_class = self.DEVICE_SCRIPT_MAPPING.get(normalized_device_type)
         

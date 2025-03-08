@@ -39,7 +39,7 @@ class Script(BaseScript):
             'show card a detail | match expression "(Slot)|(^A)|(Part number)|(Serial number)"',
             'show card b detail | match expression "(Slot)|(^B)|(Part number)|(Serial number)"',
             'show mda detail | match "(Slot)|(up)|(Serial.+)|(Part.+)" post-lines 1 expression',
-            'show port detail | match "(Optical Compliance.+)|(Serial.+)|(Model.+)|(Interface +: [0-9/]+)" expression'
+            'show port detail | match "(Optical Compliance.+)|(Serial.+)|(Model.+)|(Part.+)|(Interface +: [0-9/]+)" expression'
         ]
 
     def execute_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
@@ -321,7 +321,7 @@ class Script(BaseScript):
                     'Serial Number': serial_number,
                     'Description': description,
                     'Information Type': 'Control Card',
-                    'Name': f"{slot}",
+                    'Name': f"Slot {slot}",
                     'Source': ip
                 }
                 card_data.append(card_info)
@@ -399,7 +399,7 @@ class Script(BaseScript):
                     'Type': mda_type,
                     'Part Number': part_number,
                     'Serial Number': serial_number,
-                    'Description': description,  # ✅ Fixed function call
+                    'Description': description,
                     'Information Type': "MDA Card",
                     'Name': match.group("MDA"),
                     'Source': ip or 'Unknown'
@@ -441,71 +441,104 @@ class Script(BaseScript):
 
         return df
 
-
-
     def extract_port_detail(self, output: str, cache_callback: Optional[Callable[[pd.DataFrame, str], None]] = None, ip: Optional[str] = None) -> pd.DataFrame:
         port_data = []
 
         try:
-            logging.debug(f"Raw output: {output}")
+            logging.debug(f"Raw output:\n{output}")
             output = output.replace("Press any key to continue (Q to quit)", "").strip()
 
-            # Validate the output before processing
+            # ✅ Validate output before processing
             if not self.is_valid_output(output, "port detail"):
                 logging.warning("Invalid output detected for port detail command.")
                 raise ValueError("Invalid port detail output")
 
             lines = output.split("\n")
-            interface_pattern = re.compile(r'Interface\s+:\s+([\d/]+)', re.MULTILINE)
+
+            # ✅ Define regex patterns
+            interface_pattern = re.compile(r'Interface\s+:\s+([\d\S]+)', re.MULTILINE)
             serial_pattern = re.compile(r'Serial Number\s+:\s*(.+)', re.MULTILINE)
             model_pattern = re.compile(r'Model Number\s+:\s*([^\s]+)', re.MULTILINE)
+            part_pattern = re.compile(r'Part Number\s+:\s*([^\s]+)', re.MULTILINE)
             optical_compliance_pattern = re.compile(r'Optical Compliance\s+:\s*(.+)', re.MULTILINE)
 
+            # ✅ Initialize current port entry
             current_interface = None
             current_serial_number = None
             current_model_number = None
+            current_part_number = None
             current_optical_compliance = None
 
+            # ✅ Iterate through each line to extract port details
             for i, line in enumerate(lines):
                 logging.debug(f"Processing line: {line.strip()}")
 
                 if "Optical Compliance" in line:
-                    # Look back in previous lines for related data
-                    for j in range(max(0, i - 3), i):
-                        interface_match = interface_pattern.search(lines[j])
-                        if interface_match:
-                            current_interface = interface_match.group(1).strip()
+                    # 🔹 **Look back for related data** (Previous 5 lines max)
+                    for j in range(max(0, i - 5), i):
+                        if not current_interface:
+                            interface_match = interface_pattern.search(lines[j])
+                            if interface_match:
+                                current_interface = interface_match.group(1).strip()
 
-                        serial_match = serial_pattern.search(lines[j])
-                        if serial_match:
-                            current_serial_number = serial_match.group(1).strip()
+                        if not current_serial_number:
+                            serial_match = serial_pattern.search(lines[j])
+                            if serial_match:
+                                current_serial_number = serial_match.group(1).strip()
 
-                        model_match = model_pattern.search(lines[j])
-                        if model_match:
-                            current_model_number = model_match.group(1).strip()[:10]
+                        if not current_part_number:
+                            part_match = part_pattern.search(lines[j])
+                            if part_match:
+                                current_part_number = part_match.group(1).strip()
 
-                    # Process current line for optical compliance
+                        if not current_model_number:
+                            model_match = model_pattern.search(lines[j])
+                            if model_match:
+                                current_model_number = model_match.group(1).strip()[:10]
+
+                    # ✅ **Ensure missing values are assigned properly**
+                    if not current_interface:
+                        logging.warning(f"Missing Interface in entry. Assigning placeholder.")
+                        current_interface = f"Unknown Interface"
+
+                    if not current_serial_number:
+                        logging.warning(f"Missing Serial Number in entry. Assigning placeholder.")
+                        current_serial_number = f"Unknown Serial"
+
+                    if not current_model_number or current_model_number.lower() == "none":
+                        logging.warning(f"Model Number missing, using Part Number instead: {current_part_number}")
+                        current_model_number = current_part_number if current_part_number else "Unknown"
+
+                    # ✅ **Extract Optical Compliance**
                     optical_compliance_match = optical_compliance_pattern.search(line)
-                    current_optical_compliance = (optical_compliance_match.group(1).strip() if optical_compliance_match else "N/A")
+                    current_optical_compliance = (
+                        optical_compliance_match.group(1).strip() if optical_compliance_match else "N/A"
+                    )
 
-                    # Special case for specific model numbers
-                    if current_model_number == "3HE12546AARA01":
+                    # ✅ **Special case for known model numbers**
+                    if current_model_number == "3HE12546AA":
                         current_optical_compliance = "SFP - C37.94"
 
-                    # Add data to list if all required fields are present
-                    if current_interface and current_serial_number and current_model_number and current_optical_compliance:
+                    # ✅ **Final Validation: Entry must have valid values**
+                    if (
+                        current_interface != "Unknown Interface"
+                        and current_serial_number != "Unknown Serial"
+                        and current_model_number != "Unknown"
+                        and current_optical_compliance != "N/A"
+                    ):
                         try:
-                            # Use only the model number to fetch the description
+                            # ✅ **Retrieve part description**
                             description = self.get_part_description(current_model_number)
                         except Exception as desc_error:
                             logging.error(f"Error retrieving part description: {desc_error}")
                             description = "Unknown"
 
+                        # ✅ **Create port info dictionary**
                         port_info = {
                             "System Name": '',
                             "System Type": '',
                             "Type": current_optical_compliance,
-                            "Part Number": current_model_number[:10],
+                            "Part Number": current_model_number,
                             "Serial Number": current_serial_number,
                             "Description": description,
                             "Information Type": "Plugable Optical Transceiver",
@@ -513,14 +546,22 @@ class Script(BaseScript):
                             "Source": ip or "Unknown"
                         }
                         port_data.append(port_info)
-                        logging.debug(f"Extracted info: {port_info}")
+                        logging.debug(f"Extracted port data: {port_info}")
+                    else:
+                        logging.warning(
+                            f"Skipping entry due to missing data:\n"
+                            f"Interface: {current_interface}, Serial: {current_serial_number}, "
+                            f"Model: {current_model_number}, Optical Compliance: {current_optical_compliance}"
+                        )
 
-                    # Reset for next entry
+                    # ✅ **Reset values for next entry**
                     current_interface = None
                     current_serial_number = None
                     current_model_number = None
+                    current_part_number = None
                     current_optical_compliance = None
 
+            # ✅ **Final validation**
             if not port_data:
                 logging.warning("No port data found in output.")
             else:
@@ -540,7 +581,7 @@ class Script(BaseScript):
                 "Source": ip or "Unknown"
             })
 
-        # Create DataFrame and remove empty rows
+        # ✅ **Create DataFrame and remove empty rows**
         df = pd.DataFrame(port_data).dropna(how='all')
         if df.empty:
             logging.warning("No port data found or parsing failed. Returning empty DataFrame.")
@@ -553,6 +594,7 @@ class Script(BaseScript):
             cache_callback(df, 'port_data')
 
         return df
+
 
     def process_outputs(self, outputs_from_device: List[str], ip_address: str, outputs: Dict[str, Dict[str, Dict]]) -> None:
         
