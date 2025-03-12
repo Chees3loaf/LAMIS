@@ -1,7 +1,7 @@
 # Lightriver Automated Multivendor Inventory System
 
 Network Inventory program currently for the Nokia 7705/7250 devices.
-Future devices include 1830, 6500, DCP-R, DCP-2, CES, RLS, PSI
+Future devices will include 1830, 6500, DCP-R, DCP-2, CES, RLS, PSI product lines
 
 ## Table of Contents
 
