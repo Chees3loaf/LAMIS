@@ -159,6 +159,26 @@ class InventoryGUI:
         
         return combined_df
 
+    def copy_sheet(self, source_sheet, target_wb, new_sheet_name):
+    
+        # Copies an entire sheet from one workbook to another while preserving formatting.
+        
+        new_sheet = target_wb.create_sheet(title=new_sheet_name)
+
+        for row in source_sheet.iter_rows():
+            for cell in row:
+                new_sheet[cell.coordinate].value = cell.value  # ✅ Copy cell values
+
+                # ✅ Copy formatting
+                if cell.has_style:
+                    new_sheet[cell.coordinate].font = cell.font
+                    new_sheet[cell.coordinate].border = cell.border
+                    new_sheet[cell.coordinate].fill = cell.fill
+                    new_sheet[cell.coordinate].number_format = cell.number_format
+                    new_sheet[cell.coordinate].protection = cell.protection
+                    new_sheet[cell.coordinate].alignment = cell.alignment
+
+        return new_sheet
         
     def output_to_excel(self, outputs, db_file, output_file, customer="", project="", customer_po="", sales_order=""):
         
@@ -280,26 +300,7 @@ class InventoryGUI:
             if conn:
                 conn.close()
 
-    def copy_sheet(self, source_sheet, target_wb, new_sheet_name):
     
-        # Copies an entire sheet from one workbook to another while preserving formatting.
-        
-        new_sheet = target_wb.create_sheet(title=new_sheet_name)
-
-        for row in source_sheet.iter_rows():
-            for cell in row:
-                new_sheet[cell.coordinate].value = cell.value  # ✅ Copy cell values
-
-                # ✅ Copy formatting
-                if cell.has_style:
-                    new_sheet[cell.coordinate].font = cell.font
-                    new_sheet[cell.coordinate].border = cell.border
-                    new_sheet[cell.coordinate].fill = cell.fill
-                    new_sheet[cell.coordinate].number_format = cell.number_format
-                    new_sheet[cell.coordinate].protection = cell.protection
-                    new_sheet[cell.coordinate].alignment = cell.alignment
-
-        return new_sheet
 
 
     def generate_packing_slips(self, processed_data, file_path, ip_list, customer, project, customer_po, sales_order):

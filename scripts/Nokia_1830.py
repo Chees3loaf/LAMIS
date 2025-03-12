@@ -9,9 +9,7 @@ import paramiko
 import subprocess
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
-import serial
 from script_interface import BaseScript, CommandTracker
-import telnetlib
 
 # Ensure logging is configured
 logging.basicConfig(level=logging.DEBUG)
@@ -19,184 +17,92 @@ logging.basicConfig(level=logging.DEBUG)
 db_path = os.path.join(os.path.dirname(__file__), "data", "network_inventory.db")
 
 class Script:
-    def __init__(self, db_name='network_inventory.db', connection_type='serial', command_tracker=None, **kwargs):
+    def __init__(self, db_name='network_inventory.db', command_tracker=None, **kwargs):
         self.db_name = db_name
-        self.connection_type = connection_type
-        self.command_tracker = command_tracker or CommandTracker()  # Initialize with a tracker or use a provided one
-        if connection_type == 'serial':
-            self.serial_port = kwargs.get('serial_port')
-            self.baud_rate = kwargs.get('baud_rate')
-            self.timeout = kwargs.get('timeout', 5)  # Increase timeout to 5 seconds
-        elif connection_type == 'telnet':
-            self.ip_address = kwargs.get('ip_address')
-            self.username = kwargs.get('username')
-            self.password = kwargs.get('password')
+        self.command_tracker = command_tracker or CommandTracker()
+        # 🔹 Hardcoded IP for standalone testing
+        self.ip_address = "172.21.113.161"  # This replaces kwargs.get('ip_address')
+        self.username = kwargs.get('username', 'admin')
+        self.password = kwargs.get('password', 'admin')
 
     def get_commands(self) -> List[str]:
         return [
             'show general name',
             'show shelf inventory *',
-            'show interface inventory *',
             'show card inventory *',
+            'show interface inventory *',
         ]
 
     def execute_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         """
-        Executes a list of commands using the specified connection type.
-        Tracks commands to ensure they are only executed once per device.
+        Executes a list of commands using SSH, ensuring proper login using 'cli'.
+        Captures the full output of all executed commands.
         """
         outputs = []
+        full_output = ""
 
-        for command in commands:
-            if self.command_tracker.has_executed(self.ip_address, command, self.connection_type):
-                logging.info(f"Skipping previously executed command: {command}")
-                continue  # Skip commands already executed for this device
-
-            if self.connection_type == 'serial':
-                output, error = self.execute_serial_commands(command)
-            elif self.connection_type == 'telnet':
-                output, error = self.execute_telnet_command(command)
-            else:
-                error = f"Invalid connection type: {self.connection_type}"
-                output = None
-
-            if error:
-                logging.error(f"Error executing command '{command}': {error}")
-                outputs.append(None)
-            else:
-                outputs.append(output)
-                # Pass self.connection_type to mark_as_executed
-                self.command_tracker.mark_as_executed(self.ip_address, command, self.connection_type)
-
-        return outputs, None if all(outputs) else "Some commands failed"
-
-
-    def telnet_login(self, tn: telnetlib.Telnet) -> bool:
-        """
-        Handles the Telnet login sequence and verifies credentials.
-        """
         try:
-            # Send initial login command
-            logging.debug("Starting Telnet login sequence.")
-            tn.read_until(b"login: ", timeout=5)
-            tn.write(b"cli\n")
-            logging.debug("Sent 'cli' for initial login prompt.")
+            ssh_client = paramiko.SSHClient()
+            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh_client.connect(self.ip_address, username=self.username, password=self.password, look_for_keys=False, allow_agent=False, timeout=10)
+            
+            # ✅ Add keepalive to prevent unexpected SSH disconnection
+            ssh_client.get_transport().set_keepalive(10)
+            
+            session = ssh_client.invoke_shell()
+            time.sleep(1)  # Allow the session to initialize
+            
+            # Ensure login using 'cli' if needed
+            session.send("cli\n")
+            time.sleep(1)
+            session.send(f"{self.username}\n")
+            time.sleep(1)
+            session.send(f"{self.password}\n")
+            time.sleep(1)
+            
+            for command in commands:
+                if self.command_tracker.has_executed(self.ip_address, command, "ssh"):
+                    logging.info(f"Skipping previously executed command: {command}")
+                    outputs.append("Skipped")  # Store skipped commands for tracking
+                    continue
 
-            # Provide credentials
-            tn.read_until(b"Username: ", timeout=5)
-            tn.write(self.username.encode('ascii') + b"\n")
-            tn.read_until(b"Password: ", timeout=5)
-            tn.write(self.password.encode('ascii') + b"\n")
-            time.sleep(1)  # Allow time for login response
+                logging.debug(f"Executing SSH command on {self.ip_address}: {command}")
+                session.send(command + "\n")
+                time.sleep(2)
 
-            # Check login response
-            login_response = tn.read_very_eager().decode('ascii')
-            if "Login incorrect" in login_response or "invalid" in login_response.lower():
-                logging.error("Telnet login failed: Invalid credentials.")
-                return False
+                output = ""
+                start_time = time.time()
 
-            logging.info("Telnet login successful.")
-            return True
-        except Exception as e:
-            logging.error(f"Telnet login sequence failed: {e}")
-            return False
-
-
-    def execute_telnet_command(self, command: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Executes a single command via Telnet using the specific login sequence.
-        """
-        try:
-            logging.info(f"Connecting to {self.ip_address} via Telnet...")
-            tn = telnetlib.Telnet(self.ip_address, timeout=10)  # Telnet connection with 10s timeout
-
-            # Verify login before executing any commands
-            if not self.telnet_login(tn):
-                tn.close()
-                return None, "Telnet login failed."
-
-            # Execute the command
-            logging.info(f"Successfully logged in via Telnet. Executing command: {command}")
-            tn.write(command.encode('ascii') + b"\n")
-            time.sleep(2)  # Wait for output to stabilize
-
-            # Read and capture the command output
-            output = self.capture_full_output_telnet(tn)
-            if not output:
-                logging.warning(f"No output received for command: {command}")
-
-            tn.write(b"exit\n")  # Exit Telnet session
-            tn.close()
-            return output, None
-
-        except Exception as e:
-            logging.error(f"Telnet connection failed: {e}")
-            return None, str(e)
-
-
-    def capture_full_output_telnet(self, tn: telnetlib.Telnet) -> str:
-        """
-        Reads the full output from a Telnet session after a command is sent.
-        """
-        output = ""
-        try:
-            while True:
-                chunk = tn.read_very_eager().decode('ascii')  # Read available output
-                if chunk:
-                    output += chunk
+                while True:
+                    if session.recv_ready():
+                        chunk = session.recv(1024).decode('utf-8')
+                        if not chunk:
+                            break
+                        output += chunk
+                    elif time.time() - start_time > 10:  # Timeout after 10 seconds
+                        logging.warning(f"SSH response timeout for command: {command}")
+                        break
+                    else:
+                        time.sleep(1)  # Wait for more data
+                
+                full_output += f"\nCommand: {command}\n{output}\n"
+                
+                if not output:
+                    logging.warning(f"No output received for command: {command}")
+                    outputs.append(None)
                 else:
-                    break  # Exit when no more data is available
-            return output.strip()
-        except Exception as e:
-            logging.error(f"Error capturing Telnet output: {e}")
-            return ""
-
-    def execute_serial_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
-        try:
-            with serial.Serial(self.serial_port, self.baud_rate, timeout=self.timeout) as ser:
-                logging.info(f"Connected to serial port {self.serial_port}")
-
-                outputs = []
-                for command in commands:
-                    output = self.capture_full_output_serial(ser, command)
-                    if output is None:
-                        error_message = f"Failed to execute command: {command}"
-                        logging.error(error_message)
-                        return outputs, error_message
                     outputs.append(output)
+                    self.command_tracker.mark_as_executed(self.ip_address, command, "ssh")
 
-                return outputs, None
-
+            ssh_client.close()
+            logging.debug(f"Full session output:\n{full_output}")
         except Exception as e:
-            logging.error(f"Serial connection failed: {e}")
+            logging.error(f"SSH connection failed: {e}")
             return [], str(e)
 
-    def capture_full_output_serial(self, ser, command: str) -> str:
-        try:
-            logging.info(f"Executing command: {command}")
-            ser.write((command + '\n').encode())
+        return outputs, full_output if all(outputs) else "Some commands failed"
 
-            output = ""
-            while True:
-                time.sleep(1)
-                chunk = ser.read(ser.in_waiting or 1).decode('utf-8')
-                logging.debug(f"Read chunk: {chunk}")  # Debugging output
-                if chunk:
-                    output += chunk
-                if "Press any key to continue" in chunk:
-                    ser.write(b' ')
-                    output = output.replace("Press any key to continue (Q to quit)", "")
-                    time.sleep(2)
-                if ser.in_waiting == 0:
-                    break
 
-            logging.debug(f"Output: {output}")
-
-            return output
-
-        except Exception as e:
-            logging.error(f"Exception in executing command: {e}")
-            return None
     
     def get_part_description(self, part_number: str) -> str:
         """
@@ -696,108 +602,29 @@ class Script:
     
         return combined_df
                       
-    def output_to_excel(
-        self,
-        outputs: Dict[str, Dict[str, Dict]],
-        template_file: str,
-        output_file: str,
-        db_file: str,
-        customer: str = '',
-        project: str = '',
-        sales_order: str = '',
-        customer_po: str = ''
-    ) -> None:
-        """
-        Writes processed data to an Excel file using a provided template, with metadata from GUI inputs.
-        """
-        conn = None
-        try:
-            # Resolve template path
-            template_path = os.path.abspath(template_file)
-            if not os.path.exists(template_path):
-                raise FileNotFoundError(f"Template file not found at {template_path}")
+# ✅ Standalone execution for validation
+if __name__ == "__main__":
+    """
+    Allows direct execution of this script from CMD for validation.
+    """
+    script = Script()
+    commands = script.get_commands()
+    results, full_output = script.execute_commands(commands)
 
-            # Load the template workbook
-            wb = load_workbook(template_path)
-            sheet = wb.active  # Assuming the first sheet is the template
+    print("\n--- SSH SESSION OUTPUT ---\n")
+    print(full_output)
 
-            # Open the SQLite database
-            conn = sqlite3.connect(db_file)
-            cursor = conn.cursor()
+    # ✅ Process outputs and extract structured data
+    parsed_data = {}
 
-            logging.info(f"Starting Excel output for {len(outputs)} devices.")
-            for ip, data_dict in outputs.items():
-                try:
-                    logging.info(f"Processing data for IP {ip}.")
-                    combined_df = self.combine_and_format_data(data_dict)  # Prepare combined data for each IP
-                    if combined_df.empty:
-                        logging.warning(f"No data to write for IP {ip}")
-                        continue
+    if results:
+        parsed_data['system_name'] = script.extract_system_name(results[0])
+        parsed_data['shelf_inventory'] = script.extract_shelf_inventory(results[1])
+        parsed_data['card_inventory'] = script.extract_card_inventory(results[2])
+        parsed_data['interface_inventory'] = script.extract_interface_inventory(results[3])
 
-                    # Sanitize and validate system name for sheet title
-                    system_name = combined_df.iloc[0].get('System Name', '').strip()
-                    if not system_name:
-                        system_name = f"System_{ip.replace('.', '_')}"
+        # ✅ Combine all parsed data into a single DataFrame
+        final_df = script.combine_and_format_data(parsed_data)
 
-                    # Replace invalid characters and truncate to 31 characters (Excel constraints)
-                    system_name = system_name.replace(':', '_').replace('/', '_')[:31]
-
-                    logging.info(f"Creating sheet for system '{system_name}' with {len(combined_df)} rows.")
-
-                    # Create and reference the new sheet
-                    new_sheet = wb.copy_worksheet(sheet)
-                    new_sheet.title = system_name
-
-                    # Populate metadata (user-defined fields and static fields)
-                    new_sheet['F6'] = combined_df.iloc[0].get('System Name', '')
-                    new_sheet['F7'] = combined_df.iloc[0].get('System Type', '')
-                    new_sheet['C5'] = customer
-                    new_sheet['F5'] = combined_df.iloc[0].get('Source', '')
-                    new_sheet['C6'] = project
-                    new_sheet['D7'] = sales_order
-                    new_sheet['C7'] = customer_po
-
-                    # Populate equipment details (row by row, starting at row 15)
-                    start_row = 15
-                    for idx, row in combined_df.iterrows():
-                        row_num = start_row + idx
-                        part_number = row.get('Part Number', row.get('Model Number', ''))
-
-                        # Fetch description from SQLite database using part number
-                        description = ''
-                        if part_number:
-                            cursor.execute("SELECT description FROM parts WHERE part_number = ?", (part_number,))
-                            result = cursor.fetchone()
-                            if result:
-                                description = result[0]
-
-                        # Write data into the Excel sheet
-                        new_sheet[f'B{row_num}'] = row.get('Name', '')
-                        new_sheet[f'C{row_num}'] = row.get('Type', '')
-                        new_sheet[f'D{row_num}'] = part_number
-                        new_sheet[f'E{row_num}'] = row.get('Serial Number', '')
-                        new_sheet[f'F{row_num}'] = description
-
-                except Exception as e:
-                    logging.error(f"Failed to process data for IP {ip}. Error: {e}")
-
-            # Remove the original template sheet
-            wb.remove(sheet)
-
-            # Save the workbook
-            wb.save(output_file)
-            logging.info(f"Data successfully saved to {output_file}")
-
-            # Open the file (platform-specific handling)
-            if os.name == 'nt':  # Windows
-                subprocess.run(["start", output_file], check=True, shell=True)
-            else:  # macOS/Linux
-                subprocess.run(["open", output_file], check=True, shell=True)
-
-        except Exception as e:
-            logging.error(f"Failed to save data to Excel: {e}")
-            messagebox.showerror("Export Error", f"Failed to save Excel file:\n{e}")
-        finally:
-            # Close the SQLite connection
-            if conn:
-                conn.close()
+        print("\n--- Extracted System Info ---\n")
+        print(final_df.to_string(index=False))  # ✅ Print final DataFrame
