@@ -1,66 +1,133 @@
 import logging
+import time
 import paramiko
 import re
+import telnetlib
+from queue import Queue
+from paramiko.ssh_exception import AuthenticationException
 from scripts.Nokia_SAR import Script as Sar
 from scripts.Nokia_IXR import Script as Ixr
-from scripts.Nokia_1830 import Script as Pss
+from Nokia_1830 import Script as Pss
 
 # Configure logging with a debug flag
 debug_mode = False  # Toggle this for verbose logging
 logging.basicConfig(level=logging.DEBUG if debug_mode else logging.INFO)
 
 class DeviceIdentifier:
-    def identify_device(self, ip, queue):
-        
-        # Identifies the device type and name based on command output.
-        
-        username, password = 'admin', 'admin'
-        logging.debug(f"Attempting to identify device at {ip} with SSH.")
-        
-        try:
-            ssh_client = paramiko.SSHClient()
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh_client.connect(ip, username=username, password=password, look_for_keys=False, allow_agent=False, timeout=10)
+    def __init__(self, username='admin', password='admin'):
+        self.username = username
+        self.password = password
 
-            session = ssh_client.invoke_shell()
-            command = "show chassis | match (Type) pre-lines 1 expression"
-            logging.debug(f"Executing SSH command on {ip}: {command}")
-            session.send(command + '\n')
-            
+    def identify_device(self, ip, queue):
+        logging.debug(f"Attempting SSH device ID at {ip}")
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(ip, username=self.username, password=self.password, look_for_keys=False, allow_agent=False, timeout=10)
+
+            session = ssh.invoke_shell()
+            time.sleep(1)
+            session.send("show chassis | match (Type) pre-lines 1 expression\n")
+            time.sleep(2)
+
             output = ""
+            end_time = time.time() + 3
+            while time.time() < end_time:
+                if session.recv_ready():
+                    output += session.recv(1024).decode('utf-8')
+                else:
+                    time.sleep(0.1)
+
+            queue.put(f"Response from {ip} (SSH primary):\n{output}")
+            logging.debug(output)
+
+            device_type, device_name, product_type = self.parse_device_info(output)
+            if device_type or product_type:
+                ssh.close()
+                return device_type or product_type, device_name, product_type
+
+            session.send("show general system-identification\n")
+            time.sleep(2)
+
+            fallback_output = ""
             while session.recv_ready():
-                output += session.recv(1024).decode('utf-8')
-            
-            ssh_client.close()
-            
-            if output:
-                queue.put(f"Received response from {ip} via SSH: {output}\n")
-                logging.debug(f"Raw output from SSH: {output}")
-                return self.parse_device_info(output)
+                fallback_output += session.recv(1024).decode('utf-8')
+
+            queue.put(f"Response from {ip} (SSH fallback):\n{fallback_output}")
+            logging.debug(fallback_output)
+            ssh.close()
+            return self.parse_device_info(fallback_output)
+
+        except AuthenticationException as ae:
+            logging.warning(f"SSH authentication failed for {ip}: {ae}. Triggering Telnet fallback.")
+            return self.identify_device_telnet(ip, queue)
         except Exception as e:
-            logging.warning(f"SSH connection failed for {ip}: {e}")
-        
-        return None, None
+            logging.warning(f"SSH failed for {ip}: {e}, trying Telnet...")
+            return self.identify_device_telnet(ip, queue)
+
+    def identify_device_telnet(self, ip, queue):
+        try:
+            tn = telnetlib.Telnet(ip, timeout=10)
+
+            if not self.telnet_login(tn):
+                tn.close()
+                return None, None, None
+
+            tn.write(b"show general system-identification\n")
+            time.sleep(3)
+            output = tn.read_until(b"#", timeout=10).decode('ascii')
+            tn.write(b"exit\n")
+            tn.close()
+
+            queue.put(f"Response from {ip} (Telnet):\n{output}")
+            logging.debug(output)
+            return self.parse_device_info(output)
+
+        except Exception as e:
+            logging.error(f"Telnet failed for {ip}: {e}")
+            return None, None, None
+
+    def telnet_login(self, tn: telnetlib.Telnet) -> bool:
+        # Handles Telnet login process
+        try:
+            tn.read_until(b"login: ", timeout=5)
+            tn.write(b"cli\n")
+            tn.read_until(b"Username: ", timeout=5)
+            tn.write(self.username.encode('ascii') + b"\n")
+            tn.read_until(b"Password: ", timeout=5)
+            tn.write(self.password.encode('ascii') + b"\n")
+            time.sleep(1)
+            response = tn.read_very_eager().decode('ascii')
+            if "Login incorrect" in response or "invalid" in response.lower():
+                logging.error("Telnet login failed: Invalid credentials.")
+                return False
+            logging.info("Telnet login successful.")
+            return True
+        except Exception as e:
+            logging.error(f"Telnet login failed: {e}")
+            return False
 
     @staticmethod
     def parse_device_info(output):
         
-        # Extracts both 'Type' and 'Name' from the command output.
+        # Extracts data from the command outputs
         
         try:
             type_match = re.search(r"Type\s+:\s+(.+)", output)
             name_match = re.search(r"Name\s+:\s+(.+)", output)
+            product_match = re.search(r"Product\s+:\s+(\d+)", output)
 
             device_type = type_match.group(1).strip() if type_match else None
             device_name = name_match.group(1).strip() if name_match else None
+            product_type = product_match.group(1).strip() if product_match else None
 
-            if not device_type or not device_name:
+            if not (device_type or product_type):
                 logging.warning(f"Incomplete device info found in output: {output}")
 
-            return device_type, device_name
+            return device_type, device_name, product_type
         except Exception as e:
             logging.error(f"Error parsing device info: {e}")
-            return None, None
+            return None, None, None
 
 
 class ScriptSelector:
