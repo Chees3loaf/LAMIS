@@ -252,7 +252,7 @@ class InventoryGUI:
                     logging.error(f"Failed to process data for IP {ip}. Error: {e}")
 
             if len(wb.sheetnames) > 1:
-                wb.remove(sheet)
+                wb.remove(sheet)                                                                                                                                                                                                                                                                                                                                                                                                                
             
             save_dir = os.path.dirname(output_file)
             os.makedirs(save_dir, exist_ok=True)
@@ -509,11 +509,10 @@ class InventoryGUI:
     def run_script(self):
         self.outputs.clear()
         self.update_status("Running...")
-
-        queue = Queue()
-
+        
         # Generate default filename with timestamp
-        default_filename = f"LAMIS_Output_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+        default_filename = ""
+        queue = Queue()
 
         # Get user inputs from a single input popup
         user_inputs = self.get_user_inputs(default_filename)
@@ -535,11 +534,15 @@ class InventoryGUI:
         sales_order = user_inputs["Sales Order"]
         filename = user_inputs["Filename"]
 
-        # Validate filename (remove invalid characters)
+        # Sanitize user-provided filename
         filename = "".join(c for c in filename if c.isalnum() or c in (" ", "_", "-")).strip()
         if not filename:
             messagebox.showerror("Input Error", "Invalid filename entered.")
             return
+
+        # Append metadata to filename
+        timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
+        final_filename = f"{filename}_{customer}_{project}_Inventory_{timestamp}"
 
         # Ask user for save folder
         save_folder = filedialog.askdirectory(title="Select Save Location")
@@ -549,14 +552,16 @@ class InventoryGUI:
             save_folder = os.getcwd()
 
         # Ensure filename is unique
-        base_path = os.path.normpath(os.path.join(save_folder, f"{filename}.xlsx"))
+        base_path = os.path.normpath(os.path.join(save_folder, f"{final_filename}.xlsx"))
         counter = 1
         self.output_file = base_path
 
         while os.path.exists(self.output_file):
-            self.output_file = os.path.join(save_folder, f"{filename}_{counter}.xlsx")
+            self.output_file = os.path.join(save_folder, f"{final_filename}_{counter}.xlsx")
             counter += 1
+        
 
+        
         # Get user input from the GUI
         pod_1 = self.pod_var_1.get()
         pod_2 = self.pod_var_2.get()
@@ -602,10 +607,10 @@ class InventoryGUI:
         # Identify the device and run the appropriate script
         for ip in reachable_ips:
             device_type, device_name = device_identifier.identify_device(ip, queue, self.output_screen)
-            script_class = script_selector.select_script(device_type, ip)
+            script_instance = script_selector.select_script(device_type, ip)
 
-            if script_class:
-                self.task_queue.put((ip, script_class))
+            if script_instance:
+                self.task_queue.put((ip, script_instance))
 
         self.process_task_queue(queue)
         self.update_gui_from_queue(queue)
@@ -633,30 +638,25 @@ class InventoryGUI:
         # Show success message
         self.output_screen.insert(tk.END, f"Report saved successfully as:\n{self.output_file}\n")
         self.output_screen.see(tk.END)  # Auto-scroll to the latest log
+        self.stop_threads = True
+        self.update_status("Ready")
+        messagebox.showinfo("System Ready")
 
 
     def process_task_queue(self, queue):
-        # Processes the task queue and executes commands on each device
         while not self.task_queue.empty():
-            ip, script_class = self.task_queue.get()
+            ip, script_instance = self.task_queue.get()
             try:
-                # Initialize the script for the device
-                script_instance = script_class(connection_type='ssh', ip_address=ip, username='admin', password='admin')
-
-
-                # Get commands to execute
                 commands = script_instance.get_commands() or []
                 if not commands:
                     queue.put(f"No commands available for {ip}, skipping execution.")
                     continue
 
-                # Execute the commands
                 outputs, error = script_instance.execute_commands(commands)
                 if error:
                     queue.put(f"Error executing commands on {ip}: {error}")
-                    continue  # Skip further processing if an error occurred
+                    continue
 
-                # Process and store the outputs
                 if outputs:
                     if hasattr(script_instance, "process_outputs"):
                         script_instance.process_outputs(outputs, ip, self.outputs)
@@ -669,17 +669,17 @@ class InventoryGUI:
             except Exception as e:
                 queue.put(f"Error processing {ip}: {e}")
 
-        self.update_gui_from_queue(queue)  # Ensure GUI updates with results
+        self.update_gui_from_queue(queue)
 
     def update_gui_from_queue(self, queue):
-        while not queue.empty():
-            try:
-                message = queue.get_nowait()
-                self.output_screen.insert(tk.END, message + '\n')
-                self.output_screen.see(tk.END)
-            except queue.Empty:
-                break  # Prevents crashing when the queue is unexpectedly empty
-    
+            while not queue.empty():
+                try:
+                    message = queue.get_nowait()
+                    self.output_screen.insert(tk.END, message + '\n')
+                    self.output_screen.see(tk.END)
+                except queue.Empty:
+                    break  # Prevents crashing when the queue is unexpectedly empty
+        
     def pause_program(self):
         with self.lock:
             self.is_paused = not self.is_paused

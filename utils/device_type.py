@@ -7,7 +7,7 @@ from queue import Queue
 from paramiko.ssh_exception import AuthenticationException
 from scripts.Nokia_SAR import Script as Sar
 from scripts.Nokia_IXR import Script as Ixr
-from Nokia_1830 import Script as Pss
+from scripts.Nokia_1830 import Script as Pss
 
 # Configure logging with a debug flag
 debug_mode = False  # Toggle this for verbose logging

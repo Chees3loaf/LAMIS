@@ -15,7 +15,7 @@ import telnetlib
 # Ensure logging is configured
 logging.basicConfig(level=logging.DEBUG)
 
-db_path = os.path.join(os.path.dirname(__file__), "data", "network_inventory.db")
+db_path = os.path.join(os.path.dirname(__file__),"..", "data", "network_inventory.db")
 
 class Script:
     def __init__(self, db_name='network_inventory.db', connection_type='telnet', command_tracker=None, **kwargs):

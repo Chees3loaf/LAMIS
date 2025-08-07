@@ -30,8 +30,8 @@ class Script(BaseScript):
             self.timeout = kwargs.get('timeout', 5)  # Increase timeout to 5 seconds
         elif connection_type == 'ssh':
             self.ip_address = kwargs.get('ip_address')
-            self.username = kwargs.get('username')
-            self.password = kwargs.get('password')
+            self.username = kwargs.get('username', 'admin')
+            self.password = kwargs.get('password', 'admin')
 
     def get_commands(self) -> List[str]:
         return [
