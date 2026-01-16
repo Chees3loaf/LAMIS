@@ -8,28 +8,44 @@ import pandas as pd
 import subprocess
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
-from script_interface import BaseScript, CommandTracker, DatabaseCache
+from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
 import telnetlib
 
 
 # Ensure logging is configured
 logging.basicConfig(level=logging.DEBUG)
 
-db_path = os.path.join(os.path.dirname(__file__),"..", "data", "network_inventory.db")
-
 class Script:
-    def __init__(self, db_name='network_inventory.db', connection_type='telnet', command_tracker=None, **kwargs):
-        db_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "data", db_name))
-        if not os.path.exists(db_path):
-            raise FileNotFoundError(f"Database file missing at: {db_path}")
-        self.db_cache = DatabaseCache(db_path)
+    def __init__(self, *,                       # <- make these keyword-only to avoid mixups
+                 connection_type='telnet',
+                 command_tracker=None,
+                 ip_address,
+                 username='admin',
+                 password='admin',
+                 timeout=5,
+                 db_path=None,
+                 db_cache=None):
+        # --- DB wiring ---
+        if db_cache is not None:
+            self.db_cache = db_cache
+            self.db_path = db_cache.db_path
+        else:
+            if db_path is None:
+                db_path = get_inventory_db_path()   # final fallback
+            db_path = os.path.abspath(db_path)
+            if not os.path.exists(db_path):
+                raise FileNotFoundError(f"Database file missing at: {db_path}")
+            self.db_cache = DatabaseCache(db_path)
+            self.db_path = db_path
+
+        # --- misc wiring ---
         self.connection_type = connection_type
-        self.command_tracker = command_tracker or CommandTracker()
+        self.command_tracker = command_tracker or get_tracker()
         self.telnet = None
-        self.ip_address = kwargs.get('ip_address')
-        self.username = kwargs.get('username', 'admin')
-        self.password = kwargs.get('password', 'admin')
-        self.timeout = kwargs.get('timeout', 5)
+        self.ip_address = ip_address
+        self.username = username
+        self.password = password
+        self.timeout = timeout
 
         if not self.ip_address:
             raise ValueError("Missing required 'ip_address' for network-based connection.")

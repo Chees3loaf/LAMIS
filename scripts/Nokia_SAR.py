@@ -1,37 +1,54 @@
-import datetime
 import os
 import sqlite3
 import logging
 import re
 import time
-from tkinter import filedialog, messagebox
 import pandas as pd
 import paramiko
-import subprocess
-from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 import serial
-from script_interface import BaseScript
+from script_interface import BaseScript, DatabaseCache, get_inventory_db_path, get_tracker
 
 # Ensure logging is configured
 logging.basicConfig(level=logging.DEBUG)
 
-db_path = os.path.join(os.path.dirname(__file__),"..", "data", "network_inventory.db")
-
 class Script(BaseScript):
-    def __init__(self, db_name='network_inventory.db', connection_type='serial', **kwargs):
-        self.db_name = db_name
+    def __init__(self, *,
+                 db_path=None,
+                 db_cache=None,
+                 connection_type='serial',
+                 serial_port=None,
+                 baud_rate=None,
+                 timeout=5,
+                 ip_address=None,
+                 username='admin',
+                 password='admin',
+                 command_tracker=None):
+        # DB wiring
+        if db_cache is not None:
+            self.db_cache = db_cache
+            self.db_path = db_cache.db_path
+            self.command_tracker = command_tracker or get_tracker()
+        else:
+            if db_path is None:
+                db_path = get_inventory_db_path()
+            self.db_path = os.path.abspath(db_path)
+            self.db_cache = DatabaseCache(self.db_path)
+
+        # Connection params
         self.connection_type = connection_type
+        self.serial_port = serial_port
+        self.baud_rate = baud_rate
+        self.timeout = timeout
+        self.ip_address = ip_address
+        self.username = username
+        self.password = password
         self.device_name = None
         self.device_type = None
-        if connection_type == 'serial':
-            self.serial_port = kwargs.get('serial_port')
-            self.baud_rate = kwargs.get('baud_rate')
-            self.timeout = kwargs.get('timeout', 5)  # Increase timeout to 5 seconds
-        elif connection_type == 'ssh':
-            self.ip_address = kwargs.get('ip_address')
-            self.username = kwargs.get('username', 'admin')
-            self.password = kwargs.get('password', 'admin')
+
+    def get_part_description(self, part_number: str) -> str:
+        # Use the shared cache
+        return self.db_cache.lookup_part((part_number or "")[:10])
 
     def get_commands(self) -> List[str]:
         return [
@@ -164,35 +181,6 @@ class Script(BaseScript):
         except Exception as e:
             logging.error(f"Exception in executing command: {e}")
             return None
-    
-    def get_part_description(self, part_number: str) -> str:
-        """
-        Fetches the description of a part from the database based on part number.
-        """
-        conn = None
-        try:
-            # Use the globally defined db_path
-            global db_path
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-
-            # Execute query
-            cursor.execute('SELECT description FROM parts WHERE part_number = ?', (part_number,))
-            result = cursor.fetchone()
-
-            # Debug log
-            logging.debug(f"Query result for part_number '{part_number}': {result}")
-
-            return result[0] if result else "Unknown"
-
-        except sqlite3.Error as e:
-            logging.error(f"Database error for part_number '{part_number}': {e}")
-            return f"Database Error: {e}"
-
-        finally:
-            if conn:
-                conn.close()
-
 
 
     def extract_hardware_data(self, output: str, cache_callback: Callable[[pd.DataFrame, str], None], ip: str) -> None:
@@ -206,6 +194,8 @@ class Script(BaseScript):
             if info_match:
                 system_info['System Name'] = info_match.group(1).strip()
                 system_info['System Type'] = info_match.group(2).strip()
+                self.device_name = system_info['System Name']
+                self.device_type = system_info['System Type']
             else:
                 logging.warning("No system information found in the output.")
 
@@ -228,10 +218,13 @@ class Script(BaseScript):
                     # Dynamically classify the component
                     if "dc" in part_type:
                         part_type = "Chassis Fan"
+                        name = "Chassis Fan"
                     elif "fan-v1" in part_type:
                         part_type = "Chassis"
+                        name = "Chassis"
                     else:
                         part_type = "Unknown Component"
+                        name = "Unknown Component"
 
                     # Get part description
                     description = self.get_part_description(part_number)
@@ -244,7 +237,7 @@ class Script(BaseScript):
                         'Part Number': part_number,
                         'Serial Number': serial_number,
                         'Description': description,
-                        'Name': f"{system_info.get('System Name', 'Unknown')} - {part_type.title()}",
+                        'Name': name,
                         'Source': ip
                     })
                 except Exception as match_error:

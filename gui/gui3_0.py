@@ -4,13 +4,15 @@ import logging
 import re
 import shutil
 import sqlite3
+import sys
 import threading
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
-from queue import Queue
+from queue import Empty, Queue
 from tkinter import filedialog
 from typing import Dict
 import time
+from pathlib import Path
 import openpyxl
 from openpyxl.utils import get_column_letter
 from openpyxl.styles import Font
@@ -18,7 +20,8 @@ import pandas as pd
 import script_interface
 
 command_tracker = script_interface.CommandTracker()
-db_cache = script_interface.DatabaseCache(os.path.join(os.path.dirname(__file__), "..", "data", "network_inventory.db"))
+db_cache = script_interface.get_cache()
+DATA_DIR = Path(script_interface.get_inventory_db_path()).resolve().parent
 # Configure logging with a debug flag
 debug_mode = False  # Toggle this for verbose logging
 logging.basicConfig(level=logging.DEBUG if debug_mode else logging.INFO)
@@ -34,9 +37,21 @@ class InventoryGUI:
         self.stop_threads = False
         self.is_paused = False
         self.save_location = None
-        self.db_file = os.path.join(os.path.dirname(__file__), '..', 'data', 'network_inventory.db')
-        self.template_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'Device_Report_Template.xlsx')
-        self.packing_slip_template = os.path.join(os.path.dirname(__file__), '..', 'data', 'LAMIS_Packing_Slip.xlsx')
+        self.db_file = str(DATA_DIR / "network_inventory.db")
+
+        if os.path.isfile(self.db_file):
+            if self.db_cache.db_path != self.db_file:
+                logging.warning(f"[DB] Fixing db_cache path from {self.db_cache.db_path} to {self.db_file}")
+                self.db_cache.db_path = self.db_file
+                # clear any stale cached results tied to the old DB
+                try:
+                    self.db_cache.cache.clear()
+                except Exception:
+                    pass
+        else:
+            logging.error(f"[DB] Expected DB file not found: {self.db_file}")
+        self.template_path = str(DATA_DIR / "Device_Report_Template.xlsx")
+        self.packing_slip_template = str(DATA_DIR / "LAMIS_Packing_Slip.xlsx")
         self.lock = threading.Lock()
 
         # Setup GUI Components
@@ -165,132 +180,209 @@ class InventoryGUI:
         return combined_df
 
         
-    def output_to_excel(self, outputs, db_file, output_file, customer="", project="", customer_po="", sales_order=""):
-        
+    def output_to_excel(self, outputs, output_file, customer="", project="", customer_po="", sales_order=""):
         # Writes processed data to an Excel file using a provided template.
         # Preserves the DataFrame and prompts the user for packing slips.
-        
-        conn = None
+
+        # ----- re-entrancy guard -----
+        if getattr(self, "_export_running", False):
+            logging.warning("[EXCEL] Export already running; skipping duplicate call.")
+            return
+        self._export_running = True
+
+        logging.info("Starting Excel export process...")
         try:
+            # --- Helpers ---------------------------------------------------------
+            def clean_str(v: object) -> str:
+                if v is None:
+                    return ""
+                s = str(v).strip()
+                return "" if s.lower() == "nan" else s
+
+            def nonempty_col(col):
+                if col is None:
+                    return None
+                s = col.astype(str).str.strip()
+                return s.ne("") & s.str.lower().ne("nan")
+
+            def first_nonempty(series, fallback=""):
+                if series is None:
+                    return fallback
+                for v in series:
+                    s = clean_str(v)
+                    if s:
+                        return s
+                return fallback
+
+            # --- Open template ---------------------------------------------------
             if not os.path.exists(self.template_path):
                 raise FileNotFoundError(f"Template file not found at {self.template_path}")
 
+            # if you imported `from openpyxl import load_workbook`, use `load_workbook(...)` instead
+            import openpyxl  # Make sure this import exists somewhere
             wb = openpyxl.load_workbook(self.template_path)
             sheet = wb.active
 
-            conn = sqlite3.connect(db_file)
-            cursor = conn.cursor()
-
+            db_exists = os.path.isfile(self.db_cache.db_path)
+            logging.info(f"[EXCEL] Using DB cache path: {self.db_cache.db_path} (exists={db_exists})")
             logging.info(f"Starting Excel export for {len(outputs)} devices.")
-            
-            processed_data = {}  #  Dictionary to store processed DataFrame
 
+            processed_data = {}
+
+            # --- Build each sheet ------------------------------------------------
             for ip, data_dict in outputs.items():
                 try:
                     logging.info(f"Processing data for IP {ip}.")
                     combined_df = self.combine_and_format_data(data_dict)
-
                     if combined_df.empty:
                         logging.warning(f"No data to write for IP {ip}")
                         continue
 
-                    system_name_raw = combined_df.iloc[0].get('System Name', '')
-                    system_name = str(system_name_raw).strip() if pd.notna(system_name_raw) else f"System_{ip.replace('.', '_')}"
-                    system_name = system_name.replace(":", "_").replace("/", "_")[:31]
-                    
-                    system_type_raw = combined_df.iloc[0].get('System Type', '')
-                    system_type = str(system_type_raw).strip() if pd.notna(system_type_raw) else ""
-                    system_type = system_type.replace(":", "_").replace("/", "_")[:31]
+                    # Header fields (safe + fallbacks)
+                    system_name = clean_str(first_nonempty(
+                        combined_df.get("System Name"),
+                        f"System_{ip.replace('.', '_')}"
+                    ))[:31].replace(":", "_").replace("/", "_")
+
+                    system_type = clean_str(first_nonempty(combined_df.get("System Type"), ""))
+                    if not system_type:
+                        system_type = clean_str(first_nonempty(combined_df.get("Type"), ""))
+                    system_type = system_type[:31].replace(":", "_").replace("/", "_")
+
+                    source_val = clean_str(first_nonempty(combined_df.get("Source"), ""))
 
                     logging.info(f"Creating sheet for system '{system_name}' with {len(combined_df)} rows.")
-
                     new_sheet = wb.copy_worksheet(sheet)
                     new_sheet.title = system_name
 
-                    # Populate User Imputed Data 
+                    # Header/meta cells
                     new_sheet["C5"] = customer
                     new_sheet["C6"] = project
                     new_sheet["C7"] = customer_po
                     new_sheet["D7"] = sales_order
-                    new_sheet["F5"] = combined_df.iloc[0].get("Source", "")
+                    new_sheet["F5"] = source_val
                     new_sheet["F6"] = system_name
                     new_sheet["F7"] = system_type
 
-                    start_row = 15
-                    for idx, row in combined_df.iterrows():
-                        row_num = start_row + idx
-                        part_number = row.get("Part Number", row.get("Model Number", ""))
+                    # Only write rows that look like equipment (have Part or Model)
+                    has_part = combined_df.get("Part Number")
+                    has_model = combined_df.get("Model Number")
 
-                        description = ""
-                        if part_number:
-                            cursor.execute("SELECT description FROM parts WHERE part_number = ?", (part_number,))
-                            result = cursor.fetchone()
-                            if result:
-                                description = result[0]
+                    mask_part = nonempty_col(has_part)
+                    mask_model = nonempty_col(has_model)
 
-                        # Convert "Information Type" to string safely
-                        info_type = str(row.get("Information Type", "")).lower() if row.get("Information Type") is not None else ""
+                    if mask_part is not None and mask_model is not None:
+                        write_df = combined_df[mask_part | mask_model]
+                    elif mask_part is not None:
+                        write_df = combined_df[mask_part]
+                    elif mask_model is not None:
+                        write_df = combined_df[mask_model]
+                    else:
+                        write_df = combined_df.iloc[0:0]
 
-                        # If it's an MDA row, format the Name field properly
-                        name_value = row.get("Name", "")
+                    START_ROW = 15
+                    for i, row in write_df.reset_index(drop=True).iterrows():
+                        row_num = START_ROW + i
+
+                        # Clean values
+                        part_number = clean_str(row.get("Part Number", "")) or clean_str(row.get("Model Number", ""))
+                        info_type = clean_str(row.get("Information Type", "")).lower()
+                        name_value = clean_str(row.get("Name", ""))
+
                         if "mda card" in info_type:
-                            match = re.search(r"\d+", str(name_value))  # Extracts the number safely
+                            match = re.search(r"\d+", name_value)
                             mda_number = match.group() if match else "Unknown"
-                            name_value = f"MDA {mda_number}"  # Format name as "MDA 1", "MDA 5", etc.
+                            name_value = f"MDA {mda_number}"
 
-                        # Insert Data into Excel
+                        type_value = clean_str(row.get("Type", ""))
+                        serial_val = clean_str(row.get("Serial Number", ""))
+
+                        # Skip fully empty rows so first real row is at 15
+                        if not any([name_value, type_value, part_number, serial_val]):
+                            continue
+
+                        # Description lookup (only if DB exists)
+                        description = ""
+                        if part_number and db_exists:
+                            description = self.db_cache.lookup_part(part_number[:10])
+                            if not description or description == "Not Found":
+                                # optional LIKE fallback
+                                try:
+                                    import sqlite3
+                                    with sqlite3.connect(self.db_cache.db_path) as tmpconn:
+                                        tcur = tmpconn.cursor()
+                                        tcur.execute(
+                                            "SELECT description FROM parts WHERE part_number LIKE ?",
+                                            (part_number[:10] + "%",),
+                                        )
+                                        res = tcur.fetchone()
+                                        if res:
+                                            description = res[0]
+                                except Exception as e:
+                                    logging.debug(f"[EXCEL] Fallback DB lookup failed: {e}")
+
+                        # Write to sheet
                         new_sheet[f"B{row_num}"] = name_value
-                        new_sheet[f"C{row_num}"] = row.get("Type", "")
+                        new_sheet[f"C{row_num}"] = type_value
                         new_sheet[f"D{row_num}"] = part_number
-                        new_sheet[f"E{row_num}"] = row.get("Serial Number", "")
+                        new_sheet[f"E{row_num}"] = serial_val
                         new_sheet[f"F{row_num}"] = description
-    
-                    #  Store DataFrame for use in packing slip generation
-                    processed_data[ip] = combined_df
+
+                    processed_data[ip] = write_df
 
                 except Exception as e:
                     logging.error(f"Failed to process data for IP {ip}. Error: {e}")
 
+            # Remove the original template sheet if we created any copies
             if len(wb.sheetnames) > 1:
-                wb.remove(sheet)                                                                                                                                                                                                                                                                                                                                                                                                                
-            
+                wb.remove(sheet)
+
+            # Save (with retry if file is locked)
             save_dir = os.path.dirname(output_file)
             os.makedirs(save_dir, exist_ok=True)
-            
-            # Ensure file isn't locked
+
             while True:
                 try:
                     wb.save(output_file)
-                    # Ensure save directory exists
-                    
                     logging.info(f"Data successfully saved to {output_file}")
                     break
                 except PermissionError:
+                    from tkinter import messagebox
                     logging.warning(f"File is locked: {output_file}")
                     if not messagebox.askretrycancel("File Locked", f"Close '{output_file}' and retry."):
                         return
+                    import time
                     time.sleep(3)
 
-            # Show success message and prompt user for packing slips
+            # Prompt for packing slips using in-memory data
+            from tkinter import messagebox
             user_wants_packing_slips = messagebox.askyesno(
                 "Success",
                 f"Report saved successfully as:\n{output_file}\n\nDo you need packing slips?"
             )
 
-            #  Pass in-memory DataFrame instead of reading from Excel again
             if user_wants_packing_slips:
                 logging.info("User requested packing slips. Generating now...")
-                self.generate_packing_slips(processed_data, output_file, list(outputs.keys()), customer, project, customer_po, sales_order)
+                self.generate_packing_slips(
+                    processed_data,
+                    output_file,
+                    list(outputs.keys()),
+                    customer,
+                    project,
+                    customer_po,
+                    sales_order
+                )
             else:
                 logging.info("User skipped packing slip generation.")
 
         except Exception as e:
             logging.error(f"Failed to save data to Excel: {e}")
+            from tkinter import messagebox
             messagebox.showerror("Export Error", f"Failed to save Excel file:\n{e}")
 
         finally:
-            if conn:
-                conn.close()
+            self._export_running = False
+
 
     def copy_sheet(self, source_sheet, target_wb, new_sheet_name):
     
@@ -618,29 +710,21 @@ class InventoryGUI:
         # **Trigger export automatically after processing**
         self.root.after(100, lambda: self.output_to_excel(
             outputs=self.outputs,
-            db_file=self.db_file,
             output_file=self.output_file,
             customer=customer,
             project=project,
             customer_po=customer_po,
             sales_order=sales_order
         ))
-
-        # Open Excel file after saving
-        try:
-            if os.name == "nt":  # Windows
-                os.startfile(self.output_file)
-            elif os.name == "posix":  # macOS/Linux
-                subprocess.run(["open", self.output_file], check=True)
-        except Exception as e:
-            logging.error(f"Failed to open Excel file: {e}")
-
+        # Redirect console output to the GUI output screen
+        sys.stdout = ConsoleRedirector(self.output_screen)
+        
         # Show success message
         self.output_screen.insert(tk.END, f"Report saved successfully as:\n{self.output_file}\n")
         self.output_screen.see(tk.END)  # Auto-scroll to the latest log
         self.stop_threads = True
         self.update_status("Ready")
-        messagebox.showinfo("System Ready")
+        messagebox.showinfo("System Ready", "The system is ready.")
 
 
     def process_task_queue(self, queue):
@@ -672,13 +756,13 @@ class InventoryGUI:
         self.update_gui_from_queue(queue)
 
     def update_gui_from_queue(self, queue):
-            while not queue.empty():
-                try:
-                    message = queue.get_nowait()
-                    self.output_screen.insert(tk.END, message + '\n')
-                    self.output_screen.see(tk.END)
-                except queue.Empty:
-                    break  # Prevents crashing when the queue is unexpectedly empty
+        while not queue.empty():
+            try:
+                message = queue.get_nowait()
+                self.output_screen.insert(tk.END, message + '\n')
+                self.output_screen.see(tk.END)
+            except Empty:
+                break
         
     def pause_program(self):
         with self.lock:
@@ -706,7 +790,13 @@ class ConsoleRedirector:
 def main():
     logging.info("Starting LAMIS Inventory System")
     root = tk.Tk()
-    app = InventoryGUI(root, update_available=False, command_tracker=script_interface.CommandTracker(), db_cache=script_interface.DatabaseCache("network_inventory.db"))
+    # Reuse the already-created instances
+    app = InventoryGUI(
+        root,
+        update_available=False,
+        command_tracker=command_tracker,
+        db_cache=db_cache
+    )
     root.mainloop()
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ import telnetlib
 from paramiko.ssh_exception import AuthenticationException
 
 # Configure logging with a debug flag
-debug_mode = True  # Toggle this for verbose logging
+debug_mode = False  # Toggle this for verbose logging
 logging.basicConfig(level=logging.DEBUG if debug_mode else logging.INFO)
 
 DEFAULT_PASSWORD = "admin"
@@ -21,7 +21,7 @@ def get_inventory_db_path() -> str:
     try:
         # Always go up to the project root from the current file
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        path = os.path.join(base_dir, "data", "network_inventory.db")
+        path = os.path.join(base_dir,"LAMIS", "data", "network_inventory.db")
         if not os.path.isfile(path):
             raise FileNotFoundError(f"Database file missing at: {path}")
         logging.debug(f"[DB PATH] Resolved database path: {path}")
@@ -98,6 +98,20 @@ class DatabaseCache:
             logging.error(f"[CACHE] DB error on '{key}': {e}")
             self.cache[key] = f"DB Error: {e}"
             return f"DB Error: {e}"
+        
+_CACHE = None
+def get_cache():
+    global _CACHE
+    if _CACHE is None:
+        _CACHE = DatabaseCache(get_inventory_db_path())
+    return _CACHE
+
+_TRACKER = None
+def get_tracker():
+    global _TRACKER
+    if _TRACKER is None:
+        _TRACKER = CommandTracker()
+    return _TRACKER
 
 class DeviceIdentifier:
     def identify_device(self, ip, queue, output_screen):
@@ -259,13 +273,13 @@ class ScriptSelector:
             if script_class:
                 logging.info(f"[SCRIPT SELECTOR] Matched '{normalized_type}' to script: {script_class.__name__}")
                 return script_class(
-                    connection_type=connection_type,
-                    ip_address=ip_address,
-                    username=DEFAULT_USERNAME,      # ✅ required
-                    password=DEFAULT_PASSWORD,      # ✅ required
-                    db_path=get_inventory_db_path(),
-                    command_tracker=CommandTracker()
-                )
+                connection_type=connection_type,
+                ip_address=ip_address,
+                username=DEFAULT_USERNAME,
+                password=DEFAULT_PASSWORD,
+                db_cache=get_cache(),
+                command_tracker=get_tracker()
+            )
             else:
                 logging.warning(f"[SCRIPT SELECTOR] No matching script found for normalized device type: '{normalized_type}'")
                 return None
