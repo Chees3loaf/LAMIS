@@ -1,14 +1,14 @@
 import os
 import logging
 import re
-
+import wexpect
 import sqlite3
 import time
 import pandas as pd
 from wexpect import spawn, EOF, TIMEOUT
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import wexpect
+
 
 db_path = os.path.join(os.path.dirname(__file__), "..", "data", "network_inventory.db")
 

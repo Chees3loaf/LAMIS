@@ -86,8 +86,8 @@ class InventoryGUI:
         right_middle_frame = ttk.Frame(middle_frame)
         right_middle_frame.pack(side=tk.RIGHT, expand=True, padx=10, pady=20)
 
-        pod_options = [f"{100 + i}" for i in range(1, 15)] + ['118']
-
+        pod_options = [f"{100 + i}" for i in range(0, 13)]
+        
         # Pod Selection 1 (Left)
         pod_frame_1 = ttk.LabelFrame(left_middle_frame, text="Pod Selection 1")
         pod_frame_1.pack(fill=tk.X, padx=10, pady=5)
@@ -95,18 +95,18 @@ class InventoryGUI:
         self.pod_var_1 = tk.StringVar()
         self.pod_combobox_1 = ttk.Combobox(pod_frame_1, textvariable=self.pod_var_1, values=pod_options)
         self.pod_combobox_1.pack(side=tk.LEFT, padx=5)
-        self.pod_combobox_1.set('101')
+        self.pod_combobox_1.set('100')
         
-        # IP Selection 1 (Below Pod Selection 1)
+        # IP Selection 1
         ip_frame_1 = ttk.LabelFrame(left_middle_frame, text="IP Selection 1")
         ip_frame_1.pack(fill=tk.X, padx=10, pady=5)
         ip_container_1 = ttk.Frame(ip_frame_1)
         ip_container_1.pack()
-        self.start_ip_label_1 = tk.Label(ip_container_1, text=f"Start IP: 172.21.{self.pod_var_1.get()}.")
+        self.start_ip_label_1 = tk.Label(ip_container_1, text=f"Start IP: 10.9.{self.pod_var_1.get()}.")
         self.start_ip_label_1.pack(side=tk.LEFT)
         self.start_ip_entry_1 = tk.Entry(ip_container_1, width=3, justify='center')
         self.start_ip_entry_1.pack(side=tk.LEFT)
-        self.end_ip_label_1 = tk.Label(ip_container_1, text=f"End IP: 172.21.{self.pod_var_1.get()}.")
+        self.end_ip_label_1 = tk.Label(ip_container_1, text=f"End IP: 10.9.{self.pod_var_1.get()}.")
         self.end_ip_label_1.pack(side=tk.LEFT)
         self.end_ip_entry_1 = tk.Entry(ip_container_1, width=3, justify='center')
         self.end_ip_entry_1.pack(side=tk.LEFT)
@@ -119,37 +119,50 @@ class InventoryGUI:
         self.pod_var_2 = tk.StringVar()
         self.pod_combobox_2 = ttk.Combobox(pod_frame_2, textvariable=self.pod_var_2, values=pod_options)
         self.pod_combobox_2.pack(side=tk.LEFT, padx=5)
-        self.pod_combobox_2.set('101')
+        self.pod_combobox_2.set('100')
         
-        # IP Selection 2 (Below Pod Selection 2)
+        # IP Selection 2
         ip_frame_2 = ttk.LabelFrame(right_middle_frame, text="IP Selection 2")
         ip_frame_2.pack(fill=tk.X, padx=10, pady=5)
         ip_container_2 = ttk.Frame(ip_frame_2)
         ip_container_2.pack()
-        self.start_ip_label_2 = tk.Label(ip_container_2, text=f"Start IP: 172.21.{self.pod_var_2.get()}.")
+        self.start_ip_label_2 = tk.Label(ip_container_2, text=f"Start IP: 10.9.{self.pod_var_2.get()}.")
         self.start_ip_label_2.pack(side=tk.LEFT)
         self.start_ip_entry_2 = tk.Entry(ip_container_2, width=3, justify='center')
         self.start_ip_entry_2.pack(side=tk.LEFT)
-        self.end_ip_label_2 = tk.Label(ip_container_2, text=f"End IP: 172.21.{self.pod_var_2.get()}.")
+        self.end_ip_label_2 = tk.Label(ip_container_2, text=f"End IP: 10.9.{self.pod_var_2.get()}.")
         self.end_ip_label_2.pack(side=tk.LEFT)
         self.end_ip_entry_2 = tk.Entry(ip_container_2, width=3, justify='center')
         self.end_ip_entry_2.pack(side=tk.LEFT)
         self.pod_var_2.trace_add("write", lambda *args: self.update_ip_labels(self.pod_var_2, self.start_ip_label_2, self.end_ip_label_2))
         
-        # Control Buttons below the Pod and IP Selections
+        # ====================== CONTROL FRAME ======================
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill=tk.X, pady=10)
+
+        # Left side: TDS Checkbox
+        self.tds_var = tk.BooleanVar(value=False)
+        self.tds_checkbox = ttk.Checkbutton(
+            control_frame,
+            text="Run Diagnostics",
+            variable=self.tds_var
+        )
+        self.tds_checkbox.pack(side=tk.LEFT, padx=20)
+
+        # Right side: Action buttons
         tk.Button(control_frame, text="Run", command=self.run_script).pack(side=tk.RIGHT, padx=5)
         tk.Button(control_frame, text="Pause", command=self.pause_program).pack(side=tk.RIGHT, padx=5)
         tk.Button(control_frame, text="Abort", command=self.abort_program).pack(side=tk.RIGHT, padx=5)
+
+        # Status label on the far right
         self.status_label = tk.Label(control_frame, text="Status: Ready", anchor="w")
         self.status_label.pack(side=tk.RIGHT, padx=10)
         
     def update_ip_labels(self, pod_var, start_ip_label, end_ip_label):
         # Update IP labels when the pod selection changes
         pod_number = pod_var.get()
-        start_ip_label.config(text=f"Start IP: 172.21.{pod_number}.")
-        end_ip_label.config(text=f"End IP: 172.21.{pod_number}.")
+        start_ip_label.config(text=f"Start IP: 10.9.{pod_number}.")
+        end_ip_label.config(text=f"End IP: 10.9.{pod_number}.")
 
     def update_status(self, message):
         self.status_label.config(text=message)
@@ -408,154 +421,161 @@ class InventoryGUI:
 
     def generate_packing_slips(self, processed_data, file_path, ip_list, customer, project, customer_po, sales_order):
         """
-        Generates a single packing slip workbook.
-        Each device gets its own sheet based on the packing slip template.
+        Generates a single packing slip workbook with one sheet per device.
         """
-
         try:
-            # Load the template
             packing_template_path = self.packing_slip_template
-            logging.debug(f"Loading template: {packing_template_path}")
+            logging.info(f"Loading packing slip template: {packing_template_path}")
 
-            # Copy template to prevent modification of the original
+            if not os.path.exists(packing_template_path):
+                raise FileNotFoundError(f"Packing slip template not found at: {packing_template_path}")
+
+            # Temporary copy of template
             temp_packing_slip = os.path.join(os.getcwd(), "PackingSlip_Temp.xlsx")
             shutil.copy(packing_template_path, temp_packing_slip)
 
-            # Load the copied workbook
             wb_final = openpyxl.load_workbook(temp_packing_slip)
 
-            # Find the packing slip template sheet
-            template_sheet = wb_final["Packing Slip"]  # Ensure this sheet exists
-            if not template_sheet:
-                logging.error("Packing Slip template not found in workbook.")
-                messagebox.showerror("Packing Slip Error", "Packing Slip template sheet not found.")
-                return
+            # Template sheet
+            if "Packing Slip" not in wb_final.sheetnames:
+                raise ValueError(f"'Packing Slip' template sheet not found. Available: {wb_final.sheetnames}")
 
-            # Find the summary sheet
-            summary_sheet_name = next((s for s in wb_final.sheetnames if "summary" in s.lower()), None)
-            if summary_sheet_name:
-                summary_sheet = wb_final[summary_sheet_name]
-                logging.debug(f"Using summary sheet: {summary_sheet_name}")
-            else:
-                error_msg = f"Error: No summary sheet found. Available sheets: {wb_final.sheetnames}"
-                logging.error(error_msg)
-                messagebox.showerror("Packing Slip Error", error_msg)
-                return
+            template_sheet = wb_final["Packing Slip"]
 
-            # Prompt user for save location
-            save_folder = filedialog.askdirectory(title="Select Packing Slip Save Location")
-            if not save_folder:
-                logging.warning("No folder selected, using current directory.")
-                save_folder = os.getcwd()
-
-            # Format the filename
-            filename = f"PackingSlip_{customer}_{project}_{datetime.now().strftime('%Y-%m-%d')}.xlsx"
-            save_path = os.path.join(save_folder, filename)
-            logging.debug(f"Packing slip will be saved to: {save_path}")
-
-            # Write customer details on the summary page
-            summary_sheet["B5"], summary_sheet["B7"] = "Customer", customer
-            summary_sheet["D5"], summary_sheet["D7"] = "Project", project
-            summary_sheet["F5"], summary_sheet["F7"] = "IP Addresses", ", ".join(ip_list)
-
-            logging.debug("Customer details written to summary sheet.")
-
-            # Extract Device Column from processed_data
-            device_column = None
-            for col in processed_data[next(iter(processed_data))].columns:
-                if "system name" in col.lower() or "device id" in col.lower():
-                    device_column = col
+            # Summary sheet
+            summary_sheet = None
+            for name in wb_final.sheetnames:
+                if "summary" in name.lower():
+                    summary_sheet = wb_final[name]
                     break
 
-            if not device_column:
-                error_msg = "Packing slip failed: No 'Device ID' column found in processed data."
-                logging.error(error_msg)
-                messagebox.showerror("Packing Slip Error", error_msg)
-                return
+            if not summary_sheet:
+                raise ValueError(f"No summary sheet found. Available: {wb_final.sheetnames}")
 
-            summary_sheet["H5"], summary_sheet["H7"] = "Device ID", device_column
-            logging.debug(f"Device identifier column found: {device_column}")
+            # Ask for save folder
+            save_folder = filedialog.askdirectory(title="Select Packing Slip Save Location")
+            if not save_folder:
+                save_folder = os.getcwd()
 
-            # Generate Packing Slips for Each Device
-            logging.debug(f"Found {len(processed_data)} devices for packing slips.")
+            # === SAFE FILENAME CREATION ===
+            timestamp = datetime.now().strftime('%Y-%m-%d')
+            safe_customer = re.sub(r'[^a-zA-Z0-9_]', '_', (customer or "Unknown").strip())
+            safe_project = re.sub(r'[^a-zA-Z0-9_]', '_', (project or "Unknown").strip())
+
+            filename = f"PackingSlip_{safe_customer}_{safe_project}_{timestamp}.xlsx"
+            save_path = os.path.join(save_folder, filename)
+
+            logging.info(f"Packing slips will be saved as: {save_path}")
+
+            # Summary sheet info
+            summary_sheet["B5"] = "Customer"
+            summary_sheet["B7"] = customer or ""
+            summary_sheet["D5"] = "Project"
+            summary_sheet["D7"] = project or ""
+            summary_sheet["F5"] = "IP Addresses"
+            summary_sheet["F7"] = ", ".join(ip_list)
+
+            # === Create one sheet per device ===
+            logging.info(f"Generating packing slips for {len(processed_data)} device(s)")
 
             for ip, device_data in processed_data.items():
+                if device_data.empty:
+                    logging.warning(f"No data for {ip} - skipping")
+                    continue
+
+                logging.info(f"Columns for {ip}: {list(device_data.columns)}")   # ← Helpful debug
+
                 try:
-                    device_name = device_data.iloc[0].get(device_column, f"Unknown_{ip}")
-                    logging.debug(f"Creating packing slip for device: {device_name}")
+                    # Get device name
+                    device_name = "Unknown_Device"
+                    for col in device_data.columns:
+                        if any(x in col.lower() for x in ["system name", "name"]):
+                            device_name = str(device_data.iloc[0].get(col, "Unknown_Device"))
+                            break
 
-                    # Duplicate the existing packing slip sheet to retain formatting
+                    device_name_clean = re.sub(r'[^a-zA-Z0-9_]', '_', device_name.strip())[:31]
+
                     new_sheet = wb_final.copy_worksheet(template_sheet)
-                    new_sheet.title = f"{device_name.replace(' ', '_')}"
-                    logging.debug(f"Copied template to create: {new_sheet.title}")
+                    new_sheet.title = device_name_clean
 
-                    # Ensure merged cells are copied
-                    for merged_range in template_sheet.merged_cells.ranges:
-                        new_sheet.merge_cells(str(merged_range))
-                    logging.debug(f"Merged cells copied for {new_sheet.title}")
+                    # Copy merged cells
+                    for merged in template_sheet.merged_cells.ranges:
+                        new_sheet.merge_cells(str(merged))
 
-                    # Assign device-specific values
-                    new_sheet["B5"], new_sheet["C5"] = "Customer", customer
-                    new_sheet["B6"], new_sheet["C6"] = "Project", project
-                    new_sheet["B7"], new_sheet["C7"] = "Device ID", device_name
-                    new_sheet["B14"], new_sheet["B15"] = "Sales Order", sales_order
-                    new_sheet["C14"], new_sheet["C15"] = "Customer PO", customer_po
+                    # Header
+                    new_sheet["B5"] = "Customer"
+                    new_sheet["C5"] = customer or ""
+                    new_sheet["B6"] = "Project"
+                    new_sheet["C6"] = project or ""
+                    new_sheet["B7"] = "Device ID"
+                    new_sheet["C7"] = device_name
+                    new_sheet["B14"] = "Sales Order"
+                    new_sheet["B15"] = sales_order or ""
+                    new_sheet["C14"] = "Customer PO"
+                    new_sheet["C15"] = customer_po or ""
 
-                    # Write each entry to its own row in the packing slip
-                    start_row = 15  # Data starts from this row
+                    # === Write data rows - SAFE VERSION ===
+                    start_row = 15   # ← Confirm this matches your template
 
-                    # Validate Column Names Before Writing Data
-                    try:
-                        part_number_col = device_data.columns.get_loc("Part Number")
-                        serial_number_col = device_data.columns.get_loc("Serial Number")
-                        description_col = device_data.columns.get_loc("Description")
-                    except KeyError as e:
-                        logging.error(f"Column missing in DataFrame: {e}")
-                        messagebox.showerror("Packing Slip Error", f"Missing expected column: {e}")
-                        continue
+                    for idx, row_dict in enumerate(device_data.to_dict('records')):
+                        row_num = start_row + idx
 
-                    for idx, row in enumerate(device_data.itertuples(index=False), start=0):
-                        try:
-                            part_number = row[part_number_col]
-                            serial_number = row[serial_number_col]
-                            description = row[description_col]
-                        except IndexError:
-                            logging.warning(f"Missing data in row {idx}. Skipping row.")
-                            continue
+                        part_number = str(row_dict.get("Part Number", "")).strip()
+                        serial_number = str(row_dict.get("Serial Number", "")).strip()
+                        description = str(row_dict.get("Description", "")).strip()
 
-                        row_num = start_row + idx  # Ensure each entry gets a new row
+                        # Fallback for part number
+                        if not part_number:
+                            part_number = str(row_dict.get("Model Number", "")).strip()
 
-                        # Write to correct columns
-                        new_sheet[f"D{row_num}"] = part_number
-                        new_sheet[f"E{row_num}"] = serial_number
-                        new_sheet[f"F{row_num}"] = description
+                        # Clean NaN values
+                        if part_number.lower() in ("nan", ""): 
+                            part_number = ""
+                        if serial_number.lower() in ("nan", ""): 
+                            serial_number = ""
+                        if description.lower() in ("nan", ""): 
+                            description = ""
 
-                    logging.debug(f"Packing slip for {device_name} added to workbook with {len(device_data)} items.")
+                        # Write row only if there's useful data
+                        if part_number or serial_number or description:
+                            new_sheet[f"B{row_num}"] = sales_order or ""
+                            new_sheet[f"C{row_num}"] = customer_po or ""
+                            new_sheet[f"D{row_num}"] = part_number
+                            new_sheet[f"E{row_num}"] = serial_number
+                            new_sheet[f"F{row_num}"] = description
+                            
 
+                    logging.debug(f"Written {len(device_data)} line items for device '{device_name}' with SO/PO")
+                
                 except Exception as e:
-                    logging.error(f"Failed to create packing slip for {device_name}: {e}")
+                    logging.error(f"Error creating sheet for {ip}: {e}")
 
-            # Ensure Summary Sheet is First
-            sheets = wb_final.sheetnames
-            if summary_sheet_name in sheets:
-                summary_index = sheets.index(summary_sheet_name)
-                wb_final._sheets.insert(0, wb_final._sheets.pop(summary_index))
-                logging.debug("Summary sheet moved to first sheet.")
+            # Move summary to front
+            if summary_sheet.title in wb_final.sheetnames:
+                idx = wb_final.sheetnames.index(summary_sheet.title)
+                wb_final._sheets.insert(0, wb_final._sheets.pop(idx))
 
-            # Remove the template sheet after copying
+            # Remove template sheet
             if "Packing Slip" in wb_final.sheetnames:
                 del wb_final["Packing Slip"]
-                logging.debug("Removed the original Packing Slip template sheet from the final workbook.")
 
-            # Save Workbook
+            # Save
             wb_final.save(save_path)
-            logging.info(f"Packing slips saved to {save_path}")
-            messagebox.showinfo("Packing Slips", f"Packing slips saved successfully as:\n{save_path}")
+            logging.info(f"Packing slips saved successfully: {save_path}")
+            messagebox.showinfo("Success", f"Packing slips saved to:\n{save_path}")
 
         except Exception as e:
             logging.error(f"Failed to generate packing slips: {e}")
-            messagebox.showerror("Packing Slip Error", f"An error occurred while generating packing slips: {e}")
+            messagebox.showerror("Packing Slip Error", f"Error:\n{str(e)}")
 
+        finally:
+            # Cleanup temp file
+            if 'temp_packing_slip' in locals() and os.path.exists(temp_packing_slip):
+                try:
+                    os.remove(temp_packing_slip)
+                except:
+                    pass
+    
     def get_user_inputs(self, default_filename):
         
         #Prompt user for project information in a popup
@@ -677,10 +697,10 @@ class InventoryGUI:
             return
 
         # Generate the list of IPs, ensuring uniqueness
-        ip_list = {f"172.21.{pod_1}.{i}" for i in range(start_ip_1, end_ip_1 + 1)}
+        ip_list = {f"10.9.{pod_1}.{i}" for i in range(start_ip_1, end_ip_1 + 1)}
 
         if start_ip_2 is not None and end_ip_2 is not None and pod_2 != pod_1:
-            ip_list.update(f"172.21.{pod_2}.{i}" for i in range(start_ip_2, end_ip_2 + 1))
+            ip_list.update(f"10.9.{pod_2}.{i}" for i in range(start_ip_2, end_ip_2 + 1))
 
         # Convert set back to list
         ip_list = list(ip_list)
@@ -728,32 +748,51 @@ class InventoryGUI:
 
 
     def process_task_queue(self, queue):
+        import scripts.Ciena_TDS
         while not self.task_queue.empty():
-            ip, script_instance = self.task_queue.get()
+            item = self.task_queue.get()
+            
+            # Unpack original format: (ip, script_instance)
+            ip, script_instance = item
+
             try:
+                # 1. Run normal inventory (your existing logic)
                 commands = script_instance.get_commands() or []
-                if not commands:
-                    queue.put(f"No commands available for {ip}, skipping execution.")
-                    continue
-
-                outputs, error = script_instance.execute_commands(commands)
-                if error:
-                    queue.put(f"Error executing commands on {ip}: {error}")
-                    continue
-
-                if outputs:
-                    if hasattr(script_instance, "process_outputs"):
-                        script_instance.process_outputs(outputs, ip, self.outputs)
+                if commands:
+                    outputs_list, error = script_instance.execute_commands(commands)
+                    if error:
+                        queue.put(f"Error in normal inventory for {ip}: {error}")
+                    elif outputs_list and hasattr(script_instance, "process_outputs"):
+                        script_instance.process_outputs(outputs_list, ip, self.outputs)
+                        queue.put(f"Normal inventory completed for {ip}")
                     else:
-                        queue.put(f"process_outputs() missing in script for {ip}. Skipping output processing.")
-                    queue.put(f"Processing completed for {ip}")
-                else:
-                    queue.put(f"No output received from {ip}")
+                        queue.put(f"No output from normal inventory for {ip}")
+
+                # 2. Run Full TDS if checkbox is checked AND it's a Ciena 6500/CPL
+                device_type = getattr(script_instance, 'device_type', None) or "Unknown"  # fallback
+                if self.tds_var.get() and any(k in str(device_type).upper() for k in ["6500", "CPL", "CIENA"]):
+                    queue.put(f"Running diagnostic on {ip}...\n")
+                    try:
+                        from scripts.Ciena_TDS import CienaTDS
+                        
+                        tds_script = CienaTDS(
+                            ip_address=ip,
+                            username=getattr(script_instance, 'username', 'admin'),
+                            password=getattr(script_instance, 'password', 'admin'),
+                            connection_type=getattr(script_instance, 'connection_type', 'telnet'),
+                            db_cache=self.db_cache,
+                            command_tracker=self.command_tracker
+                        )
+                        
+                        tds_script.process_outputs([], ip, self.outputs)
+                        queue.put(f"Full TDS diagnostic completed for {ip}\n")
+                    except Exception as tds_err:
+                        queue.put(f"TDS diagnostic failed for {ip}: {tds_err}\n")
+
+                queue.put(f"Overall processing finished for {ip}")
 
             except Exception as e:
                 queue.put(f"Error processing {ip}: {e}")
-
-        self.update_gui_from_queue(queue)
 
     def update_gui_from_queue(self, queue):
         while not queue.empty():
