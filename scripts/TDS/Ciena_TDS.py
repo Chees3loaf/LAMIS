@@ -32,7 +32,7 @@ class CienaTDS(BaseScript):
         self.tid = "UNKNOWN_TID"
 
     def get_commands(self) -> List[str]:
-        """Complete set of TL1 commands based on original TDS_v5.1"""
+        """TDS TL1 Commands"""
         return [
             'RTRV-SHELF::ALL:QSHELF;',
             'RTRV-NETYPE:::QTYPE;',

@@ -748,7 +748,7 @@ class InventoryGUI:
 
 
     def process_task_queue(self, queue):
-        import scripts.Ciena_TDS
+        import scripts.TDS.Ciena_TDS
         while not self.task_queue.empty():
             item = self.task_queue.get()
             
@@ -773,7 +773,7 @@ class InventoryGUI:
                 if self.tds_var.get() and any(k in str(device_type).upper() for k in ["6500", "CPL", "CIENA"]):
                     queue.put(f"Running diagnostic on {ip}...\n")
                     try:
-                        from scripts.Ciena_TDS import CienaTDS
+                        from scripts.TDS.Ciena_TDS import CienaTDS
                         
                         tds_script = CienaTDS(
                             ip_address=ip,
