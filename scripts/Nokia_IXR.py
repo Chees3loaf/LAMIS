@@ -24,6 +24,9 @@ class Script(BaseScript):
         self.connection_type = connection_type
         self.device_name = None
         self.device_type = None
+        self.stop_callback = kwargs.get('stop_callback')
+        self.ssh_client = None
+        self.serial_port_obj = None
         if connection_type == 'serial':
             self.serial_port = kwargs.get('serial_port')
             self.baud_rate = kwargs.get('baud_rate')
@@ -32,6 +35,37 @@ class Script(BaseScript):
             self.ip_address = kwargs.get('ip_address')
             self.username = kwargs.get('username', 'admin')
             self.password = kwargs.get('password', 'admin')
+
+    def should_stop(self) -> bool:
+        return bool(self.stop_callback and self.stop_callback())
+
+    def sleep_with_abort(self, seconds: float, interval: float = 0.1) -> bool:
+        end_time = time.time() + seconds
+        while time.time() < end_time:
+            if self.should_stop():
+                return True
+            time.sleep(min(interval, end_time - time.time()))
+        return self.should_stop()
+
+    def abort_connection(self):
+        """Forcefully close SSH and serial connections to interrupt blocking I/O."""
+        if self.ssh_client:
+            try:
+                self.ssh_client.close()
+                logging.info("SSH connection forcefully closed for abort.")
+            except Exception as e:
+                logging.debug(f"Error force-closing SSH: {e}")
+            finally:
+                self.ssh_client = None
+        
+        if self.serial_port_obj:
+            try:
+                self.serial_port_obj.close()
+                logging.info("Serial connection forcefully closed for abort.")
+            except Exception as e:
+                logging.debug(f"Error force-closing serial: {e}")
+            finally:
+                self.serial_port_obj = None
 
     def get_commands(self) -> List[str]:
         return [
@@ -52,10 +86,10 @@ class Script(BaseScript):
     
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         try:
-            ssh_client = paramiko.SSHClient()
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.ssh_client = paramiko.SSHClient()
+            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             logging.info(f"Connecting to {ip_address}")
-            ssh_client.connect(ip_address,
+            self.ssh_client.connect(ip_address,
                                username=username,
                                password=password, 
                                look_for_keys=False,
@@ -64,26 +98,38 @@ class Script(BaseScript):
                                )
             logging.info(f"Connected to {ip_address}")
 
-            shell = ssh_client.invoke_shell()
-            time.sleep(1)  # Give the shell some time to initialize
+            shell = self.ssh_client.invoke_shell()
+            if self.sleep_with_abort(1):
+                shell.close()
+                self.ssh_client.close()
+                self.ssh_client = None
+                return [], "Aborted"
 
             outputs = []
             for command in commands:
+                if self.should_stop():
+                    shell.close()
+                    self.ssh_client.close()
+                    self.ssh_client = None
+                    return outputs, "Aborted"
                 output = self.capture_full_output_ssh(shell, command)
                 if output is None:
-                    error_message = f"Failed to execute command: {command}"
+                    error_message = "Aborted" if self.should_stop() else f"Failed to execute command: {command}"
                     logging.error(error_message)
                     shell.close()
-                    ssh_client.close()
+                    self.ssh_client.close()
+                    self.ssh_client = None
                     return outputs, error_message
                 outputs.append(output)
 
             shell.close()
-            ssh_client.close()
+            self.ssh_client.close()
+            self.ssh_client = None
             return outputs, None
 
         except Exception as e:
             logging.error(f"SSH connection failed: {e}")
+            self.ssh_client = None
             return [], str(e)
 
     def capture_full_output_ssh(self, shell, command: str) -> str:
@@ -93,20 +139,24 @@ class Script(BaseScript):
 
             output = ""
             while True:
+                if self.should_stop():
+                    return None
                 if shell.recv_ready():
                     chunk = shell.recv(65535).decode('utf-8')
                     output += chunk
                     if "Press any key to continue" in chunk:
                         shell.send(' ')
                         output = output.replace("Press any key to continue (Q to quit)", "")
-                        time.sleep(2)
+                        if self.sleep_with_abort(2):
+                            return None
                     if shell.recv_stderr_ready():
                         error_chunk = shell.recv_stderr(65535).decode('utf-8')
                         if error_chunk:
                             logging.error(f"Error output: {error_chunk}")
                             break
                 else:
-                    time.sleep(1)
+                    if self.sleep_with_abort(1):
+                        return None
                     if not shell.recv_ready() and not shell.recv_stderr_ready():
                         break
 
@@ -120,22 +170,31 @@ class Script(BaseScript):
 
     def execute_serial_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         try:
-            with serial.Serial(self.serial_port, self.baud_rate, timeout=self.timeout) as ser:
-                logging.info(f"Connected to serial port {self.serial_port}")
+            self.serial_port_obj = serial.Serial(self.serial_port, self.baud_rate, timeout=self.timeout)
+            logging.info(f"Connected to serial port {self.serial_port}")
 
-                outputs = []
-                for command in commands:
-                    output = self.capture_full_output_serial(ser, command)
-                    if output is None:
-                        error_message = f"Failed to execute command: {command}"
-                        logging.error(error_message)
-                        return outputs, error_message
-                    outputs.append(output)
+            outputs = []
+            for command in commands:
+                if self.should_stop():
+                    self.serial_port_obj.close()
+                    self.serial_port_obj = None
+                    return outputs, "Aborted"
+                output = self.capture_full_output_serial(self.serial_port_obj, command)
+                if output is None:
+                    error_message = "Aborted" if self.should_stop() else f"Failed to execute command: {command}"
+                    logging.error(error_message)
+                    self.serial_port_obj.close()
+                    self.serial_port_obj = None
+                    return outputs, error_message
+                outputs.append(output)
 
-                return outputs, None
+            self.serial_port_obj.close()
+            self.serial_port_obj = None
+            return outputs, None
 
         except Exception as e:
             logging.error(f"Serial connection failed: {e}")
+            self.serial_port_obj = None
             return [], str(e)
 
     def capture_full_output_serial(self, ser, command: str) -> str:
@@ -145,7 +204,8 @@ class Script(BaseScript):
 
             output = ""
             while True:
-                time.sleep(1)
+                if self.sleep_with_abort(1):
+                    return None
                 chunk = ser.read(ser.in_waiting or 1).decode('utf-8')
                 logging.debug(f"Read chunk: {chunk}")  # Debugging output
                 if chunk:
@@ -153,7 +213,8 @@ class Script(BaseScript):
                 if "Press any key to continue" in chunk:
                     ser.write(b' ')
                     output = output.replace("Press any key to continue (Q to quit)", "")
-                    time.sleep(2)
+                    if self.sleep_with_abort(2):
+                        return None
                 if ser.in_waiting == 0:
                     break
 

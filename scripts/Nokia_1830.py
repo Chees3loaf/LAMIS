@@ -24,7 +24,8 @@ class Script:
                  password='admin',
                  timeout=5,
                  db_path=None,
-                 db_cache=None):
+                 db_cache=None,
+                 stop_callback=None):
         # --- DB wiring ---
         if db_cache is not None:
             self.db_cache = db_cache
@@ -46,9 +47,32 @@ class Script:
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.stop_callback = stop_callback
 
         if not self.ip_address:
             raise ValueError("Missing required 'ip_address' for network-based connection.")
+
+    def abort_connection(self):
+        """Forcefully close the Telnet connection to interrupt blocking I/O."""
+        if self.telnet:
+            try:
+                self.telnet.close()
+                logging.info("Telnet connection forcefully closed for abort.")
+            except Exception as e:
+                logging.debug(f"Error force-closing telnet: {e}")
+            finally:
+                self.telnet = None
+
+    def should_stop(self) -> bool:
+        return bool(self.stop_callback and self.stop_callback())
+
+    def sleep_with_abort(self, seconds: float, interval: float = 0.1) -> bool:
+        end_time = time.time() + seconds
+        while time.time() < end_time:
+            if self.should_stop():
+                return True
+            time.sleep(min(interval, end_time - time.time()))
+        return self.should_stop()
 
     def get_commands(self) -> List[str]:
         return [
@@ -66,6 +90,9 @@ class Script:
         outputs = []
 
         for command in commands:
+            if self.should_stop():
+                self.close_telnet()
+                return outputs, "Aborted"
             if self.command_tracker.has_executed(self.ip_address, command, self.connection_type):
                 logging.info(f"Skipping previously executed command: {command}")
                 continue  # Skip commands already executed for this device
@@ -96,6 +123,8 @@ class Script:
 
         for attempt in range(1, retries + 1):
             try:
+                if self.should_stop():
+                    return False
                 logging.info(f"Connecting to {self.ip_address} via Telnet (Attempt {attempt})...")
                 self.telnet = telnetlib.Telnet(self.ip_address, timeout=self.timeout)
 
@@ -105,7 +134,9 @@ class Script:
                 self.telnet.write(self.username.encode('ascii') + b"\n")
                 self.telnet.read_until(b"Password: ", timeout=5)
                 self.telnet.write(self.password.encode('ascii') + b"\n")
-                time.sleep(1)
+                if self.sleep_with_abort(1):
+                    self.close_telnet()
+                    return False
 
                 login_response = self.telnet.read_very_eager().decode('ascii')
                 if "Login incorrect" in login_response or "invalid" in login_response.lower():
@@ -126,12 +157,17 @@ class Script:
     def execute_telnet_command(self, command: str) -> Tuple[Optional[str], Optional[str]]:
         try:
             if not self.telnet_login():
-                return None, "Telnet login failed."
+                return None, "Aborted" if self.should_stop() else "Telnet login failed."
 
             logging.info(f"Successfully logged in via Telnet. Executing command: {command}")
             self.telnet.write(command.encode('ascii') + b"\n")
-            time.sleep(3.5)
+            if self.sleep_with_abort(3.5):
+                self.close_telnet()
+                return None, "Aborted"
             output = self.capture_full_output_telnet()
+            if self.should_stop():
+                self.close_telnet()
+                return None, "Aborted"
             return output, None
 
         except Exception as e:
@@ -141,8 +177,11 @@ class Script:
 
     def capture_full_output_telnet(self) -> str:
         try:
-            output = self.telnet.read_until(b"#", timeout=10).decode('ascii')
-            return output.strip()
+            while not self.should_stop():
+                output = self.telnet.read_until(b"#", timeout=1).decode('ascii')
+                if output:
+                    return output.strip()
+            return ""
         except Exception as e:
             logging.error(f"Error capturing Telnet output: {e}")
             return ""
@@ -158,6 +197,19 @@ class Script:
                 logging.info("Telnet session closed successfully.")
             except Exception as e:
                 logging.warning(f"Failed to close Telnet session gracefully: {e}")
+            finally:
+                self.telnet = None
+
+    def close_telnet_force(self):
+        """
+        Force-closes the Telnet session immediately to interrupt blocking I/O.
+        """
+        if self.telnet:
+            try:
+                self.telnet.close()
+                logging.info("Telnet session force-closed.")
+            except Exception as e:
+                logging.debug(f"Error force-closing telnet: {e}")
             finally:
                 self.telnet = None
 

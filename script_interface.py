@@ -114,9 +114,24 @@ def get_tracker():
     return _TRACKER
 
 class DeviceIdentifier:
-    def identify_device(self, ip, queue, output_screen):
+    def identify_device(self, ip, queue, output_screen, stop_callback=None):
         username, password = 'admin', 'admin'
         logging.info(f"[IDENTIFY] Trying to identify {ip} via SSH")
+
+        def should_stop():
+            return bool(stop_callback and stop_callback())
+
+        def sleep_with_abort(seconds: float, interval: float = 0.1) -> bool:
+            end_time = time.time() + seconds
+            while time.time() < end_time:
+                if should_stop():
+                    return True
+                time.sleep(min(interval, end_time - time.time()))
+            return should_stop()
+
+        if should_stop():
+            queue.put(f"[ABORT] Identification cancelled for {ip}.\n")
+            return None, None
 
         try:
             transport = paramiko.Transport((ip, 22))
@@ -159,9 +174,16 @@ class DeviceIdentifier:
             session = ssh_client.invoke_shell()
 
             for command in ["show chassis | match (Type) pre-lines 1 expression"]:
+                if should_stop():
+                    ssh_client.close()
+                    queue.put(f"[ABORT] SSH identification cancelled for {ip}.\n")
+                    return None, None
                 queue.put(f"Executing command: {command}\n")
                 session.send(command + '\n')
-                time.sleep(2)
+                if sleep_with_abort(2):
+                    ssh_client.close()
+                    queue.put(f"[ABORT] SSH identification cancelled for {ip}.\n")
+                    return None, None
 
                 output = ""
                 while session.recv_ready():
@@ -183,11 +205,23 @@ class DeviceIdentifier:
             logging.warning(f"[IDENTIFY] SSH error for {ip}: {e}")
             queue.put(f"SSH connection failed for {ip}: {e}. Trying Telnet...\n")
 
-        return self.identify_device_telnet(ip, queue)
+        return self.identify_device_telnet(ip, queue, stop_callback=stop_callback)
 
-    def identify_device_telnet(self, ip, queue):
+    def identify_device_telnet(self, ip, queue, stop_callback=None):
         username, password = 'admin', 'admin'
         logging.info(f"[IDENTIFY] Attempting Telnet to {ip}")
+
+        def should_stop():
+            return bool(stop_callback and stop_callback())
+
+        def sleep_with_abort(seconds: float, interval: float = 0.1) -> bool:
+            end_time = time.time() + seconds
+            while time.time() < end_time:
+                if should_stop():
+                    return True
+                time.sleep(min(interval, end_time - time.time()))
+            return should_stop()
+
         try:
             queue.put(f"Attempting Telnet connection to {ip}...\n")
             tn = telnetlib.Telnet(ip, timeout=10)
@@ -198,7 +232,10 @@ class DeviceIdentifier:
             tn.write(username.encode('ascii') + b"\n")
             tn.read_until(b"Password: ", timeout=5)
             tn.write(password.encode('ascii') + b"\n")
-            time.sleep(1)
+            if sleep_with_abort(1):
+                tn.close()
+                queue.put(f"[ABORT] Telnet identification cancelled for {ip}.\n")
+                return None, None
 
             login_output = tn.read_very_eager().decode('ascii')
             logging.debug(f"[TELNET] Login output from {ip}:\n{login_output}")
@@ -207,11 +244,22 @@ class DeviceIdentifier:
                 queue.put("Telnet login failed: Invalid credentials.\n")
                 return None, None
 
+            if should_stop():
+                tn.close()
+                queue.put(f"[ABORT] Telnet identification cancelled for {ip}.\n")
+                return None, None
+
             tn.write(b"show general system-identification\n")
-            time.sleep(3)
+            if sleep_with_abort(3):
+                tn.close()
+                queue.put(f"[ABORT] Telnet identification cancelled for {ip}.\n")
+                return None, None
             output1 = tn.read_until(b"#", timeout=5).decode('ascii')
             tn.write(b"show general name\n")
-            time.sleep(3)
+            if sleep_with_abort(3):
+                tn.close()
+                queue.put(f"[ABORT] Telnet identification cancelled for {ip}.\n")
+                return None, None
             output2 = tn.read_until(b"#", timeout=5).decode('ascii')
             tn.write(b"exit\n")
             tn.close()
@@ -250,40 +298,41 @@ class DeviceIdentifier:
 
 
 class ScriptSelector:   
-    def select_script(self, device_type, ip_address, connection_type='ssh'):
+    def select_script(self, device_type, ip_address, connection_type='ssh', stop_callback=None):
         logging.debug(f"[SCRIPT SELECTOR] Selecting script for IP: {ip_address}, Device Type: {device_type}, Connection: {connection_type}")
+
+        normalized_type = (device_type or '').strip().lower()
+        if not normalized_type:
+            logging.warning(f"[SCRIPT SELECTOR] No device type detected for IP {ip_address}; skipping script selection.")
+            return None
+
         try:
-            from scripts.Nokia_SAR import Script as Sar
-            from scripts.Nokia_IXR import Script as Ixr
-            from scripts.Nokia_1830 import Script as Pss
-            from scripts.Ciena_6500 import Script as C65
+            if normalized_type == '7705 sar-8 v2':
+                from scripts.Nokia_SAR import Script as script_class
+            elif normalized_type in {'7250 ixr-r6', '7250 ixr-r6d'}:
+                from scripts.Nokia_IXR import Script as script_class
+            elif normalized_type == '1830':
+                from scripts.Nokia_1830 import Script as script_class
+            elif normalized_type in {'6500', 'ciena 6500 optical'}:
+                from scripts.Ciena_6500 import Script as script_class
+            else:
+                logging.warning(f"[SCRIPT SELECTOR] No matching script found for normalized device type: '{normalized_type}'")
+                return None
 
-            DEVICE_SCRIPT_MAPPING = {
-                '7705 sar-8 v2': Sar,
-                '7250 ixr-r6': Ixr,
-                '7250 ixr-r6d': Ixr,
-                '1830': Pss,
-                '6500': C65,
-                'ciena 6500 optical': C65,
-            }
-
-            normalized_type = (device_type or '').strip().lower()
-            script_class = DEVICE_SCRIPT_MAPPING.get(normalized_type)
-
-            if script_class:
-                logging.info(f"[SCRIPT SELECTOR] Matched '{normalized_type}' to script: {script_class.__name__}")
-                return script_class(
+            logging.info(f"[SCRIPT SELECTOR] Matched '{normalized_type}' to script: {script_class.__name__}")
+            return script_class(
                 connection_type=connection_type,
                 ip_address=ip_address,
                 username=DEFAULT_USERNAME,
                 password=DEFAULT_PASSWORD,
                 db_cache=get_cache(),
-                command_tracker=get_tracker()
+                command_tracker=get_tracker(),
+                stop_callback=stop_callback,
             )
-            else:
-                logging.warning(f"[SCRIPT SELECTOR] No matching script found for normalized device type: '{normalized_type}'")
-                return None
 
+        except ImportError as e:
+            logging.error(f"[SCRIPT SELECTOR] Missing optional dependency for device '{device_type}' at IP {ip_address}: {e}")
+            return None
         except Exception as e:
             logging.error(f"[SCRIPT SELECTOR] Failed to select script for device '{device_type}' at IP {ip_address}: {e}")
             return None

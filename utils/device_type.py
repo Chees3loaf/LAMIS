@@ -14,9 +14,10 @@ debug_mode = False  # Toggle this for verbose logging
 logging.basicConfig(level=logging.DEBUG if debug_mode else logging.INFO)
 
 class DeviceIdentifier:
-    def __init__(self, username='admin', password='admin'):
+    def __init__(self, username='admin', password='admin', acknowledge='y'):
         self.username = username
         self.password = password
+        self.acknowledge = acknowledge
 
     def identify_device(self, ip, queue):
         logging.debug(f"Attempting SSH device ID at {ip}")
@@ -73,9 +74,22 @@ class DeviceIdentifier:
                 tn.close()
                 return None, None, None
 
+            try:
+                residual = tn.read_very_eager().decode('ascii', errors='ignore')
+                if residual.strip():
+                    queue.put(f"Response from {ip} (Telnet login banner):\n{residual}\n")
+                    logging.debug(residual)
+            except EOFError:
+                pass
+
             tn.write(b"show general system-identification\n")
             time.sleep(3)
-            output = tn.read_until(b"#", timeout=10).decode('ascii')
+            output = tn.read_until(b"#", timeout=10).decode('ascii', errors='ignore')
+
+            if "Product" not in output and "Type" not in output:
+                time.sleep(1)
+                output += tn.read_very_eager().decode('ascii', errors='ignore')
+
             tn.write(b"exit\n")
             tn.close()
 
@@ -90,19 +104,58 @@ class DeviceIdentifier:
     def telnet_login(self, tn: telnetlib.Telnet) -> bool:
         # Handles Telnet login process
         try:
-            tn.read_until(b"login: ", timeout=5)
-            tn.write(b"cli\n")
-            tn.read_until(b"Username: ", timeout=5)
-            tn.write(self.username.encode('ascii') + b"\n")
-            tn.read_until(b"Password: ", timeout=5)
-            tn.write(self.password.encode('ascii') + b"\n")
-            time.sleep(1)
-            response = tn.read_very_eager().decode('ascii')
-            if "Login incorrect" in response or "invalid" in response.lower():
-                logging.error("Telnet login failed: Invalid credentials.")
+            index, _, response = tn.expect([rb"[^\r\n]+ login:", rb"[Ll]ogin:", rb"[Uu]sername:"], timeout=8)
+            if index == -1:
+                prompt_text = response.decode('ascii', errors='ignore') if response else ''
+                logging.error(
+                    "Telnet login failed: login prompt not detected. "
+                    f"Received: {prompt_text}"
+                )
                 return False
-            logging.info("Telnet login successful.")
-            return True
+
+            if index in (0, 1):
+                tn.write(b"cli\n")
+                tn.read_until(b"Username: ", timeout=8)
+
+            tn.write(self.username.encode('ascii') + b"\n")
+            tn.read_until(b"Password: ", timeout=8)
+            tn.write(self.password.encode('ascii') + b"\n")
+
+            transcript = ""
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                idx, _, chunk = tn.expect([
+                    rb"Do you acknowledge\? \(Y/N\)\?",
+                    rb"[#>]",
+                    rb"[Ll]ogin incorrect",
+                    rb"[Ii]nvalid",
+                    rb"[Uu]sername:",
+                    rb"[Pp]assword:"
+                ], timeout=5)
+
+                decoded = chunk.decode('ascii', errors='ignore') if chunk else ''
+                transcript += decoded
+
+                if idx == 0:
+                    tn.write(self.acknowledge.encode('ascii') + b"\n")
+                elif idx == 1:
+                    logging.info("Telnet login successful.")
+                    return True
+                elif idx in (2, 3):
+                    logging.error("Telnet login failed: Invalid credentials.")
+                    return False
+                elif idx == 4:
+                    tn.write(self.username.encode('ascii') + b"\n")
+                elif idx == 5:
+                    tn.write(self.password.encode('ascii') + b"\n")
+                else:
+                    break
+
+            logging.error(
+                "Telnet login failed: shell prompt not detected after authentication. "
+                f"Transcript: {transcript}"
+            )
+            return False
         except Exception as e:
             logging.error(f"Telnet login failed: {e}")
             return False
@@ -116,9 +169,10 @@ class DeviceIdentifier:
             type_match = re.search(r"Type\s+:\s+(.+)", output)
             name_match = re.search(r"Name\s+:\s+(.+)", output)
             product_match = re.search(r"Product\s+:\s+(\d+)", output)
+            prompt_name_match = re.search(r"([A-Za-z0-9_-]+)#", output)
 
             device_type = type_match.group(1).strip() if type_match else None
-            device_name = name_match.group(1).strip() if name_match else None
+            device_name = name_match.group(1).strip() if name_match else (prompt_name_match.group(1).strip() if prompt_name_match else None)
             product_type = product_match.group(1).strip() if product_match else None
 
             if not (device_type or product_type):

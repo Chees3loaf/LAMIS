@@ -1,12 +1,15 @@
 import os
 import logging
 import re
-import wexpect
 import sqlite3
 import time
 import pandas as pd
-from wexpect import spawn, EOF, TIMEOUT
 from typing import Any, Callable, Dict, List, Optional, Tuple
+
+try:
+    from wexpect import spawn, EOF, TIMEOUT
+except ImportError:
+    from redexpect import spawn, EOF, TIMEOUT
 
 
 
@@ -22,6 +25,8 @@ class Script:
     def __init__(self, connection_type='ssh', **kwargs):
         logging.debug("Initializing Script class")
         self.connection_type = connection_type
+        self.stop_callback = kwargs.get('stop_callback')
+        self.child = None
 
         if connection_type == 'ssh':
             self.ip_address = kwargs.get('ip_address')
@@ -29,6 +34,31 @@ class Script:
             self.password = kwargs.get('password', 'ADMIN')
             self.port = kwargs.get('port', 20002)
             logging.info(f"Configured SSH connection: {self.ip_address}:{self.port} as {self.username}")
+
+    def should_stop(self) -> bool:
+        return bool(self.stop_callback and self.stop_callback())
+
+    def abort_connection(self):
+        """Forcefully close the SSH spawn process to interrupt blocking I/O."""
+        if self.child:
+            try:
+                self.child.close(force=True)
+                logging.info("SSH spawn process forcefully closed for abort.")
+            except Exception as e:
+                logging.debug(f"Error force-closing spawn: {e}")
+            finally:
+                self.child = None
+
+    def expect_with_abort(self, child, patterns, timeout=30, step=1):
+        elapsed = 0
+        while elapsed < timeout:
+            if self.should_stop():
+                return None
+            try:
+                return child.expect(patterns, timeout=min(step, timeout - elapsed))
+            except TIMEOUT:
+                elapsed += min(step, timeout - elapsed)
+        raise TIMEOUT("Timeout waiting for device response")
 
     def get_commands(self) -> List[str]:
         logging.debug("Fetching device commands to execute")
@@ -52,44 +82,70 @@ class Script:
                 f"-p {self.port} {ip_address}"
             )
             logging.info(f"Spawning SSH process to {ip_address}:{self.port}")
-            child = spawn(ssh_cmd, encoding='utf-8', timeout=30)
+            self.child = spawn(ssh_cmd, encoding='utf-8', timeout=30)
 
             output_log = []
 
-            idx = child.expect(["[Ll]ogin:", "Are you sure you want to continue connecting", EOF, TIMEOUT])
+            idx = self.expect_with_abort(self.child, ["[Ll]ogin:", "Are you sure you want to continue connecting", EOF, TIMEOUT], timeout=30)
             logging.debug(f"Initial expect matched index: {idx}")
+            if idx is None:
+                self.child.close(force=True)
+                self.child = None
+                return [], "Aborted"
             if idx == 1:
-                child.sendline("yes")
-                idx = child.expect(["[Ll]ogin:", EOF, TIMEOUT])
+                self.child.sendline("yes")
+                idx = self.expect_with_abort(self.child, ["[Ll]ogin:", EOF, TIMEOUT], timeout=30)
                 logging.debug(f"Expect after sending yes: {idx}")
+                if idx is None:
+                    self.child.close(force=True)
+                    self.child = None
+                    return [], "Aborted"
 
             logging.debug("Sending login credentials")
-            child.sendline(username)
-            child.expect("[Pp]assword:")
-            child.sendline(password)
+            self.child.sendline(username)
+            if self.expect_with_abort(self.child, "[Pp]assword:", timeout=30) is None:
+                self.child.close(force=True)
+                self.child = None
+                return [], "Aborted"
+            self.child.sendline(password)
 
-            idx = child.expect([r"[#]", EOF, TIMEOUT])
+            idx = self.expect_with_abort(self.child, [r"[#]", EOF, TIMEOUT], timeout=30)
+            if idx is None:
+                self.child.close(force=True)
+                self.child = None
+                return [], "Aborted"
             if idx in [1, 2]:
                 logging.error("Authentication failed")
                 return [], "Authentication failed"
 
             # Capture prompt
-            prompt = child.after.strip()
+            prompt = self.child.after.strip()
             logging.debug(f"Detected prompt: '{prompt}'")
 
             for cmd in commands:
+                if self.should_stop():
+                    self.child.close(force=True)
+                    self.child = None
+                    return output_log, "Aborted"
                 logging.info(f"Sending command: {cmd}")
-                child.sendline(cmd)
-                child.expect(cmd)  # Echoed command
+                self.child.sendline(cmd)
+                if self.expect_with_abort(self.child, cmd, timeout=30) is None:
+                    self.child.close(force=True)
+                    self.child = None
+                    return output_log, "Aborted"
                 full_output = ""
 
                 while True:
-                    index = child.expect([prompt, EOF, TIMEOUT], timeout=30)
-                    chunk = child.before
+                    index = self.expect_with_abort(self.child, [prompt, EOF, TIMEOUT], timeout=30)
+                    if index is None:
+                        self.child.close(force=True)
+                        self.child = None
+                        return output_log, "Aborted"
+                    chunk = self.child.before
                     full_output += chunk
 
                     if index == 0:
-                        full_output += child.after
+                        full_output += self.child.after
                         break
                     elif index == 1:
                         logging.warning("EOF while waiting for prompt")
@@ -100,16 +156,19 @@ class Script:
 
                 output_log.append(full_output.strip())
 
-            child.sendline("exit")
+            self.child.sendline("exit")
             try:
-                child.expect([prompt, EOF, TIMEOUT], timeout=10)
+                self.expect_with_abort(self.child, [prompt, EOF, TIMEOUT], timeout=10)
             except TIMEOUT:
                 logging.warning("Timeout after 'exit', force closing")
 
+            self.child.close(force=True)
+            self.child = None
             return output_log, None
 
         except Exception as e:
             logging.exception("SSH execution exception")
+            self.child = None
             return [], str(e)
             
 
