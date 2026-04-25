@@ -6,12 +6,14 @@ from gui.gui3_0 import InventoryGUI
 import script_interface
 from utils.update import Updater
 from script_interface import CommandTracker
+import config
+from utils.helpers import get_database_path
 
 # Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=config.LOG_LEVEL, format=config.LOG_FORMAT)
 
 # Suppress PIL debug logs
-logging.getLogger("PIL").setLevel(logging.WARNING)
+logging.getLogger("PIL").setLevel(config.PIL_LOG_LEVEL)
 
 class LoadingScreen:
     def __init__(self, root):
@@ -64,7 +66,7 @@ def check_updates(loading_screen):
 def start_gui(update_available):
     root = Tk()
     command_tracker = CommandTracker()
-    db_cache = script_interface.DatabaseCache(os.path.join(os.path.dirname(__file__), "..", "data", "network_inventory.db"))
+    db_cache = script_interface.DatabaseCache(str(get_database_path()))
 
     InventoryGUI(root, update_available, command_tracker, db_cache)
     root.mainloop()

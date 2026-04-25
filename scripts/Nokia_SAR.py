@@ -9,9 +9,6 @@ from typing import Callable, Dict, List, Optional, Tuple
 import serial
 from script_interface import BaseScript, DatabaseCache, get_inventory_db_path, get_tracker
 
-# Ensure logging is configured
-logging.basicConfig(level=logging.DEBUG)
-
 class Script(BaseScript):
     def __init__(self, *,
                  db_path=None,
@@ -103,6 +100,7 @@ class Script(BaseScript):
             raise ValueError("Invalid connection type")
     
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
+        shell = None
         try:
             self.ssh_client = paramiko.SSHClient()
             self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -118,41 +116,40 @@ class Script(BaseScript):
 
             shell = self.ssh_client.invoke_shell()
             if self.sleep_with_abort(1):
-                shell.close()
-                self.ssh_client.close()
-                self.ssh_client = None
                 return [], "Aborted"
 
             outputs = []
             for command in commands:
                 if self.should_stop():
-                    shell.close()
-                    self.ssh_client.close()
-                    self.ssh_client = None
                     return outputs, "Aborted"
                 output = self.capture_full_output_ssh(shell, command)
                 if output is None:
                     error_message = "Aborted" if self.should_stop() else f"Failed to execute command: {command}"
                     logging.error(error_message)
-                    shell.close()
-                    self.ssh_client.close()
-                    self.ssh_client = None
                     return outputs, error_message
                 outputs.append(output)
 
-            shell.close()
-            self.ssh_client.close()
-            self.ssh_client = None
             return outputs, None
 
         except Exception as e:
             logging.error(f"SSH connection failed: {e}")
-            self.ssh_client = None
             return [], str(e)
+        finally:
+            if shell is not None:
+                try:
+                    shell.close()
+                except Exception as e:
+                    logging.debug(f"Error closing shell: {e}")
+            if self.ssh_client is not None:
+                try:
+                    self.ssh_client.close()
+                except Exception as e:
+                    logging.debug(f"Error closing SSH client: {e}")
+            self.ssh_client = None
 
     def capture_full_output_ssh(self, shell, command: str) -> str:
         try:
-            logging.info(f"Executing command: {command}")
+            logging.debug(f"Executing command: {command}")
             shell.send(command + '\n')
 
             output = ""

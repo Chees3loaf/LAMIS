@@ -2,16 +2,12 @@ import logging
 import time
 import paramiko
 import re
-import telnetlib
+from utils.telnet import Telnet
 from queue import Queue
 from paramiko.ssh_exception import AuthenticationException
 from scripts.Nokia_SAR import Script as Sar
 from scripts.Nokia_IXR import Script as Ixr
 from scripts.Nokia_1830 import Script as Pss
-
-# Configure logging with a debug flag
-debug_mode = False  # Toggle this for verbose logging
-logging.basicConfig(level=logging.DEBUG if debug_mode else logging.INFO)
 
 class DeviceIdentifier:
     def __init__(self, username='admin', password='admin', acknowledge='y'):
@@ -68,7 +64,7 @@ class DeviceIdentifier:
 
     def identify_device_telnet(self, ip, queue):
         try:
-            tn = telnetlib.Telnet(ip, timeout=10)
+            tn = Telnet(ip, timeout=10)
 
             if not self.telnet_login(tn):
                 tn.close()
@@ -101,7 +97,7 @@ class DeviceIdentifier:
             logging.error(f"Telnet failed for {ip}: {e}")
             return None, None, None
 
-    def telnet_login(self, tn: telnetlib.Telnet) -> bool:
+    def telnet_login(self, tn: Telnet) -> bool:
         # Handles Telnet login process
         try:
             index, _, response = tn.expect([rb"[^\r\n]+ login:", rb"[Ll]ogin:", rb"[Uu]sername:"], timeout=8)

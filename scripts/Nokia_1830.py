@@ -9,13 +9,12 @@ import subprocess
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
-import telnetlib
+from utils.telnet import Telnet
 
 
 # Ensure logging is configured
-logging.basicConfig(level=logging.DEBUG)
 
-class Script:
+class Script(BaseScript):
     def __init__(self, *,                       # <- make these keyword-only to avoid mixups
                  connection_type='telnet',
                  command_tracker=None,
@@ -94,7 +93,7 @@ class Script:
                 self.close_telnet()
                 return outputs, "Aborted"
             if self.command_tracker.has_executed(self.ip_address, command, self.connection_type):
-                logging.info(f"Skipping previously executed command: {command}")
+                logging.debug(f"Skipping previously executed command: {command}")
                 continue  # Skip commands already executed for this device
             if self.connection_type == 'telnet':
                 output, error = self.execute_telnet_command(command)
@@ -122,34 +121,45 @@ class Script:
             return True
 
         for attempt in range(1, retries + 1):
+            temp_telnet = None
             try:
                 if self.should_stop():
                     return False
                 logging.info(f"Connecting to {self.ip_address} via Telnet (Attempt {attempt})...")
-                self.telnet = telnetlib.Telnet(self.ip_address, timeout=self.timeout)
+                temp_telnet = Telnet(self.ip_address, timeout=self.timeout)
 
-                self.telnet.read_until(b"login: ", timeout=5)
-                self.telnet.write(b"cli\n")
-                self.telnet.read_until(b"Username: ", timeout=5)
-                self.telnet.write(self.username.encode('ascii') + b"\n")
-                self.telnet.read_until(b"Password: ", timeout=5)
-                self.telnet.write(self.password.encode('ascii') + b"\n")
+                temp_telnet.read_until(b"login: ", timeout=5)
+                temp_telnet.write(b"cli\n")
+                temp_telnet.read_until(b"Username: ", timeout=5)
+                temp_telnet.write(self.username.encode('ascii') + b"\n")
+                temp_telnet.read_until(b"Password: ", timeout=5)
+                temp_telnet.write(self.password.encode('ascii') + b"\n")
                 if self.sleep_with_abort(1):
-                    self.close_telnet()
+                    try:
+                        temp_telnet.close()
+                    except Exception:
+                        pass
                     return False
 
-                login_response = self.telnet.read_very_eager().decode('ascii')
+                login_response = temp_telnet.read_very_eager().decode('ascii')
                 if "Login incorrect" in login_response or "invalid" in login_response.lower():
                     logging.error("Telnet login failed: Invalid credentials.")
-                    self.telnet.close()
-                    self.telnet = None
+                    try:
+                        temp_telnet.close()
+                    except Exception:
+                        pass
                     continue
 
                 logging.info("Telnet login successful.")
+                self.telnet = temp_telnet
                 return True
             except Exception as e:
                 logging.error(f"Telnet login attempt {attempt} failed: {e}")
-                self.telnet = None
+                if temp_telnet is not None:
+                    try:
+                        temp_telnet.close()
+                    except Exception as close_err:
+                        logging.debug(f"Error closing Telnet after failed login: {close_err}")
 
         return False
 
@@ -159,20 +169,22 @@ class Script:
             if not self.telnet_login():
                 return None, "Aborted" if self.should_stop() else "Telnet login failed."
 
-            logging.info(f"Successfully logged in via Telnet. Executing command: {command}")
+            logging.debug(f"Successfully logged in via Telnet. Executing command: {command}")
             self.telnet.write(command.encode('ascii') + b"\n")
             if self.sleep_with_abort(3.5):
-                self.close_telnet()
                 return None, "Aborted"
             output = self.capture_full_output_telnet()
             if self.should_stop():
-                self.close_telnet()
                 return None, "Aborted"
             return output, None
 
         except Exception as e:
             logging.error(f"Telnet connection failed: {e}")
             return None, str(e)
+        finally:
+            # Don't close on every command, only when needed
+            # close_telnet() is called after all commands in execute_commands()
+            pass
 
 
     def capture_full_output_telnet(self) -> str:
@@ -715,7 +727,7 @@ class Script:
             logging.info(f"Starting Excel output for {len(outputs)} devices.")
             for ip, data_dict in outputs.items():
                 try:
-                    logging.info(f"Processing data for IP {ip}.")
+                    logging.debug(f"Processing data for IP {ip}.")
                     combined_df = self.combine_and_format_data(data_dict)  # Prepare combined data for each IP
                     if combined_df.empty:
                         logging.warning(f"No data to write for IP {ip}")
