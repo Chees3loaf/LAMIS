@@ -23,6 +23,11 @@ wheels/
 share/python-wheels/
 *.egg-info/
 .installed.cfg
+
+# Code signing certificates - NEVER commit these
+certs/
+*.pfx
+*.p12
 *.egg
 MANIFEST
 
@@ -31,6 +36,9 @@ MANIFEST
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+
+# LAMIS debug logs
+logs/
 
 # Installer logs
 pip-log.txt

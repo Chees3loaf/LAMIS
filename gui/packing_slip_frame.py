@@ -1,5 +1,6 @@
 """Packing slip frame — widgets and logic for the Packing Slip (From File) mode."""
 import os
+import shutil
 import tempfile
 import logging
 import tkinter as tk
@@ -23,6 +24,11 @@ class PackingSlipFrame(ttk.Frame):
         self.controller = controller
         self.uploaded_file_path: str | None = None
         self.uploaded_file_data: pd.DataFrame | None = None
+        self._multisheet_device_file: bool = False
+        self._last_customer: str = ""
+        self._last_project: str = ""
+        self._last_customer_po: str = ""
+        self._last_sales_order: str = ""
         self._build()
 
     # ------------------------------------------------------------------
@@ -90,19 +96,37 @@ class PackingSlipFrame(ttk.Frame):
             self.uploaded_file_path = file_path
             if file_path.endswith(".csv"):
                 self.uploaded_file_data = pd.read_csv(file_path)
+                self._multisheet_device_file = False
+                count_label = f"{len(self.uploaded_file_data)} rows"
             elif file_path.endswith((".xlsx", ".xls")):
-                self.uploaded_file_data = pd.read_excel(file_path)
+                xl = pd.ExcelFile(file_path)
+                sheet_names = xl.sheet_names
+                has_summary = any("summary" in s.lower() for s in sheet_names)
+                device_sheets = [s for s in sheet_names if "summary" not in s.lower()]
+                if len(sheet_names) > 1 and device_sheets:
+                    # Multi-sheet file: each non-summary sheet is one device.
+                    # This handles both plain device-report files (no summary)
+                    # AND inventory reports (has Summary + device sheets).
+                    # _process_multisheet_device_file will auto-skip any summary
+                    # sheet because it has no PART NUMBER / SERIAL NUMBER header.
+                    self._multisheet_device_file = True
+                    self.uploaded_file_data = pd.DataFrame()  # placeholder
+                    count_label = f"{len(device_sheets)} device(s)"
+                else:
+                    self._multisheet_device_file = False
+                    self.uploaded_file_data = pd.read_excel(file_path)
+                    count_label = f"{len(self.uploaded_file_data)} rows"
             else:
                 messagebox.showerror("File Error", "Unsupported file format. Please use CSV or Excel files.")
                 return
 
             file_name = os.path.basename(file_path)
             self.file_path_label.config(
-                text=f"✓ {file_name} ({len(self.uploaded_file_data)} rows)",
+                text=f"✓ {file_name} ({count_label})",
                 foreground="green",
             )
             out = self.controller.output_screen
-            out.insert(tk.END, f"Loaded file: {file_name} with {len(self.uploaded_file_data)} rows\n")
+            out.insert(tk.END, f"Loaded file: {file_name} with {count_label}\n")
             out.see(tk.END)
             logging.info(f"File uploaded: {file_path} with {len(self.uploaded_file_data)} rows")
 
@@ -129,16 +153,23 @@ class PackingSlipFrame(ttk.Frame):
             messagebox.showerror("Missing Info", "Please fill in all project information fields.")
             return
 
-        save_folder = filedialog.askdirectory(title="Select Packing Slip Save Location")
-        if not save_folder:
-            return
-
         self.ps_run_button.config(state=tk.DISABLED)
         self.ps_status_label.config(text="Status: Processing...")
         self.controller.root.update_idletasks()
 
+        # Store form values so the selection dialog can access them
+        self._last_customer = customer
+        self._last_project = project
+        self._last_customer_po = customer_po
+        self._last_sales_order = sales_order
+
+        tmp_dir = tempfile.mkdtemp(prefix="LAMIS_")
+
         try:
-            processed_data = self._process_file_for_packing_slip(self.uploaded_file_data)
+            if self._multisheet_device_file:
+                processed_data = self._process_multisheet_device_file(self.uploaded_file_path)
+            else:
+                processed_data = self._process_file_for_packing_slip(self.uploaded_file_data)
 
             if not processed_data:
                 self.ps_status_label.config(text="Status: Ready")
@@ -147,13 +178,12 @@ class PackingSlipFrame(ttk.Frame):
 
             ip_list = list(processed_data.keys())
             save_path = self.controller.workbook_builder.build_packing_slip_workbook(
-                processed_data, ip_list, customer, project, customer_po, sales_order, save_folder,
+                processed_data, ip_list, customer, project, customer_po, sales_order, tmp_dir,
             )
 
             self.ps_status_label.config(text="Status: Ready")
-            messagebox.showinfo("Success", f"Packing slips saved to:\n{save_path}")
             out = self.controller.output_screen
-            out.insert(tk.END, f"Packing slips generated successfully: {save_path}\n")
+            out.insert(tk.END, f"Processing complete — {len(processed_data)} device(s) ready.\n")
             out.see(tk.END)
             self._show_print_selection_dialog(save_path)
 
@@ -163,6 +193,7 @@ class PackingSlipFrame(ttk.Frame):
             logging.error(f"Packing slip generation error: {e}")
         finally:
             self.ps_run_button.config(state=tk.NORMAL)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ------------------------------------------------------------------
     # Print selection
@@ -224,15 +255,15 @@ class PackingSlipFrame(ttk.Frame):
 
         # Consolidated vs Individual toggle
         ttk.Separator(dialog, orient="horizontal").pack(fill=tk.X, padx=15, pady=(4, 0))
-        mode_frame = ttk.LabelFrame(dialog, text="Print Mode")
+        mode_frame = ttk.LabelFrame(dialog, text="Output Mode")
         mode_frame.pack(fill=tk.X, padx=15, pady=(6, 4))
         print_mode = tk.StringVar(value="consolidated")
         tk.Radiobutton(
-            mode_frame, text="Consolidated  (all selected in one file)",
+            mode_frame, text="Consolidated  (save all selected into one workbook)",
             variable=print_mode, value="consolidated",
         ).pack(anchor="w", padx=10, pady=2)
         tk.Radiobutton(
-            mode_frame, text="Individual  (separate file per device)",
+            mode_frame, text="Individual  (save one workbook per device)",
             variable=print_mode, value="individual",
         ).pack(anchor="w", padx=10, pady=2)
 
@@ -247,23 +278,28 @@ class PackingSlipFrame(ttk.Frame):
 
         btn_frame = ttk.Frame(dialog)
         btn_frame.pack(fill=tk.X, padx=15, pady=(4, 12))
-        tk.Button(btn_frame, text="Print Selected", command=on_print, width=16).pack(side=tk.RIGHT, padx=2)
+        tk.Button(btn_frame, text="Save / Open", command=on_print, width=16).pack(side=tk.RIGHT, padx=2)
         tk.Button(btn_frame, text="Cancel", command=dialog.destroy, width=10).pack(side=tk.RIGHT, padx=2)
 
         dialog.wait_window()
 
     def _print_selected_sheets(self, source_path: str, selected_sheets: List[str], summary_sheets: List[str], mode: str = "consolidated") -> None:
-        """Open selected sheets for printing.
+        """Save selected sheets to a workbook and open it.
 
-        mode='consolidated': one file containing the summary + all selected sheets.
-        mode='individual':   one file per selected sheet, each with the summary included.
+        mode='consolidated': prompt for a single save path; one workbook with
+                             the summary + all selected device sheets.
+        mode='individual':   prompt for a save folder; one workbook per device,
+                             each containing the summary + that device's sheet.
         """
         try:
-            temp_dir = tempfile.gettempdir()
             base_name = os.path.splitext(os.path.basename(source_path))[0]
 
             if mode == "individual":
-                opened = 0
+                save_folder = filedialog.askdirectory(title="Select Folder to Save Individual Packing Slips")
+                if not save_folder:
+                    return  # user cancelled
+
+                saved = 0
                 for sheet_name in selected_sheets:
                     wb_src = openpyxl.load_workbook(source_path)
                     sheets_to_keep = set(summary_sheets + [sheet_name])
@@ -271,36 +307,95 @@ class PackingSlipFrame(ttk.Frame):
                         if name not in sheets_to_keep:
                             del wb_src[name]
                     safe = sheet_name.replace("/", "_").replace("\\", "_")
-                    temp_path = os.path.join(temp_dir, f"LAMIS_Print_{base_name}_{safe}.xlsx")
-                    wb_src.save(temp_path)
-                    try:
-                        os.startfile(temp_path, "print")
-                    except Exception:
-                        os.startfile(temp_path)
-                    opened += 1
+                    save_path = os.path.join(save_folder, f"{base_name}_{safe}.xlsx")
+                    autosize = self.controller.workbook_builder.autosize_sheet_columns
+                    for ws_name in wb_src.sheetnames:
+                        autosize(wb_src[ws_name])
+                    wb_src.save(save_path)
+                    os.startfile(save_path)
+                    saved += 1
 
                 out = self.controller.output_screen
-                out.insert(tk.END, f"Opened {opened} individual file(s) for printing.\n")
+                out.insert(tk.END, f"Saved {saved} individual packing slip(s) to: {save_folder}\n")
                 out.see(tk.END)
-                logging.info(f"Individual print: opened {opened} file(s) from {source_path}")
+                logging.info(f"Individual save: {saved} file(s) → {save_folder}")
 
-            else:  # consolidated
-                wb_src = openpyxl.load_workbook(source_path)
-                sheets_to_keep = set(summary_sheets + selected_sheets)
-                for name in list(wb_src.sheetnames):
-                    if name not in sheets_to_keep:
-                        del wb_src[name]
-                temp_path = os.path.join(temp_dir, f"LAMIS_Print_{base_name}.xlsx")
-                wb_src.save(temp_path)
-                try:
-                    os.startfile(temp_path, "print")
-                except Exception:
-                    os.startfile(temp_path)
+            else:  # consolidated — single sheet, all line items from all selected devices
+                safe_customer = self._last_customer.replace(" ", "_")
+                safe_project = self._last_project.replace(" ", "_")
+                save_path = filedialog.asksaveasfilename(
+                    title="Save Consolidated Packing Slip",
+                    initialfile=f"PackingSlip_{safe_customer}_{safe_project}_Consolidated.xlsx",
+                    defaultextension=".xlsx",
+                    filetypes=[("Excel files", "*.xlsx")],
+                )
+                if not save_path:
+                    return
+
+                # Build a fresh single-sheet workbook from the consolidated template
+                # (data/LAMIS_Consolidated_Packing_Slip.xlsx) which has Device ID in col B
+                base_slip_template = self.controller.workbook_builder.packing_slip_template
+                consolidated_template = os.path.join(
+                    os.path.dirname(base_slip_template),
+                    "LAMIS_Consolidated_Packing_Slip.xlsx",
+                )
+                if not os.path.exists(consolidated_template):
+                    consolidated_template = base_slip_template  # fallback
+
+                wb_out = openpyxl.load_workbook(consolidated_template)
+                device_sheet = wb_out.active
+
+                # Helper: write to the top-left (master) cell of any merged range,
+                # which is the only writable cell in a merge group.
+                def write_cell(ws, coord, value):
+                    from openpyxl.utils import coordinate_to_tuple
+                    r, c = coordinate_to_tuple(coord)
+                    for merged in ws.merged_cells.ranges:
+                        if r >= merged.min_row and r <= merged.max_row and c >= merged.min_col and c <= merged.max_col:
+                            ws.cell(merged.min_row, merged.min_col).value = value
+                            return
+                    ws[coord] = value
+
+                # Consolidated template layout:
+                #   C5 = Customer value, C6 = Project value
+                #   Row 14: headers (Device ID | Customer PO | Part Number | Serial Number | Description | Asset Tag)
+                #   Row 15+: data rows  — B=Device ID, C=Customer PO, D=Part#, E=Serial#, F=Description
+                write_cell(device_sheet, "C5", self._last_customer or "")
+                write_cell(device_sheet, "C6", self._last_project or "")
+
+                # Read line items from every selected device sheet and concatenate
+                wb_src = openpyxl.load_workbook(source_path, read_only=True)
+                row_num = 15
+                for sheet_name in selected_sheets:
+                    if sheet_name not in wb_src.sheetnames:
+                        continue
+                    ws = wb_src[sheet_name]
+                    for row in ws.iter_rows(min_row=15, values_only=True):
+                        if len(row) < 6:
+                            continue
+                        _so, po, part, serial, desc = row[1], row[2], row[3], row[4], row[5]
+                        has_data = any(
+                            str(v).strip() not in ("", "None", "nan")
+                            for v in (part, serial, desc)
+                            if v is not None
+                        )
+                        if has_data:
+                            device_sheet[f"B{row_num}"] = sheet_name   # Device ID
+                            device_sheet[f"C{row_num}"] = po or ""
+                            device_sheet[f"D{row_num}"] = part or ""
+                            device_sheet[f"E{row_num}"] = serial or ""
+                            device_sheet[f"F{row_num}"] = desc or ""
+                            row_num += 1
+                wb_src.close()
+
+                self.controller.workbook_builder.autosize_sheet_columns(device_sheet)
+                wb_out.save(save_path)
+                os.startfile(save_path)
 
                 out = self.controller.output_screen
-                out.insert(tk.END, f"Opened {len(selected_sheets)} sheet(s) for printing (consolidated).\n")
+                out.insert(tk.END, f"Consolidated packing slip saved: {save_path}\n")
                 out.see(tk.END)
-                logging.info(f"Consolidated print: {len(selected_sheets)} sheet(s) from {source_path}")
+                logging.info(f"Consolidated save: {row_num - 15} line item(s) → {save_path}")
 
         except Exception as e:
             messagebox.showerror("Print Error", f"Failed to prepare sheets for printing:\n{e}")
@@ -309,6 +404,73 @@ class PackingSlipFrame(ttk.Frame):
     # ------------------------------------------------------------------
     # File processing
     # ------------------------------------------------------------------
+
+    def _process_multisheet_device_file(self, file_path: str) -> Dict[str, pd.DataFrame]:
+        """Read a multi-sheet device-report Excel file where each sheet is one device.
+
+        Auto-detects the header row by scanning for 'PART NUMBER' / 'SERIAL NUMBER'.
+        Extracts the source IP from sheet metadata and uses it as the dict key.
+        Adds a 'System Name' column (= sheet name) so the workbook builder can
+        use the sheet name as the device name.
+        """
+        processed_data: Dict[str, pd.DataFrame] = {}
+        try:
+            xl = pd.ExcelFile(file_path)
+            for sheet_name in xl.sheet_names:
+                df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
+
+                # Extract source IP from metadata (typically row 4, column 5)
+                ip_address = sheet_name  # fallback to sheet name
+                try:
+                    val = str(df_raw.iloc[4, 5]).strip()
+                    if val and val.lower() != "nan":
+                        ip_address = val
+                except (IndexError, KeyError):
+                    pass
+
+                # Ensure key uniqueness if multiple devices share the same IP
+                if ip_address in processed_data:
+                    ip_address = f"{ip_address}_{sheet_name}"
+
+                # Find the header row: first row containing 'PART NUMBER' or 'SERIAL NUMBER'
+                header_row = None
+                for idx, row in df_raw.iterrows():
+                    row_vals = [str(v).upper() for v in row if str(v).lower() != "nan"]
+                    joined = " ".join(row_vals)
+                    if "PART NUMBER" in joined or "SERIAL NUMBER" in joined:
+                        header_row = idx
+                        break
+
+                if header_row is None:
+                    logging.warning(f"Sheet '{sheet_name}': no header row found, skipping")
+                    continue
+
+                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
+
+                # Drop rows where all key columns are empty
+                relevant_cols = [
+                    c for c in df.columns
+                    if any(k in str(c).upper() for k in ("PART NUMBER", "SERIAL NUMBER", "DESCRIPTION"))
+                ]
+                if relevant_cols:
+                    df = df.dropna(subset=relevant_cols, how="all")
+                    df = df[
+                        ~df[relevant_cols].apply(
+                            lambda r: all(str(v).strip() in ("", "nan") for v in r), axis=1
+                        )
+                    ]
+
+                # Add System Name column so workbook builder uses sheet name as device name
+                df.insert(0, "System Name", sheet_name)
+
+                if not df.empty:
+                    processed_data[ip_address] = df.reset_index(drop=True)
+
+            return processed_data
+
+        except Exception as e:
+            logging.error(f"Error processing multi-sheet device file: {e}")
+            raise
 
     def _process_file_for_packing_slip(self, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         """Convert uploaded DataFrame to per-device dict for the workbook builder."""

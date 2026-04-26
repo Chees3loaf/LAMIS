@@ -430,7 +430,7 @@ class Script(BaseScript):
 
             # Combined regex to capture MDA, Type, Part Number, and Serial Number
             mda_block_pattern = re.compile(
-                r"^\s*\d*\s+(?P<MDA>\d+)\s+(?P<Type>[\w\(\)\-]+).*?"
+                r"^\s*\d*\s+(?P<MDA>\d+)\s+(?P<Type>[\w\(\)\-\+]+).*?"
                 r"Part number\s*:\s*(?P<PartNumber>[^\r\n]+).*?"
                 r"Serial number\s*:\s*(?P<SerialNumber>[^\r\n]+)",
                 re.DOTALL | re.MULTILINE
@@ -554,15 +554,15 @@ class Script(BaseScript):
 
                     # ✅ **Ensure missing values are assigned properly**
                     if not current_interface:
-                        logging.warning(f"Missing Interface in entry. Assigning placeholder.")
+                        logging.debug(f"Missing Interface in entry. Assigning placeholder.")
                         current_interface = f"Unknown Interface"
 
                     if not current_serial_number:
-                        logging.warning(f"Missing Serial Number in entry. Assigning placeholder.")
+                        logging.debug(f"Missing Serial Number in entry. Assigning placeholder.")
                         current_serial_number = f"Unknown Serial"
 
                     if not current_model_number or current_model_number.lower() == "none":
-                        logging.warning(f"Model Number missing, using Part Number instead: {current_part_number}")
+                        logging.debug(f"Model Number missing, using Part Number instead: {current_part_number}")
                         current_model_number = current_part_number if current_part_number else "Unknown"
 
                     # ✅ **Extract Optical Compliance**
@@ -604,7 +604,7 @@ class Script(BaseScript):
                         port_data.append(port_info)
                         logging.debug(f"Extracted port data: {port_info}")
                     else:
-                        logging.warning(
+                        logging.debug(
                             f"Skipping entry due to missing data:\n"
                             f"Interface: {current_interface}, Serial: {current_serial_number}, "
                             f"Model: {current_model_number}, Optical Compliance: {current_optical_compliance}"
@@ -619,7 +619,7 @@ class Script(BaseScript):
 
             # ✅ **Final validation**
             if not port_data:
-                logging.warning("No port data found in output.")
+                logging.debug("No port data found in output.")
             else:
                 logging.debug(f"Data successfully extracted: {port_data}")
 
@@ -640,7 +640,7 @@ class Script(BaseScript):
         # ✅ **Create DataFrame and remove empty rows**
         df = pd.DataFrame(port_data).dropna(how='all')
         if df.empty:
-            logging.warning("No port data found or parsing failed. Returning empty DataFrame.")
+            logging.debug("No port data found or parsing failed. Returning empty DataFrame.")
         else:
             logging.info(f"DataFrame for port details is populated:\n{df}")
 
