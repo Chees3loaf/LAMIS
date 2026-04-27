@@ -183,3 +183,8 @@ cython_debug/
 
 # Visual Studio Code configuration data
 .vscode/
+
+# Custom additions
+build_log.txt
+*.xlsx
+.DS_Store
