@@ -85,7 +85,8 @@ class Script(BaseScript):
         shell = None
         try:
             self.ssh_client = paramiko.SSHClient()
-            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.ssh_client.load_system_host_keys()
+            self.ssh_client.set_missing_host_key_policy(paramiko.WarningPolicy())
             logging.info(f"Connecting to {ip_address}")
             self.ssh_client.connect(ip_address,
                                username=username,
@@ -432,6 +433,9 @@ class Script(BaseScript):
 
         try:
             output = output.replace("Press any key to continue (Q to quit)", "").strip()
+
+            # When MDA is "(not provisioned)", the equipped type appears on the next line - collapse it onto the same line
+            output = re.sub(r'\(not provisioned\)\s*\n\s+(\S+)', r'\1', output)
 
             # Combined regex to capture MDA, Type, Part Number, and Serial Number
             mda_block_pattern = re.compile(

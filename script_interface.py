@@ -224,7 +224,8 @@ class DeviceIdentifier:
         # SSH fallback
         try:
             ssh_client = paramiko.SSHClient()
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh_client.load_system_host_keys()
+            ssh_client.set_missing_host_key_policy(paramiko.WarningPolicy())
             ssh_client.connect(ip, username=username, password=password, look_for_keys=False, allow_agent=False, timeout=config.SSH_CONNECT_TIMEOUT)
 
             logging.debug(f"[IDENTIFY] Connected to {ip} via SSH")
@@ -379,8 +380,12 @@ class ScriptSelector:
         '7250 ixr-r6': 'scripts.Nokia_IXR',
         '7250 ixr-r6d': 'scripts.Nokia_IXR',
         '1830': 'scripts.Nokia_1830',
+        '1830 psi': 'scripts.Nokia_PSI',
+        'psi': 'scripts.Nokia_PSI',
         '6500': 'scripts.Ciena_6500',
         'ciena 6500 optical': 'scripts.Ciena_6500',
+        'ciena 6500 rls': 'scripts.Ciena_RLS',
+        'rls': 'scripts.Ciena_RLS',
     }
 
     def _is_device_supported(self, normalized_type: str) -> bool:

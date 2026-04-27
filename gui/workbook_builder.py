@@ -6,6 +6,7 @@ Handles both inventory reports and packing slip workbooks.
 """
 
 from datetime import datetime
+from copy import copy
 import logging
 import os
 import re
@@ -14,7 +15,7 @@ import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 import pandas as pd
 
@@ -65,12 +66,27 @@ class WorkbookBuilder:
             for cell in row:
                 new_sheet[cell.coordinate].value = cell.value
                 if cell.has_style:
-                    new_sheet[cell.coordinate].font = cell.font
-                    new_sheet[cell.coordinate].border = cell.border
-                    new_sheet[cell.coordinate].fill = cell.fill
+                    # Openpyxl style objects must be cloned when copied across workbooks.
+                    new_sheet[cell.coordinate].font = copy(cell.font)
+                    new_sheet[cell.coordinate].border = copy(cell.border)
+                    new_sheet[cell.coordinate].fill = copy(cell.fill)
                     new_sheet[cell.coordinate].number_format = cell.number_format
-                    new_sheet[cell.coordinate].protection = cell.protection
-                    new_sheet[cell.coordinate].alignment = cell.alignment
+                    new_sheet[cell.coordinate].protection = copy(cell.protection)
+                    new_sheet[cell.coordinate].alignment = copy(cell.alignment)
+
+        for key, dimension in source_sheet.column_dimensions.items():
+            new_sheet.column_dimensions[key].width = dimension.width
+            new_sheet.column_dimensions[key].hidden = dimension.hidden
+
+        for key, dimension in source_sheet.row_dimensions.items():
+            new_sheet.row_dimensions[key].height = dimension.height
+            new_sheet.row_dimensions[key].hidden = dimension.hidden
+
+        for merged_range in source_sheet.merged_cells.ranges:
+            new_sheet.merge_cells(str(merged_range))
+
+        if source_sheet.freeze_panes:
+            new_sheet.freeze_panes = source_sheet.freeze_panes
 
         return new_sheet
 
@@ -94,8 +110,97 @@ class WorkbookBuilder:
         summary_sheet["C9"] = "IP Address"
         summary_sheet["D9"] = "Device Name"
 
-        summary_sheet["F5"] = "IP Addresses"
-        summary_sheet["F7"] = ", ".join(ip_list) if ip_list else ""
+        summary_sheet["F5"] = "Device Count"
+        summary_sheet["F7"] = 0  # Updated with actual count after processing
+
+    def _format_summary_sheet(self, summary_sheet: Any, data_row_count: int) -> None:
+        """Apply a consistent visual layout to summary sheets."""
+        accent_fill = PatternFill(start_color="FF156082", end_color="FF156082", fill_type="solid")
+        dark_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+        white_font = Font(color="FFFFFFFF", bold=True)
+        bold_font = Font(bold=True)
+        thin_side = Side(style="thin", color="FF156082")
+        border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+        center = Alignment(horizontal="center", vertical="center")
+
+        summary_sheet.merge_cells("B2:F3")
+        summary_sheet["B2"] = "Device Summary"
+        summary_sheet["B2"].fill = accent_fill
+        summary_sheet["B2"].font = Font(color="FFFFFFFF", bold=True, size=18)
+        summary_sheet["B2"].alignment = center
+
+        for row in range(5, 8):
+            for col in range(2, 7):
+                cell = summary_sheet.cell(row=row, column=col)
+                cell.border = border
+                cell.alignment = center if row == 5 else Alignment(vertical="center")
+                if row == 5:
+                    cell.fill = accent_fill
+                    cell.font = white_font
+
+        summary_sheet["A2"].fill = dark_fill
+
+        for col in range(2, 5):
+            cell = summary_sheet.cell(row=9, column=col)
+            cell.fill = accent_fill
+            cell.font = white_font
+            cell.border = border
+            cell.alignment = center
+
+        end_row = max(10, 9 + data_row_count)
+        for row in range(10, end_row + 1):
+            for col in range(2, 5):
+                cell = summary_sheet.cell(row=row, column=col)
+                cell.border = border
+                if col == 2:
+                    cell.alignment = center
+
+        summary_sheet.freeze_panes = "B10"
+
+    def _format_packing_slip_summary(self, summary_sheet: Any, data_row_count: int) -> None:
+        """Apply the same visual layout as the inventory summary to packing slip summary sheets."""
+        accent_fill = PatternFill(start_color="FF156082", end_color="FF156082", fill_type="solid")
+        dark_fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
+        white_font = Font(color="FFFFFFFF", bold=True)
+        thin_side = Side(style="thin", color="FF156082")
+        border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+        center = Alignment(horizontal="center", vertical="center")
+
+        # Title block
+        summary_sheet.merge_cells("B2:H3")
+        summary_sheet["B2"] = "Packing Slip Summary"
+        summary_sheet["B2"].fill = accent_fill
+        summary_sheet["B2"].font = Font(color="FFFFFFFF", bold=True, size=18)
+        summary_sheet["B2"].alignment = center
+        summary_sheet["A2"].fill = dark_fill
+
+        # Header labels and styling at row 5
+        headers = {2: "Customer", 4: "Project", 6: "IP Address", 8: "Device Name"}
+        for col, label in headers.items():
+            cell = summary_sheet.cell(row=5, column=col)
+            cell.value = label
+            cell.fill = accent_fill
+            cell.font = white_font
+            cell.border = border
+            cell.alignment = center
+
+        # Device count info block
+        summary_sheet["J5"] = "Device Count"
+        summary_sheet["J5"].fill = accent_fill
+        summary_sheet["J5"].font = white_font
+        summary_sheet["J5"].border = border
+        summary_sheet["J5"].alignment = center
+        summary_sheet["J6"] = data_row_count
+        summary_sheet["J6"].border = border
+        summary_sheet["J6"].alignment = center
+
+        # Borders on data rows
+        end_row = max(7, 6 + data_row_count)
+        for row in range(7, end_row + 1):
+            for col in [2, 4, 6, 8]:
+                summary_sheet.cell(row=row, column=col).border = border
+
+        summary_sheet.freeze_panes = "B7"
 
     def _populate_summary_table(self, summary_sheet: Any, summary_items: List[tuple], start_row: int = 10) -> None:
         """Populate summary table with device entries, sorted by IP."""
@@ -109,6 +214,8 @@ class WorkbookBuilder:
             summary_sheet[f"D{row_num}"].hyperlink = f"#'{sheet_title}'!A1"
             summary_sheet[f"D{row_num}"].style = "Hyperlink"
 
+        summary_sheet["F7"] = len(ordered_items)
+        self._format_summary_sheet(summary_sheet, len(ordered_items))
         self.autosize_sheet_columns(summary_sheet)
 
     # ------------------------------------------------------------------
@@ -266,6 +373,7 @@ class WorkbookBuilder:
 
             ordered_outputs = sorted(outputs.items(), key=lambda item: extract_ip_sort_key(item[0]))
             for seq, (ip, data_dict) in enumerate(ordered_outputs, start=1):
+                new_sheet = None
                 try:
                     logging.info(f"Processing data for IP {ip}.")
                     combined_df = self.combine_and_format_data(data_dict)
@@ -287,10 +395,9 @@ class WorkbookBuilder:
 
                     logging.info(f"Creating sheet for system '{system_name}' with {len(combined_df)} rows.")
                     ip_key = str(ip)
+                    prior_sheet_title = None
                     if append_mode and ip_key in summary_index:
                         prior_sheet_title = summary_index[ip_key][1]
-                        if prior_sheet_title in wb.sheetnames and prior_sheet_title != summary_sheet.title:
-                            del wb[prior_sheet_title]
 
                     new_sheet_title = make_unique_sheet_title(system_name)
                     if append_mode:
@@ -372,10 +479,18 @@ class WorkbookBuilder:
 
                     self.autosize_sheet_columns(new_sheet)
 
+                    if prior_sheet_title and prior_sheet_title in wb.sheetnames and prior_sheet_title != summary_sheet.title:
+                        del wb[prior_sheet_title]
+
+                    if prior_sheet_title and new_sheet.title != system_name and system_name not in wb.sheetnames:
+                        new_sheet.title = system_name
+
                     processed_data[ip] = write_df
                     summary_index[str(ip)] = (system_name, new_sheet.title)
                 except Exception as exc:
                     logging.error(f"Failed to process data for IP {ip}. Error: {exc}")
+                    if new_sheet is not None and new_sheet.title in wb.sheetnames:
+                        del wb[new_sheet.title]
 
             if summary_sheet.max_row >= 10:
                 for row_num in range(10, summary_sheet.max_row + 1):
@@ -383,11 +498,11 @@ class WorkbookBuilder:
                     summary_sheet[f"C{row_num}"] = None
                     summary_sheet[f"D{row_num}"] = None
 
-            # Populate summary table using shared helper
+            # Populate summary table using shared helper (also sets the correct device count).
             summary_items = [(ip, device_name, sheet_title) for ip, (device_name, sheet_title) in summary_index.items()]
             self._populate_summary_table(summary_sheet, summary_items, start_row=10)
 
-            if not append_mode and len(wb.sheetnames) > 1 and sheet and sheet.title in wb.sheetnames:
+            if not append_mode and sheet and sheet.title in wb.sheetnames:
                 wb.remove(sheet)
 
             # Keep tabs ordered by IP sequence, with Summary first.
@@ -406,6 +521,289 @@ class WorkbookBuilder:
             return processed_data
         finally:
             self._export_running = False
+
+    # ------------------------------------------------------------------
+    # Packing slip workbook
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Nokia PSI report workbook
+    # ------------------------------------------------------------------
+
+    def build_psi_report_workbook(
+        self,
+        outputs: Dict[str, Any],
+        output_file: str,
+        customer: str = "",
+        project: str = "",
+        customer_po: str = "",
+        sales_order: str = "",
+        append_mode: bool = False,
+        psi_template_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build a Nokia PSI inventory report using the PSI-specific template.
+
+        Template row layout
+        -------------------
+        15  - 54  : Equipment inventory (shelf / card / module)
+        62  - 71  : Software information
+        74  - 103 : Slot status
+        106 - 115 : Redundancy information
+        118 - 127 : Power feed status
+        130 - 169 : Interface topology
+        """
+        if psi_template_path is None:
+            psi_template_path = os.path.join(
+                os.path.dirname(self.template_path), "Nokia_PSI_Report_Template.xlsx"
+            )
+        if not os.path.exists(psi_template_path):
+            raise FileNotFoundError(f"PSI template not found at {psi_template_path}")
+
+        template_wb = openpyxl.load_workbook(psi_template_path)
+        template_sheet = template_wb.active
+
+        if append_mode and os.path.exists(output_file):
+            wb = openpyxl.load_workbook(output_file)
+            base_sheet = None
+        else:
+            wb = openpyxl.load_workbook(psi_template_path)
+            base_sheet = wb.active
+
+        summary_sheet = (
+            wb["Summary"] if "Summary" in wb.sheetnames
+            else wb.create_sheet(title="Summary", index=0)
+        )
+        self._setup_summary_sheet_header(summary_sheet, customer, project, list(outputs.keys()))
+
+        def _s(v):
+            if v is None:
+                return ""
+            s = str(v).strip()
+            return "" if s.lower() == "nan" else s
+
+        def _first(series, fallback=""):
+            if series is None:
+                return fallback
+            for v in series:
+                s = _s(v)
+                if s:
+                    return s
+            return fallback
+
+        def _df(entry) -> pd.DataFrame:
+            if isinstance(entry, dict) and "DataFrame" in entry:
+                return entry["DataFrame"]
+            if isinstance(entry, pd.DataFrame):
+                return entry
+            return pd.DataFrame()
+
+        def _wr(ws, r, b="", c="", d="", e="", f=""):
+            ws[f"B{r}"] = b
+            ws[f"C{r}"] = c
+            ws[f"D{r}"] = d
+            ws[f"E{r}"] = e
+            ws[f"F{r}"] = f
+
+        def _write_inventory(ws, df, start=15, end=54):
+            for i, (_, row) in enumerate(df.iterrows()):
+                r = start + i
+                if r > end:
+                    break
+                _wr(ws, r,
+                    b=_s(row.get("Name", "")),
+                    c=_s(row.get("Type", "")),
+                    d=_s(row.get("Part Number", "")),
+                    e=_s(row.get("Serial Number", "")),
+                    f=_s(row.get("Description", "")),
+                )
+
+        def _write_software(ws, df, start=62, end=71):
+            for i, (_, row) in enumerate(df.iterrows()):
+                r = start + i
+                if r > end:
+                    break
+                desc = _s(row.get("Description", ""))
+                m = re.search(r"RPMS Loaded:\s*(\S+)\s*/\s*(\S+)", desc)
+                _wr(ws, r,
+                    b=_s(row.get("Name", "")),
+                    c=_s(row.get("Part Number", "")),
+                    d=m.group(1) if m else "",
+                    e=m.group(2) if m else "",
+                )
+
+        def _write_slot(ws, df, start=74, end=103):
+            for i, (_, row) in enumerate(df.iterrows()):
+                r = start + i
+                if r > end:
+                    break
+                desc = _s(row.get("Description", ""))
+                m = re.search(r"Admin:\s*(\S+)\s*\|\s*Oper:\s*(\S+)(?:\s*\|\s*(.+))?", desc)
+                admin_state = m.group(1) if m else ""
+                oper_state = m.group(2) if m else ""
+                qualifier = m.group(3).strip() if m and m.group(3) else ""
+                _wr(ws, r,
+                    b=_s(row.get("Name", "")),
+                    c=_s(row.get("Part Number", "")),
+                    d=_s(row.get("Present Type", "")),
+                    e=admin_state,
+                    f=f"{oper_state}{' | ' + qualifier if qualifier else ''}",
+                )
+
+        def _write_redundancy(ws, df, start=106, end=115):
+            for i, (_, row) in enumerate(df.iterrows()):
+                r = start + i
+                if r > end:
+                    break
+                desc = _s(row.get("Description", ""))
+                m_c = re.search(r"Clock Switch:\s*(\S+)", desc)
+                m_e = re.search(r"EC Selection:\s*(\S+)", desc)
+                _wr(ws, r,
+                    b=_s(row.get("Name", "")),
+                    c=m_c.group(1) if m_c else "",
+                    d=m_e.group(1) if m_e else "",
+                )
+
+        def _write_power(ws, df, start=118, end=127):
+            for i, (_, row) in enumerate(df.iterrows()):
+                r = start + i
+                if r > end:
+                    break
+                desc = _s(row.get("Description", ""))
+                m_a = re.search(r"Admin:\s*(\S+)", desc)
+                m_o = re.search(r"Oper:\s*(\S+)", desc)
+                _wr(ws, r,
+                    b=_s(row.get("Name", "")),
+                    c=_s(row.get("Type", "")),
+                    d=m_a.group(1) if m_a else "",
+                    e=m_o.group(1) if m_o else "",
+                )
+
+        def _write_topology(ws, df, start=130, end=169):
+            for i, (_, row) in enumerate(df.iterrows()):
+                r = start + i
+                if r > end:
+                    break
+                desc = _s(row.get("Description", ""))
+                m_c = re.search(r"Connected To:\s*(\S+)", desc)
+                m_f = re.search(r"From:\s*(\S+)", desc)
+                _wr(ws, r,
+                    b=_s(row.get("Name", "")),
+                    c=_s(row.get("Type", "")),
+                    d=m_c.group(1) if m_c else "",
+                    e=m_f.group(1) if m_f else "",
+                )
+
+        processed_data: Dict[str, Any] = {}
+        summary_index: Dict[str, tuple] = {}
+
+        def _unique_title(base):
+            clean = re.sub(r"[^a-zA-Z0-9_]", "_", str(base).strip())[:31] or "Device"
+            if clean not in wb.sheetnames:
+                return clean
+            n = 2
+            while True:
+                suf = f"_{n}"
+                cand = f"{clean[:31 - len(suf)]}{suf}"
+                if cand not in wb.sheetnames:
+                    return cand
+                n += 1
+
+        for ip, data_dict in sorted(outputs.items(), key=lambda x: extract_ip_sort_key(x[0])):
+            try:
+                system_name = system_type = source_val = ""
+                for key in ("shelf_detail", "shelf_inventory", "card_inventory"):
+                    entry = data_dict.get(key)
+                    if entry:
+                        df = _df(entry)
+                        if not df.empty:
+                            if not system_name:
+                                system_name = _s(_first(df.get("System Name")))
+                            if not system_type:
+                                system_type = _s(_first(df.get("System Type")))
+                            if not source_val:
+                                source_val = _s(_first(df.get("Source"), str(ip)))
+                    if system_name:
+                        break
+                if not system_name:
+                    system_name = f"PSI_{ip.replace('.', '_')}"
+                if not source_val:
+                    source_val = str(ip)
+
+                title = _unique_title(system_name)
+                if append_mode:
+                    ns = self.copy_sheet(template_sheet, wb, title)
+                else:
+                    ns = wb.copy_worksheet(base_sheet)
+                    ns.title = title
+
+                ns["A1"] = "Return"
+                ns["A1"].hyperlink = f"#'{summary_sheet.title}'!A1"
+                ns["A1"].style = "Hyperlink"
+                ns["C5"] = customer
+                ns["C6"] = project
+                ns["C7"] = customer_po
+                ns["D7"] = sales_order
+                ns["F5"] = source_val
+                ns["F6"] = system_name
+                ns["F7"] = system_type
+
+                shelf_detail_df = _df(data_dict.get("shelf_detail"))
+                shelf_inventory_df = _df(data_dict.get("shelf_inventory")).copy()
+                card_inventory_df = _df(data_dict.get("card_inventory"))
+                module_inventory_df = _df(data_dict.get("module_inventory"))
+
+                inv_parts = []
+                if not shelf_inventory_df.empty:
+                    if not shelf_detail_df.empty:
+                        main_shelf_name = _s(_first(shelf_detail_df.get("Name"), "Main Shelf"))
+                        mask = shelf_inventory_df.get("Type", pd.Series(dtype=str)).astype(str).str.strip().eq("Shelf")
+                        if mask.any():
+                            shelf_row_index = shelf_inventory_df[mask].index[0]
+                            shelf_inventory_df.at[shelf_row_index, "Name"] = main_shelf_name
+                    inv_parts.append(shelf_inventory_df)
+                elif not shelf_detail_df.empty:
+                    inv_parts.append(shelf_detail_df)
+
+                for df in (card_inventory_df, module_inventory_df):
+                    if not df.empty:
+                        inv_parts.append(df)
+
+                if inv_parts:
+                    _write_inventory(ns, pd.concat(inv_parts, ignore_index=True))
+
+                _write_software(ns, _df(data_dict.get("software_info")))
+                _write_slot(ns, _df(data_dict.get("slot_info")))
+                _write_redundancy(ns, _df(data_dict.get("redundancy_info")))
+                _write_power(ns, _df(data_dict.get("power_info")))
+                _write_topology(ns, _df(data_dict.get("topology")))
+
+                self.autosize_sheet_columns(ns)
+                summary_index[str(ip)] = (system_name, title)
+                processed_data[ip] = pd.DataFrame()
+
+            except Exception as exc:
+                logging.error(f"PSI report: failed for IP {ip}: {exc}", exc_info=True)
+
+        items = [(ip, n, t) for ip, (n, t) in summary_index.items()]
+        self._populate_summary_table(summary_sheet, items, start_row=10)
+
+        if not append_mode and base_sheet and base_sheet.title in wb.sheetnames and len(wb.sheetnames) > 1:
+            wb.remove(base_sheet)
+
+        ordered = [summary_sheet.title] + [
+            t for _, _, t in sorted(items, key=lambda x: extract_ip_sort_key(x[0]))
+            if t in wb.sheetnames
+        ]
+        remaining = [n for n in wb.sheetnames if n not in ordered]
+        wb._sheets = [wb[n] for n in ordered + remaining]
+
+        save_dir = os.path.dirname(output_file)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        wb.save(output_file)
+        logging.info(f"PSI report saved: {output_file}")
+        template_wb.close()
+        return processed_data
 
     # ------------------------------------------------------------------
     # Packing slip workbook
@@ -469,12 +867,10 @@ class WorkbookBuilder:
 
             logging.info(f"Packing slips will be saved as: {save_path}")
 
-            # New template already has column labels at rows 5-6 (Customer, Project,
-            # IP Address, Device ID). Write a timestamp at A2 and leave the labels alone.
+            # Timestamp in A2 — fill/title block applied later by _format_packing_slip_summary.
             capture_time = datetime.now().strftime('%Y-%m-%d @ %H:%M:%S')
             summary_sheet["A2"] = f"Capture Time = {capture_time}"
             summary_sheet["A2"].font = Font(color="00FF00", bold=True)
-            summary_sheet["A2"].fill = PatternFill(start_color="000000", end_color="000000", fill_type="solid")
 
             ordered_items = sorted(processed_data.items(), key=lambda item: extract_ip_sort_key(item[0]))
             # Data rows start at row 7 (after the merged label rows 5-6).
@@ -526,6 +922,10 @@ class WorkbookBuilder:
                     new_sheet["C6"] = project or ""
                     new_sheet["C7"] = device_name
 
+                    # SO and PO are written once at fixed cells B15 / C15
+                    new_sheet["B15"] = sales_order or ""
+                    new_sheet["C15"] = customer_po or ""
+
                     start_row = 15
                     for idx, row_dict in enumerate(device_data.to_dict('records')):
                         row_num = start_row + idx
@@ -571,6 +971,7 @@ class WorkbookBuilder:
                 summary_sheet[f"H{row_num}"].hyperlink = f"#'{sheet_title}'!A1"
                 summary_sheet[f"H{row_num}"].style = "Hyperlink"
 
+            self._format_packing_slip_summary(summary_sheet, len(summary_rows))
             self.autosize_sheet_columns(summary_sheet)
 
             if summary_sheet.title in wb_final.sheetnames:

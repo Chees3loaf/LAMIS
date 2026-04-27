@@ -44,7 +44,8 @@ class Script(BaseScript):
         ssh_client = None
         try:
             ssh_client = paramiko.SSHClient()
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh_client.load_system_host_keys()
+            ssh_client.set_missing_host_key_policy(paramiko.WarningPolicy())
             logging.info(f"Connecting to {ip_address}")
             ssh_client.connect(ip_address, username=username, password=password)
             logging.info(f"Connected to {ip_address}")

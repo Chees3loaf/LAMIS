@@ -1,4 +1,6 @@
 from datetime import datetime
+import importlib
+import ipaddress
 import os
 import logging
 import re
@@ -33,6 +35,25 @@ db_cache = script_interface.get_cache()
 DATA_DIR = get_database_path().parent
 
 class InventoryGUI:
+    _manual_script_modules = {
+        "Nokia SAR": "scripts.Nokia_SAR",
+        "Nokia IXR": "scripts.Nokia_IXR",
+        "Nokia 1830": "scripts.Nokia_1830",
+        "Nokia PSI": "scripts.Nokia_PSI",
+        "Ciena 6500": "scripts.Ciena_6500",
+        "Ciena RLS": "scripts.Ciena_RLS",
+    }
+
+    _lan_connection_types = {
+        "Nokia 1830": "ssh",
+        "Nokia PSI": "ssh",
+        "Ciena 6500": "ssh",
+        "Ciena RLS": "ssh",
+    }
+
+    _allowed_lan_scripts = {"Nokia 1830", "Nokia PSI", "Ciena 6500", "Ciena RLS"}
+    _allowed_serial_scripts = {"Nokia SAR", "Nokia IXR"}
+
     def __init__(self, root, update_available, command_tracker, db_cache):
         self.root = root
         self.update_available = update_available
@@ -53,6 +74,7 @@ class InventoryGUI:
         self.current_script_instance = None
         self.current_mode = tk.StringVar(value="inventory")
         self.output_screen = None
+        self.failed_ips: Dict[str, str] = {}
 
         if os.path.isfile(self.db_file):
             if self.db_cache.db_path != self.db_file:
@@ -65,6 +87,7 @@ class InventoryGUI:
         else:
             logging.error(f"[DB] Expected DB file not found: {self.db_file}")
         self.template_path = str(DATA_DIR / "Device_Report_Template.xlsx")
+        self.psi_template_path = str(DATA_DIR / "Nokia_PSI_Report_Template.xlsx")
         self.packing_slip_template = str(DATA_DIR / "LAMIS_Packing_Slip.xlsx")
         self.lock = threading.Lock()
 
@@ -137,6 +160,18 @@ class InventoryGUI:
     def build_report_workbook(self, outputs: Dict[str, Any], output_file: str, customer: str = "", project: str = "", customer_po: str = "", sales_order: str = "", append_mode: bool = False) -> Dict[str, Any]:
         return self.workbook_builder.build_report_workbook(outputs, output_file, customer=customer, project=project, customer_po=customer_po, sales_order=sales_order, append_mode=append_mode)
 
+    def build_psi_report_workbook(self, outputs: Dict[str, Any], output_file: str, customer: str = "", project: str = "", customer_po: str = "", sales_order: str = "", append_mode: bool = False) -> Dict[str, Any]:
+        return self.workbook_builder.build_psi_report_workbook(
+            outputs,
+            output_file,
+            customer=customer,
+            project=project,
+            customer_po=customer_po,
+            sales_order=sales_order,
+            append_mode=append_mode,
+            psi_template_path=self.psi_template_path,
+        )
+
     def copy_sheet(self, source_sheet: Any, target_wb: Any, new_sheet_name: str) -> Any:
         return self.workbook_builder.copy_sheet(source_sheet, target_wb, new_sheet_name)
 
@@ -184,6 +219,7 @@ class InventoryGUI:
 
     def collect_run_context(self) -> Optional[Dict[str, Any]]:
         default_filename = ""
+        connection_mode = self.inventory_frame.connection_type.get()
         append_mode = bool(
             self.inventory_frame.inventory_report_path
             and os.path.isfile(self.inventory_frame.inventory_report_path)
@@ -229,6 +265,81 @@ class InventoryGUI:
             while os.path.exists(output_file):
                 output_file = os.path.join(save_folder, f"{final_filename}_{counter}.xlsx")
                 counter += 1
+
+        if connection_mode in ("LAN", "Serial"):
+            manual_script = self.inventory_frame.manual_script_var.get().strip()
+            if not manual_script or manual_script not in self._manual_script_modules:
+                messagebox.showerror("Input Error", "Please select a valid script.")
+                return None
+
+            if connection_mode == "LAN" and manual_script not in self._allowed_lan_scripts:
+                messagebox.showerror("Input Error", "LAN supports only Nokia 1830, Nokia PSI, Ciena 6500, and Ciena RLS.")
+                return None
+            if connection_mode == "Serial" and manual_script not in self._allowed_serial_scripts:
+                messagebox.showerror("Input Error", "Serial supports only Nokia SAR and Nokia IXR.")
+                return None
+
+            context = {
+                "customer": customer,
+                "project": project,
+                "customer_po": customer_po,
+                "sales_order": sales_order,
+                "output_file": output_file,
+                "append_mode": append_mode,
+                "connection_mode": connection_mode,
+                "manual_script": manual_script,
+            }
+
+            if connection_mode == "LAN":
+                ip_address = self.inventory_frame.lan_ip.strip()
+                username = self.inventory_frame.lan_username_entry.get().strip()
+                password = self.inventory_frame.lan_password_entry.get().strip()
+                if not ip_address:
+                    messagebox.showerror("Input Error", "LAN IP is required.")
+                    return None
+                try:
+                    ipaddress.ip_address(ip_address)
+                except ValueError:
+                    messagebox.showerror("Input Error", "LAN IP must be a valid IPv4 or IPv6 address.")
+                    return None
+                if not username or not password:
+                    messagebox.showerror("Input Error", "LAN username and password are required.")
+                    return None
+                context.update({
+                    "target_id": ip_address,
+                    "ip_address": ip_address,
+                    "username": username,
+                    "password": password,
+                })
+            else:
+                serial_port = self.inventory_frame.serial_port_var.get().strip()
+                baud_raw = self.inventory_frame.serial_baud_var.get().strip()
+                username = self.inventory_frame.serial_username_entry.get().strip()
+                password = self.inventory_frame.serial_password_entry.get().strip()
+                if not serial_port:
+                    messagebox.showerror("Input Error", "Serial port is required (example: COM3).")
+                    return None
+                if not baud_raw:
+                    messagebox.showerror("Input Error", "Baud rate is required.")
+                    return None
+                try:
+                    baud_rate = int(baud_raw)
+                except ValueError:
+                    messagebox.showerror("Input Error", "Baud rate must be a number.")
+                    return None
+                if not username or not password:
+                    messagebox.showerror("Input Error", "Serial username and password are required.")
+                    return None
+
+                context.update({
+                    "target_id": serial_port,
+                    "serial_port": serial_port,
+                    "baud_rate": baud_rate,
+                    "username": username,
+                    "password": password,
+                })
+
+            return context
 
         pod_1 = self.inventory_frame.pod_var_1.get()
         pod_2 = self.inventory_frame.pod_var_2.get()
@@ -276,7 +387,48 @@ class InventoryGUI:
             "output_file": output_file,
             "ip_list": list(ip_list),
             "append_mode": append_mode,
+            "connection_mode": "Network",
         }
+
+    def _build_manual_script_instance(self, context: Dict[str, Any]):
+        script_name = context["manual_script"]
+        module_name = self._manual_script_modules.get(script_name)
+        if not module_name:
+            raise ValueError(f"Unsupported script selection: {script_name}")
+
+        module = importlib.import_module(module_name)
+        script_class = module.Script
+        mode = context["connection_mode"]
+
+        kwargs = {
+            "db_cache": self.db_cache,
+            "command_tracker": self.command_tracker,
+            "stop_callback": self.should_stop,
+        }
+
+        if mode == "LAN":
+            if script_name not in self._allowed_lan_scripts:
+                raise ValueError(f"{script_name} is not supported in LAN mode")
+            kwargs.update({
+                "connection_type": self._lan_connection_types.get(script_name, "ssh"),
+                "ip_address": context["ip_address"],
+                "username": context["username"],
+                "password": context["password"],
+            })
+        elif mode == "Serial":
+            if script_name not in self._allowed_serial_scripts:
+                raise ValueError(f"{script_name} is not supported in Serial mode")
+            kwargs.update({
+                "connection_type": "serial",
+                "serial_port": context["serial_port"],
+                "baud_rate": context["baud_rate"],
+                "username": context["username"],
+                "password": context["password"],
+            })
+        else:
+            raise ValueError(f"Unsupported connection mode: {mode}")
+
+        return script_class(**kwargs)
 
     def start_run_worker(self):
         self.run_future = self._worker_pool.submit(self.run_inventory_worker, self.run_context)
@@ -290,6 +442,16 @@ class InventoryGUI:
         queue = self.run_queue
 
         try:
+            if context.get("connection_mode") in ("LAN", "Serial"):
+                queue.put(("progress", (0, 1, "Preparing 0/1")))
+                manual_script = self._build_manual_script_instance(context)
+                self.task_queue = Queue()
+                self.task_queue.put((context["target_id"], manual_script))
+                self.process_task_queue(queue)
+                queue.put(("inventory_complete", True))
+                return
+
+            self.failed_ips = {}
             total_ips = len(context["ip_list"])
             reachable_ips = []
             for idx, ip in enumerate(context["ip_list"], start=1):
@@ -298,6 +460,8 @@ class InventoryGUI:
                     return
                 if script_interface.is_reachable(ip):
                     reachable_ips.append(ip)
+                else:
+                    self.failed_ips[ip] = "Unreachable"
                 queue.put(("progress", (idx, total_ips, f"Pinging {idx}/{total_ips}")))
 
             if not reachable_ips:
@@ -329,9 +493,18 @@ class InventoryGUI:
                 if script_instance:
                     self.task_queue.put((ip, script_instance))
                 else:
-                    queue.put(("log", f"No script selected for {ip}"))
+                    reason = f"Unknown device type: {device_type}" if device_type else "Identification failed"
+                    self.failed_ips[ip] = reason
+                    queue.put(("log", f"No script selected for {ip}: {reason}"))
 
             self.process_task_queue(queue)
+
+            if self.failed_ips:
+                lines = ["\n--- FAILED IPs ---"]
+                for ip, reason in self.failed_ips.items():
+                    lines.append(f"  {ip}: {reason}")
+                queue.put(("log", "\n".join(lines)))
+
             queue.put(("inventory_complete", True))
         except Exception as exc:
             logging.exception("Background inventory run failed")
@@ -341,7 +514,12 @@ class InventoryGUI:
         try:
             with self.lock:
                 outputs_copy = dict(self.outputs)
-            processed_data = self.build_report_workbook(
+            builder = (
+                self.build_psi_report_workbook
+                if context.get("manual_script") == "Nokia PSI"
+                else self.build_report_workbook
+            )
+            processed_data = builder(
                 outputs_copy,
                 context["output_file"],
                 customer=context["customer"],
@@ -496,6 +674,8 @@ class InventoryGUI:
                     if error:
                         logging.warning(f"[TASK] Script execution error for {ip}: {error}")
                         queue.put(("log", f"Error in normal inventory for {ip}: {error}"))
+                        if any(kw in error.lower() for kw in ("auth", "login", "credential", "password", "invalid")):
+                            self.failed_ips[ip] = f"Login failed: {error}"
                     elif outputs_list and hasattr(script_instance, "process_outputs"):
                         with self.lock:
                             script_instance.process_outputs(outputs_list, ip, self.outputs)

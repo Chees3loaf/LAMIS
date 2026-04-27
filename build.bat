@@ -143,32 +143,61 @@ if "%DO_SIGN%"=="1" (
 REM Build installer
 echo.
 echo [*] Building installer (requires NSIS)...
-makensis LAMIS.nsi >nul 2>&1
-if errorlevel 1 (
-    echo [!] WARNING: makensis not found or failed - skipping installer build
-    echo     Install NSIS: choco install nsis -y
-    echo     Then run: makensis LAMIS.nsi
-) else (
-    echo [OK] Installer built: dist\LAMIS_Setup.exe
+where makensis >nul 2>&1
+if not errorlevel 1 goto :invoke_nsis_system
+if exist "C:\Program Files (x86)\NSIS\makensis.exe" goto :invoke_nsis_x86
+if exist "C:\Program Files\NSIS\makensis.exe" goto :invoke_nsis_x64
+echo [!] NSIS not found - install NSIS and add to PATH, or install to default location.
+exit /b 1
 
-    REM Sign the installer too
-    if "%DO_SIGN%"=="1" (
-        echo [*] Signing installer...
-        call sign.bat "%CERT_FILE%" --installer-only
-        if errorlevel 1 (
-            echo [!] Installer signing failed
-            exit /b 1
-        )
+:invoke_nsis_x86
+"C:\Program Files (x86)\NSIS\makensis.exe" LAMIS.nsi
+goto :nsis_check
+
+:invoke_nsis_x64
+"C:\Program Files\NSIS\makensis.exe" LAMIS.nsi
+goto :nsis_check
+
+:invoke_nsis_system
+makensis LAMIS.nsi
+
+:nsis_check
+if errorlevel 1 (
+    echo [!] NSIS build failed
+    exit /b 1
+)
+
+echo [OK] Installer built: dist\LAMIS_Setup.exe
+
+REM Sign the installer too
+if "%DO_SIGN%"=="1" (
+    echo [*] Signing installer...
+    call sign.bat "%CERT_FILE%" --installer-only
+    if errorlevel 1 (
+        echo [!] Installer signing failed
+        exit /b 1
     )
+)
+
+REM Remove standalone executable - keep ONLY the Setup.exe as final deliverable
+echo [*] Cleaning up intermediate artifacts...
+if exist "dist\%APP_NAME%\%APP_NAME%.exe" (
+    del "dist\%APP_NAME%\%APP_NAME%.exe"
+    echo [OK] Removed standalone executable
+)
+if exist "dist\%APP_NAME%" (
+    rmdir /s /q "dist\%APP_NAME%"
+    echo [OK] Removed build intermediate folder
 )
 
 echo.
 echo ============================================
 echo Build Summary
 echo ============================================
-echo Executable : dist\%APP_NAME%\%APP_NAME%.exe
 if exist dist\LAMIS_Setup.exe (
-    echo Installer  : dist\LAMIS_Setup.exe
+    echo Final Deliverable: dist\LAMIS_Setup.exe
+) else (
+    echo Executable : dist\%APP_NAME%\%APP_NAME%.exe
 )
 if "%DO_SIGN%"=="1" (
     echo Signed     : YES

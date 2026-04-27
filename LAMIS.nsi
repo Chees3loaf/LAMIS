@@ -11,11 +11,15 @@ Name "LAMIS"
 OutFile "dist\LAMIS_Setup.exe"
 InstallDir "$PROGRAMFILES\LAMIS"
 InstallDirRegKey HKCU "Software\LAMIS" ""
+Icon "icon.ico"
+UninstallIcon "icon.ico"
 
 ; Request admin privileges on Windows Vista+
 RequestExecutionLevel admin
 
 ; MUI Settings
+!define MUI_ICON "icon.ico"
+!define MUI_UNICON "icon.ico"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
 !insertmacro MUI_PAGE_INSTFILES

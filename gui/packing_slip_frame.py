@@ -120,6 +120,9 @@ class PackingSlipFrame(ttk.Frame):
                 messagebox.showerror("File Error", "Unsupported file format. Please use CSV or Excel files.")
                 return
 
+            if file_path.endswith((".xlsx", ".xls")):
+                self._try_populate_fields_from_file(file_path)
+
             file_name = os.path.basename(file_path)
             self.file_path_label.config(
                 text=f"✓ {file_name} ({count_label})",
@@ -135,6 +138,66 @@ class PackingSlipFrame(ttk.Frame):
             logging.error(f"File upload error: {e}")
 
     # ------------------------------------------------------------------
+    # Metadata auto-populate
+    # ------------------------------------------------------------------
+
+    def _try_populate_fields_from_file(self, file_path: str) -> None:
+        """Read Customer, Project, PO, and SO from a previously-generated
+        packing slip (or inventory report) workbook and pre-fill the form
+        fields so the user can review and edit before generating."""
+        try:
+            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+            customer, project, po, so = "", "", "", ""
+
+            device_sheets = [n for n in wb.sheetnames if "summary" not in n.lower()]
+            summary_sheets = [n for n in wb.sheetnames if "summary" in n.lower()]
+
+            # Strategy 1: packing slip / device report format
+            # Header cells: C5 = Customer, C6 = Project, C7 = PO, C8 = SO
+            if device_sheets:
+                ws = wb[device_sheets[0]]
+                for coord, target in (
+                    ("C5", "customer"), ("C6", "project"),
+                    ("C7", "po"), ("D7", "so"),
+                ):
+                    val = ws[coord].value
+                    if val and str(val).strip() not in ("", "nan", "None"):
+                        if target == "customer":
+                            customer = str(val).strip()
+                        elif target == "project":
+                            project = str(val).strip()
+                        elif target == "po":
+                            po = str(val).strip()
+                        elif target == "so":
+                            so = str(val).strip()
+
+            # Strategy 2: inventory report summary sheet
+            # Summary sheet: B7 = Customer value, D7 = Project value
+            if not customer and summary_sheets:
+                ws = wb[summary_sheets[0]]
+                b7 = ws["B7"].value
+                d7 = ws["D7"].value
+                if b7 and str(b7).strip() not in ("", "nan", "None"):
+                    customer = str(b7).strip()
+                if d7 and str(d7).strip() not in ("", "nan", "None"):
+                    project = str(d7).strip()
+
+            wb.close()
+
+            # Pre-fill each field; always overwrite so the latest file drives the values
+            for entry, value in (
+                (self.ps_customer_entry, customer),
+                (self.ps_project_entry, project),
+                (self.ps_po_entry, po or "TBD"),
+                (self.ps_so_entry, so or "TBD"),
+            ):
+                entry.delete(0, tk.END)
+                entry.insert(0, value)
+
+        except Exception as e:
+            logging.debug(f"Could not extract metadata from uploaded file: {e}")
+
+    # ------------------------------------------------------------------
     # Packing slip generation
     # ------------------------------------------------------------------
 
@@ -146,11 +209,11 @@ class PackingSlipFrame(ttk.Frame):
 
         customer = self.ps_customer_entry.get().strip()
         project = self.ps_project_entry.get().strip()
-        customer_po = self.ps_po_entry.get().strip()
-        sales_order = self.ps_so_entry.get().strip()
+        customer_po = self.ps_po_entry.get().strip() or "TBD"
+        sales_order = self.ps_so_entry.get().strip() or "TBD"
 
-        if not all([customer, project, customer_po, sales_order]):
-            messagebox.showerror("Missing Info", "Please fill in all project information fields.")
+        if not all([customer, project]):
+            messagebox.showerror("Missing Info", "Please fill in Customer and Project fields.")
             return
 
         self.ps_run_button.config(state=tk.DISABLED)
