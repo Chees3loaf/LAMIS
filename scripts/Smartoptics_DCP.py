@@ -12,9 +12,6 @@ from typing import Callable, Dict, List, Optional, Tuple
 import serial
 from scripts.script_interface import BaseScript
 
-# Ensure logging is configured
-logging.basicConfig(level=logging.DEBUG)
-
 class Script(BaseScript):
     def __init__(self, db_name='network_inventory.db', connection_type='serial', **kwargs):
         self.db_name = db_name
@@ -43,9 +40,12 @@ class Script(BaseScript):
             raise ValueError("Invalid connection type")
     
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
+        shell = None
+        ssh_client = None
         try:
             ssh_client = paramiko.SSHClient()
-            ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh_client.load_system_host_keys()
+            ssh_client.set_missing_host_key_policy(paramiko.WarningPolicy())
             logging.info(f"Connecting to {ip_address}")
             ssh_client.connect(ip_address, username=username, password=password)
             logging.info(f"Connected to {ip_address}")
@@ -59,22 +59,29 @@ class Script(BaseScript):
                 if output is None:
                     error_message = f"Failed to execute command: {command}"
                     logging.error(error_message)
-                    shell.close()
-                    ssh_client.close()
                     return outputs, error_message
                 outputs.append(output)
 
-            shell.close()
-            ssh_client.close()
             return outputs, None
 
         except Exception as e:
             logging.error(f"SSH connection failed: {e}")
             return [], str(e)
+        finally:
+            if shell is not None:
+                try:
+                    shell.close()
+                except Exception as e:
+                    logging.debug(f"Error closing shell: {e}")
+            if ssh_client is not None:
+                try:
+                    ssh_client.close()
+                except Exception as e:
+                    logging.debug(f"Error closing SSH client: {e}")
 
     def capture_full_output_ssh(self, shell, command: str) -> str:
         try:
-            logging.info(f"Executing command: {command}")
+            logging.debug(f"Executing command: {command}")
             shell.send(command + '\n')
 
             output = ""
@@ -126,7 +133,7 @@ class Script(BaseScript):
 
     def capture_full_output_serial(self, ser, command: str) -> str:
         try:
-            logging.info(f"Executing command: {command}")
+            logging.debug(f"Executing command: {command}")
             ser.write((command + '\n').encode())
 
             output = ""
@@ -157,7 +164,7 @@ class Script(BaseScript):
 
         cursor.execute('''
         SELECT description FROM parts WHERE part_number = ? AND type = ?
-        ''', (part_number))
+        ''', (part_number, part_type))
 
         result = cursor.fetchone()
         conn.close()
@@ -166,17 +173,6 @@ class Script(BaseScript):
             return result[0]
         else:
             return "Unknown"
-        
-        
-    def dcp_r():
-    
-    
-    
-    def dcp_2():
-        
-        
-        
-        
 
     def is_valid_output(self, output: str, command: str) -> bool:
         if not output.strip():

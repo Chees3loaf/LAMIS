@@ -9,13 +9,17 @@ import subprocess
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
-import telnetlib
+from utils.telnet import Telnet
+
+try:
+    from wexpect import spawn, EOF, TIMEOUT
+except ImportError:
+    from redexpect import spawn, EOF, TIMEOUT
 
 
 # Ensure logging is configured
-logging.basicConfig(level=logging.DEBUG)
 
-class Script:
+class Script(BaseScript):
     def __init__(self, *,                       # <- make these keyword-only to avoid mixups
                  connection_type='telnet',
                  command_tracker=None,
@@ -43,17 +47,27 @@ class Script:
         self.connection_type = connection_type
         self.command_tracker = command_tracker or get_tracker()
         self.telnet = None
+        self.child = None
         self.ip_address = ip_address
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.port = 22
         self.stop_callback = stop_callback
 
         if not self.ip_address:
             raise ValueError("Missing required 'ip_address' for network-based connection.")
 
     def abort_connection(self):
-        """Forcefully close the Telnet connection to interrupt blocking I/O."""
+        """Forcefully close the SSH/Telnet connection to interrupt blocking I/O."""
+        if self.child:
+            try:
+                self.child.close(force=True)
+                logging.debug("SSH spawn process forcefully closed for abort.")
+            except Exception as e:
+                logging.debug(f"Error force-closing spawn: {e}")
+            finally:
+                self.child = None
         if self.telnet:
             try:
                 self.telnet.close()
@@ -74,6 +88,17 @@ class Script:
             time.sleep(min(interval, end_time - time.time()))
         return self.should_stop()
 
+    def expect_with_abort(self, child, patterns, timeout=30, step=1):
+        elapsed = 0
+        while elapsed < timeout:
+            if self.should_stop():
+                return None
+            try:
+                return child.expect(patterns, timeout=min(step, timeout - elapsed))
+            except TIMEOUT:
+                elapsed += min(step, timeout - elapsed)
+        raise TIMEOUT("Timeout waiting for device response")
+
     def get_commands(self) -> List[str]:
         return [
             'show general name',
@@ -83,73 +108,186 @@ class Script:
         ]
 
     def execute_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
-        """
-        Executes a list of commands using the specified connection type.
-        Tracks commands to ensure they are only executed once per device.
-        """
-        outputs = []
+        if self.connection_type == 'ssh':
+            outputs, error = self.execute_ssh_commands(commands)
+            if error and error != "Aborted":
+                logging.warning(f"SSH failed for {self.ip_address}: {error}. Falling back to Telnet.")
+                return self._execute_telnet_commands(commands)
+            return outputs, error
+        return self._execute_telnet_commands(commands)
 
+    def _execute_telnet_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
+        outputs = []
         for command in commands:
             if self.should_stop():
                 self.close_telnet()
                 return outputs, "Aborted"
-            if self.command_tracker.has_executed(self.ip_address, command, self.connection_type):
-                logging.info(f"Skipping previously executed command: {command}")
-                continue  # Skip commands already executed for this device
-            if self.connection_type == 'telnet':
-                output, error = self.execute_telnet_command(command)
-            elif self.connection_type == 'ssh':
-                logging.warning("SSH not supported. Switching to Telnet fallback.")
-                self.connection_type = 'telnet'
-                output, error = self.execute_telnet_command(command)
-            else:
-                error = f"Invalid connection type: {self.connection_type}"
-                output = None
-
+            if self.command_tracker.has_executed(self.ip_address, command, 'telnet'):
+                logging.debug(f"Skipping previously executed command: {command}")
+                continue
+            output, error = self.execute_telnet_command(command)
             if error:
                 logging.error(f"Error executing command '{command}': {error}")
                 outputs.append(None)
             else:
                 outputs.append(output)
-                # Pass self.connection_type to mark_as_executed
-                self.command_tracker.mark_as_executed(self.ip_address, command, self.connection_type)
+                self.command_tracker.mark_as_executed(self.ip_address, command, 'telnet')
         self.close_telnet()
         return outputs, None if all(outputs) else "Some commands failed"
 
+    def execute_ssh_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
+        try:
+            ssh_cmd = (
+                f"ssh -o StrictHostKeyChecking=no "
+                f"-o HostKeyAlgorithms=+ssh-rsa "
+                f"-o PubkeyAcceptedKeyTypes=+ssh-rsa "
+                f"-p {self.port} {self.ip_address}"
+            )
+            logging.debug(f"Spawning SSH process to {self.ip_address}:{self.port}")
+            self.child = spawn(ssh_cmd, encoding='utf-8', timeout=30)
+            output_log = []
+
+            idx = self.expect_with_abort(
+                self.child,
+                ["Are you sure you want to continue connecting",
+                 r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
+                timeout=30,
+            )
+            if idx is None:
+                self.child.close(force=True); self.child = None; return [], "Aborted"
+            if idx in (4, 5):
+                self.child.close(force=True); self.child = None; return [], "SSH connection failed"
+            if idx == 0:  # host key warning
+                self.child.sendline("yes")
+                idx = self.expect_with_abort(
+                    self.child,
+                    [r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
+                    timeout=30,
+                )
+                if idx is None:
+                    self.child.close(force=True); self.child = None; return [], "Aborted"
+                if idx in (3, 4):
+                    self.child.close(force=True); self.child = None; return [], "SSH connection failed"
+                idx += 1  # re-align: 0->1(login), 1->2(username), 2->3(password)
+
+            if idx == 1:  # login: — Nokia CLI step
+                self.child.sendline("cli")
+                r = self.expect_with_abort(self.child, [r"[Uu]sername:", EOF, TIMEOUT], timeout=15)
+                if r is None:
+                    self.child.close(force=True); self.child = None; return [], "Aborted"
+                if r != 0:
+                    self.child.close(force=True); self.child = None; return [], "SSH login sequence failed"
+                self.child.sendline(self.username)
+            elif idx == 2:  # username:
+                self.child.sendline(self.username)
+            # idx == 3 means already at password:
+
+            if idx != 3:
+                r = self.expect_with_abort(self.child, [r"[Pp]assword:", EOF, TIMEOUT], timeout=15)
+                if r is None:
+                    self.child.close(force=True); self.child = None; return [], "Aborted"
+                if r != 0:
+                    self.child.close(force=True); self.child = None; return [], "SSH did not present password prompt"
+            self.child.sendline(self.password)
+
+            idx = self.expect_with_abort(
+                self.child, [r"[#>]", "incorrect", "invalid", EOF, TIMEOUT], timeout=30
+            )
+            if idx is None:
+                self.child.close(force=True); self.child = None; return [], "Aborted"
+            if idx in (1, 2):
+                self.child.close(force=True); self.child = None; return [], "Authentication failed"
+            if idx in (3, 4):
+                self.child.close(force=True); self.child = None; return [], "SSH session closed unexpectedly"
+
+            prompt = self.child.after.strip()
+            logging.debug(f"Detected SSH prompt: '{prompt}'")
+
+            for cmd in commands:
+                if self.should_stop():
+                    self.child.close(force=True); self.child = None; return output_log, "Aborted"
+                logging.debug(f"Sending SSH command: {cmd}")
+                self.child.sendline(cmd)
+                if self.expect_with_abort(self.child, cmd, timeout=15) is None:
+                    self.child.close(force=True); self.child = None; return output_log, "Aborted"
+                full_output = ""
+                while True:
+                    index = self.expect_with_abort(self.child, [prompt, EOF, TIMEOUT], timeout=30)
+                    if index is None:
+                        self.child.close(force=True); self.child = None; return output_log, "Aborted"
+                    full_output += self.child.before
+                    if index == 0:
+                        full_output += self.child.after
+                        break
+                    elif index in (1, 2):
+                        logging.warning(f"SSH session ended waiting for prompt (cmd: {cmd})")
+                        break
+                output_log.append(full_output.strip())
+                self.command_tracker.mark_as_executed(self.ip_address, cmd, 'ssh')
+
+            self.child.sendline("exit")
+            try:
+                self.expect_with_abort(self.child, [prompt, EOF, TIMEOUT], timeout=10)
+            except Exception:
+                pass
+            self.child.close(force=True)
+            self.child = None
+            return output_log, None
+
+        except Exception as e:
+            logging.exception("SSH execution exception")
+            if self.child:
+                try:
+                    self.child.close(force=True)
+                except Exception:
+                    pass
+                self.child = None
+            return [], str(e)
 
     def telnet_login(self, retries: int = 2) -> bool:
         if self.telnet:
             return True
 
         for attempt in range(1, retries + 1):
+            temp_telnet = None
             try:
                 if self.should_stop():
                     return False
                 logging.info(f"Connecting to {self.ip_address} via Telnet (Attempt {attempt})...")
-                self.telnet = telnetlib.Telnet(self.ip_address, timeout=self.timeout)
+                temp_telnet = Telnet(self.ip_address, timeout=self.timeout)
 
-                self.telnet.read_until(b"login: ", timeout=5)
-                self.telnet.write(b"cli\n")
-                self.telnet.read_until(b"Username: ", timeout=5)
-                self.telnet.write(self.username.encode('ascii') + b"\n")
-                self.telnet.read_until(b"Password: ", timeout=5)
-                self.telnet.write(self.password.encode('ascii') + b"\n")
+                temp_telnet.read_until(b"login: ", timeout=5)
+                temp_telnet.write(b"cli\n")
+                temp_telnet.read_until(b"Username: ", timeout=5)
+                temp_telnet.write(self.username.encode('ascii') + b"\n")
+                temp_telnet.read_until(b"Password: ", timeout=5)
+                temp_telnet.write(self.password.encode('ascii') + b"\n")
                 if self.sleep_with_abort(1):
-                    self.close_telnet()
+                    try:
+                        temp_telnet.close()
+                    except Exception:
+                        pass
                     return False
 
-                login_response = self.telnet.read_very_eager().decode('ascii')
+                login_response = temp_telnet.read_very_eager().decode('ascii')
                 if "Login incorrect" in login_response or "invalid" in login_response.lower():
                     logging.error("Telnet login failed: Invalid credentials.")
-                    self.telnet.close()
-                    self.telnet = None
+                    try:
+                        temp_telnet.close()
+                    except Exception:
+                        pass
                     continue
 
                 logging.info("Telnet login successful.")
+                self.telnet = temp_telnet
                 return True
             except Exception as e:
                 logging.error(f"Telnet login attempt {attempt} failed: {e}")
-                self.telnet = None
+                if temp_telnet is not None:
+                    try:
+                        temp_telnet.close()
+                    except Exception as close_err:
+                        logging.debug(f"Error closing Telnet after failed login: {close_err}")
 
         return False
 
@@ -159,20 +297,22 @@ class Script:
             if not self.telnet_login():
                 return None, "Aborted" if self.should_stop() else "Telnet login failed."
 
-            logging.info(f"Successfully logged in via Telnet. Executing command: {command}")
+            logging.debug(f"Successfully logged in via Telnet. Executing command: {command}")
             self.telnet.write(command.encode('ascii') + b"\n")
             if self.sleep_with_abort(3.5):
-                self.close_telnet()
                 return None, "Aborted"
             output = self.capture_full_output_telnet()
             if self.should_stop():
-                self.close_telnet()
                 return None, "Aborted"
             return output, None
 
         except Exception as e:
             logging.error(f"Telnet connection failed: {e}")
             return None, str(e)
+        finally:
+            # Don't close on every command, only when needed
+            # close_telnet() is called after all commands in execute_commands()
+            pass
 
 
     def capture_full_output_telnet(self) -> str:
@@ -715,7 +855,7 @@ class Script:
             logging.info(f"Starting Excel output for {len(outputs)} devices.")
             for ip, data_dict in outputs.items():
                 try:
-                    logging.info(f"Processing data for IP {ip}.")
+                    logging.debug(f"Processing data for IP {ip}.")
                     combined_df = self.combine_and_format_data(data_dict)  # Prepare combined data for each IP
                     if combined_df.empty:
                         logging.warning(f"No data to write for IP {ip}")

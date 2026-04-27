@@ -2,9 +2,6 @@ import logging
 import os
 import subprocess
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
 class Updater:
     def __init__(self, repo_path=None):
         self.repo_path = repo_path or "https://github.com/Chees3loaf/Network-Inventory-Update"

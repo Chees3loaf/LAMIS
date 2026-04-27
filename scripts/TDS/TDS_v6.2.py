@@ -4,7 +4,10 @@ from time import strftime, gmtime
 import sys
 import os
 import socket
-import telnetlib
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..', '..'))
+from utils.telnet import Telnet as _Telnet
 import re
 import glob
 import ipaddress
@@ -250,7 +253,7 @@ def LOGIN_SSH():
 def LOGIN_TELNET():
     global telnet_6500
     try:
-        telnet_6500 = telnetlib.Telnet(HOST, PORT, TIMEOUT)
+        telnet_6500 = _Telnet(HOST, PORT, TIMEOUT)
         return 'YES'
     except Exception as err:
         F_DBG.write('\nTELNET Connection Error: %s' % str(err))
@@ -6720,7 +6723,7 @@ def MCEMON_STATUS(mcemonPort):
         mon_6500.close()
     elif METHOD == 'TELNET':
         try:
-            tel_6500 = telnetlib.Telnet(HOST, mcemonPort, mTimeout)
+            tel_6500 = _Telnet(HOST, mcemonPort, mTimeout)
         except:
             wasConnected = 'No telnet for this IP'
             return mcemon
@@ -16357,7 +16360,7 @@ def LOGIN_TELNET():
     f1 = 'Trying to login to ' + HOST + ':' + PORT + '...'
     try:
         print (f1)
-        telnet_6500 = telnetlib.Telnet(HOST, PORT, TIMEOUT)
+        telnet_6500 = _Telnet(HOST, PORT, TIMEOUT)
     except:
         wasConnected = 'No telnet for this IP'
         F_DBG.write('%s \n%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% Premature Ending of %s %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%\n\n' % (wasConnected, HOST))

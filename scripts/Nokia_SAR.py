@@ -9,9 +9,6 @@ from typing import Callable, Dict, List, Optional, Tuple
 import serial
 from script_interface import BaseScript, DatabaseCache, get_inventory_db_path, get_tracker
 
-# Ensure logging is configured
-logging.basicConfig(level=logging.DEBUG)
-
 class Script(BaseScript):
     def __init__(self, *,
                  db_path=None,
@@ -103,9 +100,11 @@ class Script(BaseScript):
             raise ValueError("Invalid connection type")
     
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
+        shell = None
         try:
             self.ssh_client = paramiko.SSHClient()
-            self.ssh_client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            self.ssh_client.load_system_host_keys()
+            self.ssh_client.set_missing_host_key_policy(paramiko.WarningPolicy())
             logging.info(f"Connecting to {ip_address}")
             self.ssh_client.connect(ip_address,
                                username=username,
@@ -118,41 +117,40 @@ class Script(BaseScript):
 
             shell = self.ssh_client.invoke_shell()
             if self.sleep_with_abort(1):
-                shell.close()
-                self.ssh_client.close()
-                self.ssh_client = None
                 return [], "Aborted"
 
             outputs = []
             for command in commands:
                 if self.should_stop():
-                    shell.close()
-                    self.ssh_client.close()
-                    self.ssh_client = None
                     return outputs, "Aborted"
                 output = self.capture_full_output_ssh(shell, command)
                 if output is None:
                     error_message = "Aborted" if self.should_stop() else f"Failed to execute command: {command}"
                     logging.error(error_message)
-                    shell.close()
-                    self.ssh_client.close()
-                    self.ssh_client = None
                     return outputs, error_message
                 outputs.append(output)
 
-            shell.close()
-            self.ssh_client.close()
-            self.ssh_client = None
             return outputs, None
 
         except Exception as e:
             logging.error(f"SSH connection failed: {e}")
-            self.ssh_client = None
             return [], str(e)
+        finally:
+            if shell is not None:
+                try:
+                    shell.close()
+                except Exception as e:
+                    logging.debug(f"Error closing shell: {e}")
+            if self.ssh_client is not None:
+                try:
+                    self.ssh_client.close()
+                except Exception as e:
+                    logging.debug(f"Error closing SSH client: {e}")
+            self.ssh_client = None
 
     def capture_full_output_ssh(self, shell, command: str) -> str:
         try:
-            logging.info(f"Executing command: {command}")
+            logging.debug(f"Executing command: {command}")
             shell.send(command + '\n')
 
             output = ""
@@ -431,9 +429,12 @@ class Script(BaseScript):
         try:
             output = output.replace("Press any key to continue (Q to quit)", "").strip()
 
+            # When MDA is "(not provisioned)", the equipped type appears on the next line - collapse it onto the same line
+            output = re.sub(r'\(not provisioned\)\s*\n\s+(\S+)', r'\1', output)
+
             # Combined regex to capture MDA, Type, Part Number, and Serial Number
             mda_block_pattern = re.compile(
-                r"^\s*\d*\s+(?P<MDA>\d+)\s+(?P<Type>[\w\(\)\-]+).*?"
+                r"^\s*\d*\s+(?P<MDA>\d+)\s+(?P<Type>[\w\(\)\-\+]+).*?"
                 r"Part number\s*:\s*(?P<PartNumber>[^\r\n]+).*?"
                 r"Serial number\s*:\s*(?P<SerialNumber>[^\r\n]+)",
                 re.DOTALL | re.MULTILINE
@@ -557,15 +558,15 @@ class Script(BaseScript):
 
                     # ✅ **Ensure missing values are assigned properly**
                     if not current_interface:
-                        logging.warning(f"Missing Interface in entry. Assigning placeholder.")
+                        logging.debug(f"Missing Interface in entry. Assigning placeholder.")
                         current_interface = f"Unknown Interface"
 
                     if not current_serial_number:
-                        logging.warning(f"Missing Serial Number in entry. Assigning placeholder.")
+                        logging.debug(f"Missing Serial Number in entry. Assigning placeholder.")
                         current_serial_number = f"Unknown Serial"
 
                     if not current_model_number or current_model_number.lower() == "none":
-                        logging.warning(f"Model Number missing, using Part Number instead: {current_part_number}")
+                        logging.debug(f"Model Number missing, using Part Number instead: {current_part_number}")
                         current_model_number = current_part_number if current_part_number else "Unknown"
 
                     # ✅ **Extract Optical Compliance**
@@ -607,7 +608,7 @@ class Script(BaseScript):
                         port_data.append(port_info)
                         logging.debug(f"Extracted port data: {port_info}")
                     else:
-                        logging.warning(
+                        logging.debug(
                             f"Skipping entry due to missing data:\n"
                             f"Interface: {current_interface}, Serial: {current_serial_number}, "
                             f"Model: {current_model_number}, Optical Compliance: {current_optical_compliance}"
@@ -622,7 +623,7 @@ class Script(BaseScript):
 
             # ✅ **Final validation**
             if not port_data:
-                logging.warning("No port data found in output.")
+                logging.debug("No port data found in output.")
             else:
                 logging.debug(f"Data successfully extracted: {port_data}")
 
@@ -643,7 +644,7 @@ class Script(BaseScript):
         # ✅ **Create DataFrame and remove empty rows**
         df = pd.DataFrame(port_data).dropna(how='all')
         if df.empty:
-            logging.warning("No port data found or parsing failed. Returning empty DataFrame.")
+            logging.debug("No port data found or parsing failed. Returning empty DataFrame.")
         else:
             logging.info(f"DataFrame for port details is populated:\n{df}")
 

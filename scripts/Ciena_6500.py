@@ -11,17 +11,12 @@ try:
 except ImportError:
     from redexpect import spawn, EOF, TIMEOUT
 
+from script_interface import BaseScript
 
 
 db_path = os.path.join(os.path.dirname(__file__), "..", "data", "network_inventory.db")
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-
-class Script:
+class Script(BaseScript):
     def __init__(self, connection_type='ssh', **kwargs):
         logging.debug("Initializing Script class")
         self.connection_type = connection_type
@@ -33,7 +28,7 @@ class Script:
             self.username = kwargs.get('username', 'ADMIN')
             self.password = kwargs.get('password', 'ADMIN')
             self.port = kwargs.get('port', 20002)
-            logging.info(f"Configured SSH connection: {self.ip_address}:{self.port} as {self.username}")
+            logging.debug(f"Configured SSH connection: {self.ip_address}:{self.port} as {self.username}")
 
     def should_stop(self) -> bool:
         return bool(self.stop_callback and self.stop_callback())
@@ -43,7 +38,7 @@ class Script:
         if self.child:
             try:
                 self.child.close(force=True)
-                logging.info("SSH spawn process forcefully closed for abort.")
+                logging.debug("SSH spawn process forcefully closed for abort.")
             except Exception as e:
                 logging.debug(f"Error force-closing spawn: {e}")
             finally:
@@ -68,7 +63,7 @@ class Script:
             'equipment inventory show']
 
     def execute_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
-        logging.info(f"Executing commands over {self.connection_type}")
+        logging.debug(f"Executing commands over {self.connection_type}")
         if self.connection_type == 'ssh':
             return self.execute_ssh_commands(self.ip_address, self.username, self.password, commands)
         raise ValueError("Unsupported connection type")
@@ -81,7 +76,7 @@ class Script:
                 f"-o PubkeyAcceptedKeyTypes=+ssh-rsa "
                 f"-p {self.port} {ip_address}"
             )
-            logging.info(f"Spawning SSH process to {ip_address}:{self.port}")
+            logging.debug(f"Spawning SSH process to {ip_address}:{self.port}")
             self.child = spawn(ssh_cmd, encoding='utf-8', timeout=30)
 
             output_log = []
@@ -127,7 +122,7 @@ class Script:
                     self.child.close(force=True)
                     self.child = None
                     return output_log, "Aborted"
-                logging.info(f"Sending command: {cmd}")
+                logging.debug(f"Sending command: {cmd}")
                 self.child.sendline(cmd)
                 if self.expect_with_abort(self.child, cmd, timeout=30) is None:
                     self.child.close(force=True)
@@ -231,11 +226,11 @@ class Script:
             logging.debug(f"Row {idx} formatted: {formatted_entry}")
             formatted.append(formatted_entry)
 
-        logging.info(f"Formatted {len(formatted)} inventory items (Skipped: {skipped}) from IP {source_ip}")
+        logging.debug(f"Formatted {len(formatted)} inventory items (Skipped: {skipped}) from IP {source_ip}")
         return formatted
 
     def process_outputs(self, raw_outputs: List[str], ip_address: str, outputs: Dict[str, Dict[str, Any]]):
-        logging.info(f"Processing outputs from {ip_address}")
+        logging.debug(f"Processing outputs from {ip_address}")
         system_info = {'System Name': 'Ciena 6500', 'System Type': 'Optical'}
         combined_output = "\n".join(raw_outputs)
 
@@ -271,7 +266,7 @@ class Script:
         cache_callback(df, "equipment_inventory")
 
     def cache_data_frame(self, outputs: Dict[str, Dict[str, Dict]], ip: str, key: str, df: pd.DataFrame, system_info: Dict[str, str]) -> None:
-        logging.info(f"Caching data for IP: {ip}, Key: {key}, Rows: {len(df)}")
+        logging.debug(f"Caching data for IP: {ip}, Key: {key}, Rows: {len(df)}")
         if ip not in outputs:
             outputs[ip] = {}
         outputs[ip][key] = {'DataFrame': df, 'System Info': system_info}

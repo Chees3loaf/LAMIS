@@ -1,17 +1,37 @@
 import logging
 import os
+from datetime import datetime
 from tkinter import Tk, Label
 from PIL import Image, ImageTk
-from gui.gui3_0 import InventoryGUI
+from gui.gui4_0 import InventoryGUI
 import script_interface
 from utils.update import Updater
 from script_interface import CommandTracker
+import config
+from utils.helpers import get_database_path
 
-# Configure logging
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging — write to console AND a timestamped log file
+_log_dir = os.path.join(os.path.dirname(__file__), "logs")
+os.makedirs(_log_dir, exist_ok=True)
+_log_file = os.path.join(_log_dir, datetime.now().strftime("LAMIS_%Y-%m-%d_%H-%M-%S.log"))
+
+_root_logger = logging.getLogger()
+_root_logger.setLevel(config.LOG_LEVEL)
+_fmt = logging.Formatter(config.LOG_FORMAT)
+
+_console_handler = logging.StreamHandler()
+_console_handler.setFormatter(_fmt)
+_root_logger.addHandler(_console_handler)
+
+_file_handler = logging.FileHandler(_log_file, encoding="utf-8")
+_file_handler.setFormatter(_fmt)
+_root_logger.addHandler(_file_handler)
 
 # Suppress PIL debug logs
-logging.getLogger("PIL").setLevel(logging.WARNING)
+logging.getLogger("PIL").setLevel(config.PIL_LOG_LEVEL)
+
+# Suppress paramiko internal debug logs (kex handshake, cipher negotiation, etc.)
+logging.getLogger("paramiko").setLevel(logging.WARNING)
 
 class LoadingScreen:
     def __init__(self, root):
@@ -64,7 +84,7 @@ def check_updates(loading_screen):
 def start_gui(update_available):
     root = Tk()
     command_tracker = CommandTracker()
-    db_cache = script_interface.DatabaseCache(os.path.join(os.path.dirname(__file__), "..", "data", "network_inventory.db"))
+    db_cache = script_interface.DatabaseCache(str(get_database_path()))
 
     InventoryGUI(root, update_available, command_tracker, db_cache)
     root.mainloop()
@@ -72,6 +92,7 @@ def start_gui(update_available):
 
 def main():
     logging.info("Starting LightRiver Automated MultiVendor Inventory System (LAMIS)")
+    logging.info(f"Log file: {_log_file}")
     loading_screen, loading_root = show_loading_screen()
     loading_root.after(100, lambda: check_updates(loading_screen))
     loading_root.mainloop()
