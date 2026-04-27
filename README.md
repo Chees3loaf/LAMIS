@@ -148,7 +148,7 @@ makensis LAMIS.nsi
 
 ### Detailed Guide
 
-See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for:
+See [docs/BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for:
 - Complete build process walkthrough
 - Testing and verification steps
 - Troubleshooting common issues
