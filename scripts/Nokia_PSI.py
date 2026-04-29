@@ -1,18 +1,20 @@
 import os
 import logging
 import re
+import ipaddress
 import time
 from tkinter import messagebox
 import pandas as pd
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
+from utils.helpers import ensure_host_key_known, get_known_hosts_path
 from utils.telnet import Telnet
 
 try:
-    from wexpect import spawn, EOF, TIMEOUT
+    from wexpect import spawn, EOF, TIMEOUT  # type: ignore[import-not-found]
 except ImportError:
-    from redexpect import spawn, EOF, TIMEOUT
+    from pexpect import spawn, EOF, TIMEOUT  # type: ignore[import-not-found]
 
 
 class Script(BaseScript):
@@ -148,40 +150,46 @@ class Script(BaseScript):
 
     def execute_ssh_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         try:
-            ssh_cmd = (
-                f"ssh -o StrictHostKeyChecking=no "
-                f"-o HostKeyAlgorithms=+ssh-rsa "
-                f"-o PubkeyAcceptedKeyTypes=+ssh-rsa "
-                f"-p {self.port} {self.ip_address}"
-            )
+            # Validate IP address format to prevent injection attacks
+            try:
+                ipaddress.ip_address(self.ip_address)
+            except ValueError:
+                return [], f"Invalid IP address format: {self.ip_address}"
+            
+            # Validate username to prevent injection (alphanumeric, dash, underscore, dot only)
+            if not re.match(r'^[a-zA-Z0-9._-]+$', self.username):
+                return [], f"Invalid username format: {self.username}"
+            
+            _kh = str(get_known_hosts_path())
+            if not ensure_host_key_known(str(self.ip_address), port=self.port):
+                return [], (
+                    f"SSH host key verification failed or rejected for "
+                    f"{self.ip_address}:{self.port}"
+                )
+            ssh_args = [
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", f"UserKnownHostsFile={_kh}",
+                "-o", "HostKeyAlgorithms=+ssh-rsa",
+                "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
+                "-p", str(self.port),
+                "-l", self.username,
+                str(self.ip_address),
+            ]
             logging.debug(f"Spawning SSH process to {self.ip_address}:{self.port}")
-            self.child = spawn(ssh_cmd, encoding='utf-8', timeout=30)
+            self.child = spawn("ssh", args=ssh_args, encoding='utf-8', timeout=30)
             output_log = []
 
             idx = self.expect_with_abort(
                 self.child,
-                ["Are you sure you want to continue connecting",
-                 r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
+                [r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
                 timeout=30,
             )
             if idx is None:
                 self.child.close(force=True); self.child = None; return [], "Aborted"
-            if idx in (4, 5):
+            if idx in (3, 4):
                 self.child.close(force=True); self.child = None; return [], "SSH connection failed"
-            if idx == 0:  # host key warning
-                self.child.sendline("yes")
-                idx = self.expect_with_abort(
-                    self.child,
-                    [r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
-                    timeout=30,
-                )
-                if idx is None:
-                    self.child.close(force=True); self.child = None; return [], "Aborted"
-                if idx in (3, 4):
-                    self.child.close(force=True); self.child = None; return [], "SSH connection failed"
-                idx += 1  # re-align: 0->1(login), 1->2(username), 2->3(password)
 
-            if idx == 1:  # login: — Nokia CLI step
+            if idx == 0:  # login: — Nokia CLI step
                 self.child.sendline("cli")
                 r = self.expect_with_abort(self.child, [r"[Uu]sername:", EOF, TIMEOUT], timeout=15)
                 if r is None:
@@ -189,11 +197,11 @@ class Script(BaseScript):
                 if r != 0:
                     self.child.close(force=True); self.child = None; return [], "SSH login sequence failed"
                 self.child.sendline(self.username)
-            elif idx == 2:  # username:
+            elif idx == 1:  # username:
                 self.child.sendline(self.username)
-            # idx == 3 means already at password:
+            # idx == 2 means already at password:
 
-            if idx != 3:
+            if idx != 2:
                 r = self.expect_with_abort(self.child, [r"[Pp]assword:", EOF, TIMEOUT], timeout=15)
                 if r is None:
                     self.child.close(force=True); self.child = None; return [], "Aborted"

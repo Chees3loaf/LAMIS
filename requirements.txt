@@ -25,6 +25,8 @@ cffi==2.0.0
 psutil==7.2.2
 pywin32==311
 wexpect==4.0.0
+pexpect==4.9.0
+keyring==24.1.1
 
 # Terminal/Documentation Support
 docx==0.2.4

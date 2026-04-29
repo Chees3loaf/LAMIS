@@ -2,7 +2,7 @@
 import os
 import logging
 import tkinter as tk
-from tkinter import ttk, filedialog
+from tkinter import ttk, filedialog, messagebox
 
 try:
     from serial.tools import list_ports
@@ -10,6 +10,14 @@ except Exception:  # pragma: no cover - safe fallback when pyserial extras are u
     list_ports = None
 
 import config
+from utils.helpers import (
+    UploadValidationError,
+    friendly_error,
+    get_credentials,
+    save_credentials,
+    scrub_password_widget,
+    validate_uploaded_file,
+)
 
 
 class InventoryFrame(ttk.Frame):
@@ -25,6 +33,10 @@ class InventoryFrame(ttk.Frame):
         super().__init__(parent)
         self.controller = controller
         self.inventory_report_path: str | None = None
+        # Customer/Project/PO/SO auto-extracted from the uploaded report file.
+        # Used to pre-fill the run-context popup so the user doesn't have to
+        # retype values that already exist in the file they just selected.
+        self.uploaded_metadata: dict[str, str] = {}
         self._build()
 
     def _get_available_serial_ports(self) -> list[str]:
@@ -120,11 +132,10 @@ class InventoryFrame(ttk.Frame):
         tk.Label(self.lan_details_frame, text="Username:").pack(side=tk.LEFT, padx=(10, 5))
         self.lan_username_entry = tk.Entry(self.lan_details_frame, width=14)
         self.lan_username_entry.pack(side=tk.LEFT, padx=5)
-        self.lan_username_entry.insert(0, config.DEFAULT_USERNAME)
         tk.Label(self.lan_details_frame, text="Password:").pack(side=tk.LEFT, padx=(10, 5))
         self.lan_password_entry = tk.Entry(self.lan_details_frame, width=14, show="*")
         self.lan_password_entry.pack(side=tk.LEFT, padx=5)
-        self.lan_password_entry.insert(0, config.DEFAULT_PASSWORD)
+        tk.Button(self.lan_details_frame, text="Save Creds", command=self._save_lan_credentials, width=10).pack(side=tk.LEFT, padx=5)
 
         self.serial_details_frame = ttk.Frame(self.manual_connection_frame)
         self.serial_details_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -154,11 +165,13 @@ class InventoryFrame(ttk.Frame):
         tk.Label(self.serial_details_frame, text="Username:").pack(side=tk.LEFT, padx=(10, 5))
         self.serial_username_entry = tk.Entry(self.serial_details_frame, width=14)
         self.serial_username_entry.pack(side=tk.LEFT, padx=5)
-        self.serial_username_entry.insert(0, config.DEFAULT_USERNAME)
         tk.Label(self.serial_details_frame, text="Password:").pack(side=tk.LEFT, padx=(10, 5))
         self.serial_password_entry = tk.Entry(self.serial_details_frame, width=14, show="*")
         self.serial_password_entry.pack(side=tk.LEFT, padx=5)
-        self.serial_password_entry.insert(0, config.DEFAULT_PASSWORD)
+        tk.Button(self.serial_details_frame, text="Save Creds", command=self._save_serial_credentials, width=10).pack(side=tk.LEFT, padx=5)
+
+        # Try to load saved credentials and populate fields
+        self._load_saved_credentials()
 
         # --- Optional existing report (append mode) ---
         self.report_frame = ttk.LabelFrame(self, text="Device Report (Optional)")
@@ -320,25 +333,96 @@ class InventoryFrame(ttk.Frame):
         if not file_path:
             return
 
+        try:
+            resolved = validate_uploaded_file(file_path, allowed_kinds=("xlsx", "xls"))
+        except UploadValidationError as e:
+            messagebox.showerror("Invalid Report File", str(e))
+            logging.warning(f"Inventory report upload rejected: {e}")
+            return
+
+        file_path = str(resolved)
         self.inventory_report_path = file_path
         file_name = os.path.basename(file_path)
+
+        # Auto-extract Customer/Project/PO/SO so the run-context popup can
+        # pre-fill them. Same logic as the packing slip "Upload File" path.
+        try:
+            from utils.workbook_metadata import extract_workbook_metadata
+            self.uploaded_metadata = extract_workbook_metadata(file_path)
+        except Exception as e:
+            logging.debug(f"Inventory report metadata extraction failed: {e}")
+            self.uploaded_metadata = {}
+
+        meta_summary = ", ".join(
+            f"{k.title()}={v}" for k, v in self.uploaded_metadata.items() if v
+        )
         self.inventory_file_label.config(
             text=f"Using existing report: {file_name}", foreground="green"
         )
         out = self.controller.output_screen
         out.insert(tk.END, f"Inventory append mode enabled: {file_name}\n")
+        if meta_summary:
+            out.insert(tk.END, f"Pre-filled from file: {meta_summary}\n")
         out.see(tk.END)
         logging.info(f"Inventory report selected for append: {file_path}")
+        if meta_summary:
+            logging.info(f"Inventory report metadata: {meta_summary}")
 
     def clear_inventory_report_upload(self) -> None:
         """Clear the append-mode report selection."""
         self.inventory_report_path = None
+        self.uploaded_metadata = {}
         self.inventory_file_label.config(
             text="No report selected (new workbook will be created)", foreground="gray"
         )
         out = self.controller.output_screen
         out.insert(tk.END, "Inventory append mode disabled; a new report will be created.\n")
         out.see(tk.END)
+
+    # ------------------------------------------------------------------
+    # Credential management
+    # ------------------------------------------------------------------
+
+    def _load_saved_credentials(self) -> None:
+        """Load saved credentials from Credential Manager and populate entry fields if found."""
+        try:
+            username, password = get_credentials()
+            if username and password:
+                self.lan_username_entry.insert(0, username)
+                self.lan_password_entry.insert(0, password)
+                self.serial_username_entry.insert(0, username)
+                self.serial_password_entry.insert(0, password)
+                logging.debug(f"Loaded credentials for user '{username}' from Credential Manager")
+        except Exception as e:
+            logging.warning(f"Could not load saved credentials: {e}")
+
+    def _save_lan_credentials(self) -> None:
+        """Save credentials from LAN entry fields to Credential Manager."""
+        username = self.lan_username_entry.get().strip()
+        password = self.lan_password_entry.get().strip()
+        if not username or not password:
+            messagebox.showwarning("Missing Credentials", "Please enter both username and password.")
+            return
+        if save_credentials(username, password):
+            scrub_password_widget(self.lan_password_entry)
+            password = ""
+            messagebox.showinfo("Success", f"Credentials for '{username}' saved to Windows Credential Manager.\n\nThey will be automatically loaded on next app start.")
+        else:
+            messagebox.showerror("Error", "Failed to save credentials. Check the application log for details.")
+
+    def _save_serial_credentials(self) -> None:
+        """Save credentials from Serial entry fields to Credential Manager."""
+        username = self.serial_username_entry.get().strip()
+        password = self.serial_password_entry.get().strip()
+        if not username or not password:
+            messagebox.showwarning("Missing Credentials", "Please enter both username and password.")
+            return
+        if save_credentials(username, password):
+            scrub_password_widget(self.serial_password_entry)
+            password = ""
+            messagebox.showinfo("Success", f"Credentials for '{username}' saved to Windows Credential Manager.\n\nThey will be automatically loaded on next app start.")
+        else:
+            messagebox.showerror("Error", "Failed to save credentials. Check the application log for details.")
 
     # ------------------------------------------------------------------
     # Internal helpers

@@ -14,6 +14,23 @@ This guide covers building LAMIS into a professional Windows installer.
 pip install -r requirements.txt
 ```
 
+For **hardened, supply-chain-verified installs** (recommended for production
+builds), use the hash-pinned lock file instead:
+
+```bash
+pip install --require-hashes -r requirements.lock
+```
+
+Regenerate the lock file after upgrading any package in `requirements.txt`:
+
+```bash
+python scripts/generate_requirements_lock.py
+```
+
+The lock file is platform-specific (it pins wheel hashes for the active Python
+version and OS). Commit the regenerated file alongside the corresponding
+`requirements.txt` change.
+
 ### 3. Prepare Icon (Optional but Recommended)
 - Create or provide `icon.ico` in the project root (256×256 pixels minimum)
 - If not present, build will proceed without icon

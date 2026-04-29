@@ -1,5 +1,7 @@
 """TDS diagnostics frame — widgets and logic for the TDS mode."""
+import ipaddress
 import os
+import re
 import sys
 import logging
 import subprocess
@@ -8,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 
 import config
+from utils.helpers import ensure_host_key_known, friendly_error, scrub_password_widget
 
 
 class TDSFrame(ttk.Frame):
@@ -79,6 +82,16 @@ class TDSFrame(ttk.Frame):
         if not ip:
             messagebox.showerror("Input Error", "Please enter a device IP address.")
             return
+        # Validate: must be a valid IP or a safe hostname (alphanumeric, dots, dashes only)
+        _ip_valid = False
+        try:
+            ipaddress.ip_address(ip)
+            _ip_valid = True
+        except ValueError:
+            _ip_valid = bool(re.match(r'^[A-Za-z0-9][A-Za-z0-9.\-]*$', ip))
+        if not _ip_valid:
+            messagebox.showerror("Input Error", "Invalid IP address or hostname format.")
+            return
         if platform not in ("6500", "rls"):
             messagebox.showerror("Input Error", "Platform must be either 6500 or rls.")
             return
@@ -90,6 +103,18 @@ class TDSFrame(ttk.Frame):
             return
         if not file_name:
             messagebox.showerror("Input Error", "Please enter a file name.")
+            return
+
+        # F009: pre-verify the device's SSH host key in the GUI thread (where
+        # the Tk prompt can run) before launching the TDS subprocess. The
+        # subprocess uses RejectPolicy and will refuse if the key isn't in
+        # known_hosts, so this step is what makes that strict mode usable.
+        if not ensure_host_key_known(ip):
+            messagebox.showerror(
+                "Host Key Verification Failed",
+                f"Could not verify the SSH host key for {ip}. "
+                "TDS will not be launched.",
+            )
             return
 
         tds_script_path = os.path.normpath(
@@ -116,18 +141,20 @@ class TDSFrame(ttk.Frame):
                     "--platform", platform,
                     "--username", username,
                     "--file-name", file_name,
+                    "--read-password-stdin",
                 ]
-                run_env = os.environ.copy()
-                run_env["TDS_PASSWORD"] = password
 
                 result = subprocess.run(
                     command,
+                    input=password,
                     capture_output=True,
                     text=True,
                     cwd=os.path.dirname(tds_script_path),
-                    env=run_env,
                     timeout=config.TDS_TIMEOUT,
                 )
+
+                # Clear password widget immediately after use
+                scrub_password_widget(self.tds_password_entry)
 
                 combined = ""
                 if result.stdout:
@@ -160,7 +187,7 @@ class TDSFrame(ttk.Frame):
                 def on_error() -> None:
                     self.tds_run_button.config(state=tk.NORMAL)
                     self.tds_status_label.config(text="Status: Error")
-                    messagebox.showerror("TDS Error", f"Failed to run TDS script:\n{exc}")
+                    messagebox.showerror("TDS Error", f"Failed to run TDS script:\n{friendly_error(exc)}")
 
                 root.after(0, on_error)
 

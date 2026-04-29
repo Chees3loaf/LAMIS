@@ -1,20 +1,30 @@
 import os
+import sys
 import sqlite3
 import logging
 import re
+import ipaddress
 import time
 from tkinter import messagebox
 import pandas as pd
 import subprocess
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
+
+# Allow running this file directly from the scripts/ directory
+# (`python Nokia_1830.py`) by ensuring the project root is on sys.path.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
+from utils.helpers import ensure_host_key_known, friendly_error, get_known_hosts_path
 from utils.telnet import Telnet
 
 try:
-    from wexpect import spawn, EOF, TIMEOUT
+    from wexpect import spawn, EOF, TIMEOUT  # type: ignore[import-not-found]
 except ImportError:
-    from redexpect import spawn, EOF, TIMEOUT
+    from pexpect import spawn, EOF, TIMEOUT  # type: ignore[import-not-found]
 
 
 # Ensure logging is configured
@@ -118,59 +128,76 @@ class Script(BaseScript):
 
     def _execute_telnet_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         outputs = []
-        for command in commands:
-            if self.should_stop():
-                self.close_telnet()
-                return outputs, "Aborted"
-            if self.command_tracker.has_executed(self.ip_address, command, 'telnet'):
-                logging.debug(f"Skipping previously executed command: {command}")
-                continue
-            output, error = self.execute_telnet_command(command)
-            if error:
-                logging.error(f"Error executing command '{command}': {error}")
-                outputs.append(None)
-            else:
-                outputs.append(output)
-                self.command_tracker.mark_as_executed(self.ip_address, command, 'telnet')
-        self.close_telnet()
-        return outputs, None if all(outputs) else "Some commands failed"
+        try:
+            # Open ONE persistent session — the probe proved a single session
+            # handles all 5 inventory commands cleanly. Per-command sessions
+            # were a workaround for an unrelated bug (CRLF vs LF, SPACE flush).
+            if not self.telnet_login():
+                return outputs, "Aborted" if self.should_stop() else "Telnet login failed."
+
+            total = len(commands)
+            logging.info(f"Collecting inventory from {self.ip_address} ({total} commands)")
+            for idx, command in enumerate(commands, start=1):
+                if self.should_stop():
+                    return outputs, "Aborted"
+                if self.command_tracker.has_executed(self.ip_address, command, 'telnet'):
+                    logging.debug(f"Skipping previously executed command: {command}")
+                    continue
+                logging.info(f"[{self.ip_address}] ({idx}/{total}) Executing: {command}")
+                output, error = self.execute_telnet_command(command)
+                if error:
+                    logging.error(f"Error executing command '{command}': {error}")
+                    outputs.append(None)
+                else:
+                    outputs.append(output)
+                    self.command_tracker.mark_as_executed(self.ip_address, command, 'telnet')
+            logging.info(f"Inventory collection complete for {self.ip_address}")
+            return outputs, None if all(outputs) else "Some commands failed"
+        finally:
+            self.close_telnet()
 
     def execute_ssh_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         try:
-            ssh_cmd = (
-                f"ssh -o StrictHostKeyChecking=no "
-                f"-o HostKeyAlgorithms=+ssh-rsa "
-                f"-o PubkeyAcceptedKeyTypes=+ssh-rsa "
-                f"-p {self.port} {self.ip_address}"
-            )
+            # Validate IP address format to prevent injection attacks
+            try:
+                ipaddress.ip_address(self.ip_address)
+            except ValueError:
+                return [], f"Invalid IP address format: {self.ip_address}"
+            
+            # Validate username to prevent injection (alphanumeric, dash, underscore, dot only)
+            if not re.match(r'^[a-zA-Z0-9._-]+$', self.username):
+                return [], f"Invalid username format: {self.username}"
+            
+            _kh = str(get_known_hosts_path())
+            if not ensure_host_key_known(str(self.ip_address), port=self.port):
+                return [], (
+                    f"SSH host key verification failed or rejected for "
+                    f"{self.ip_address}:{self.port}"
+                )
+            ssh_args = [
+                "-o", "StrictHostKeyChecking=yes",
+                "-o", f"UserKnownHostsFile={_kh}",
+                "-o", "HostKeyAlgorithms=+ssh-rsa",
+                "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
+                "-p", str(self.port),
+                "-l", self.username,
+                str(self.ip_address),
+            ]
             logging.debug(f"Spawning SSH process to {self.ip_address}:{self.port}")
-            self.child = spawn(ssh_cmd, encoding='utf-8', timeout=30)
+            self.child = spawn("ssh", args=ssh_args, encoding='utf-8', timeout=30)
             output_log = []
 
             idx = self.expect_with_abort(
                 self.child,
-                ["Are you sure you want to continue connecting",
-                 r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
+                [r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
                 timeout=30,
             )
             if idx is None:
                 self.child.close(force=True); self.child = None; return [], "Aborted"
-            if idx in (4, 5):
+            if idx in (3, 4):
                 self.child.close(force=True); self.child = None; return [], "SSH connection failed"
-            if idx == 0:  # host key warning
-                self.child.sendline("yes")
-                idx = self.expect_with_abort(
-                    self.child,
-                    [r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
-                    timeout=30,
-                )
-                if idx is None:
-                    self.child.close(force=True); self.child = None; return [], "Aborted"
-                if idx in (3, 4):
-                    self.child.close(force=True); self.child = None; return [], "SSH connection failed"
-                idx += 1  # re-align: 0->1(login), 1->2(username), 2->3(password)
 
-            if idx == 1:  # login: — Nokia CLI step
+            if idx == 0:  # login: — Nokia CLI step
                 self.child.sendline("cli")
                 r = self.expect_with_abort(self.child, [r"[Uu]sername:", EOF, TIMEOUT], timeout=15)
                 if r is None:
@@ -178,11 +205,11 @@ class Script(BaseScript):
                 if r != 0:
                     self.child.close(force=True); self.child = None; return [], "SSH login sequence failed"
                 self.child.sendline(self.username)
-            elif idx == 2:  # username:
+            elif idx == 1:  # username:
                 self.child.sendline(self.username)
-            # idx == 3 means already at password:
+            # idx == 2 means already at password:
 
-            if idx != 3:
+            if idx != 2:
                 r = self.expect_with_abort(self.child, [r"[Pp]assword:", EOF, TIMEOUT], timeout=15)
                 if r is None:
                     self.child.close(force=True); self.child = None; return [], "Aborted"
@@ -190,15 +217,32 @@ class Script(BaseScript):
                     self.child.close(force=True); self.child = None; return [], "SSH did not present password prompt"
             self.child.sendline(self.password)
 
-            idx = self.expect_with_abort(
-                self.child, [r"[#>]", "incorrect", "invalid", EOF, TIMEOUT], timeout=30
-            )
-            if idx is None:
-                self.child.close(force=True); self.child = None; return [], "Aborted"
-            if idx in (1, 2):
-                self.child.close(force=True); self.child = None; return [], "Authentication failed"
-            if idx in (3, 4):
-                self.child.close(force=True); self.child = None; return [], "SSH session closed unexpectedly"
+            # Some 1830 builds insert a Y/n acknowledgement banner (license/EULA
+            # or session-warning) between successful auth and the shell prompt.
+            # Auto-answer "y" up to a few times before insisting on a real prompt.
+            for _ in range(3):
+                idx = self.expect_with_abort(
+                    self.child,
+                    [r"[#>]",
+                     r"(?i)\(\s*y\s*/\s*n\s*\)|\[\s*y\s*/\s*n\s*\]|continue\?|accept\?|press\s+y",
+                     "incorrect", "invalid", EOF, TIMEOUT],
+                    timeout=30,
+                )
+                if idx is None:
+                    self.child.close(force=True); self.child = None; return [], "Aborted"
+                if idx == 0:
+                    break  # at shell prompt
+                if idx == 1:
+                    logging.debug("[1830] Acknowledging post-login Y/n prompt")
+                    self.child.sendline("y")
+                    continue
+                if idx in (2, 3):
+                    self.child.close(force=True); self.child = None; return [], "Authentication failed"
+                if idx in (4, 5):
+                    self.child.close(force=True); self.child = None; return [], "SSH session closed unexpectedly"
+            else:
+                # Loop exhausted without seeing a prompt char.
+                self.child.close(force=True); self.child = None; return [], "Login banner did not yield shell prompt"
 
             prompt = self.child.after.strip()
             logging.debug(f"Detected SSH prompt: '{prompt}'")
@@ -253,9 +297,16 @@ class Script(BaseScript):
             try:
                 if self.should_stop():
                     return False
-                logging.info(f"Connecting to {self.ip_address} via Telnet (Attempt {attempt})...")
-                temp_telnet = Telnet(self.ip_address, timeout=self.timeout)
+                if attempt == 1:
+                    logging.info(f"Connecting to {self.ip_address}")
+                else:
+                    logging.info(f"Connecting to {self.ip_address} (attempt {attempt})")
+                temp_telnet = Telnet(self.ip_address, timeout=self.timeout,
+                                     bypass_policy=True,
+                                     purpose="nokia-1830-inventory")
 
+                # Three-stage 1830 login — bare \n line endings (\r\n is
+                # treated as literal text by this CLI).
                 temp_telnet.read_until(b"login: ", timeout=5)
                 temp_telnet.write(b"cli\n")
                 temp_telnet.read_until(b"Username: ", timeout=5)
@@ -263,22 +314,32 @@ class Script(BaseScript):
                 temp_telnet.read_until(b"Password: ", timeout=5)
                 temp_telnet.write(self.password.encode('ascii') + b"\n")
                 if self.sleep_with_abort(1):
-                    try:
-                        temp_telnet.close()
-                    except Exception:
-                        pass
+                    try: temp_telnet.close()
+                    except Exception: pass
                     return False
 
-                login_response = temp_telnet.read_very_eager().decode('ascii')
+                login_response = temp_telnet.read_very_eager().decode('ascii', errors='ignore')
                 if "Login incorrect" in login_response or "invalid" in login_response.lower():
                     logging.error("Telnet login failed: Invalid credentials.")
-                    try:
-                        temp_telnet.close()
-                    except Exception:
-                        pass
+                    try: temp_telnet.close()
+                    except Exception: pass
                     continue
 
-                logging.info("Telnet login successful.")
+                # Some 1830 builds present a "Do you acknowledge? (Y/N)?" banner
+                # between authentication and the CLI prompt. Auto-accept it.
+                if re.search(r"(?i)\(\s*y\s*/\s*n\s*\)|acknowledge", login_response):
+                    logging.debug("Acknowledging post-login Y/N banner")
+                    temp_telnet.write(b"y\n")
+                    if self.sleep_with_abort(0.5):
+                        try: temp_telnet.close()
+                        except Exception: pass
+                        return False
+                    try:
+                        temp_telnet.read_very_eager()
+                    except Exception:
+                        pass
+
+                logging.info(f"Connected to {self.ip_address}")
                 self.telnet = temp_telnet
                 return True
             except Exception as e:
@@ -297,34 +358,76 @@ class Script(BaseScript):
             if not self.telnet_login():
                 return None, "Aborted" if self.should_stop() else "Telnet login failed."
 
-            logging.debug(f"Successfully logged in via Telnet. Executing command: {command}")
             self.telnet.write(command.encode('ascii') + b"\n")
-            if self.sleep_with_abort(3.5):
-                return None, "Aborted"
             output = self.capture_full_output_telnet()
             if self.should_stop():
                 return None, "Aborted"
+
+            logging.debug(f"Captured {len(output)} bytes for '{command}'")
             return output, None
 
         except Exception as e:
-            logging.error(f"Telnet connection failed: {e}")
+            logging.error(f"Telnet command failed: {e}")
             return None, str(e)
-        finally:
-            # Don't close on every command, only when needed
-            # close_telnet() is called after all commands in execute_commands()
-            pass
 
 
-    def capture_full_output_telnet(self) -> str:
+    def capture_full_output_telnet(self, settle: float = 2.0,
+                                   read_timeout: float = 10.0,
+                                   max_pager_pages: int = 50) -> str:
+        """Capture command output using the proven probe pattern.
+
+        Sleeps `settle` seconds after the command was sent (lets the device
+        start producing output), then reads until the '#' prompt with a
+        bounded timeout, drains any tail bytes, and handles real pager
+        prompts ("Press any key", "--More--", "(More)") if they appear.
+        """
+        if self.sleep_with_abort(settle):
+            return ""
         try:
-            while not self.should_stop():
-                output = self.telnet.read_until(b"#", timeout=1).decode('ascii')
-                if output:
-                    return output.strip()
-            return ""
+            blob = self.telnet.read_until(b"#", timeout=read_timeout)
         except Exception as e:
-            logging.error(f"Error capturing Telnet output: {e}")
-            return ""
+            logging.error(f"Telnet read failed while capturing output: {e}")
+            blob = b""
+        try:
+            tail = self.telnet.read_very_eager()
+        except Exception:
+            tail = b""
+        data = bytearray(blob)
+        data.extend(tail)
+        logging.debug(f"[1830-CAP] read_until={len(blob)}B tail={len(tail)}B")
+
+        pager_hits = 0
+        while (b"Press any key to continue" in data
+               or b"--More--" in data
+               or b"(More)" in data) and pager_hits < max_pager_pages:
+            if self.should_stop():
+                break
+            pager_hits += 1
+            logging.debug(f"[1830-CAP] pager #{pager_hits} — sending SPACE")
+            try:
+                self.telnet.write(b" ")
+            except Exception as e:
+                logging.debug(f"[1830-CAP] pager write failed: {e}")
+                break
+            if self.sleep_with_abort(0.5):
+                break
+            try:
+                more_blob = self.telnet.read_until(b"#", timeout=8)
+                more_tail = self.telnet.read_very_eager()
+            except Exception as e:
+                logging.debug(f"[1830-CAP] pager read failed: {e}")
+                break
+            data.extend(more_blob)
+            data.extend(more_tail)
+            if not more_blob and not more_tail:
+                break
+
+        text = bytes(data).decode('ascii', errors='replace')
+        # Strip pager artifacts from the captured text
+        text = re.sub(r"Press any key to continue.*?\(Q to quit\)", "", text,
+                      flags=re.IGNORECASE)
+        text = text.replace("--More--", "").replace("(More)", "")
+        return text.strip()
     
     def close_telnet(self):
         """
@@ -332,11 +435,14 @@ class Script(BaseScript):
         """
         if self.telnet:
             try:
-                self.telnet.write(b"exit\n")
+                try:
+                    self.telnet.write(b"exit\n")
+                except Exception:
+                    pass  # socket may already be closed; that's fine
                 self.telnet.close()
-                logging.info("Telnet session closed successfully.")
+                logging.debug("Telnet session closed.")
             except Exception as e:
-                logging.warning(f"Failed to close Telnet session gracefully: {e}")
+                logging.debug(f"Telnet close raised (already dead?): {e}")
             finally:
                 self.telnet = None
 
@@ -427,16 +533,25 @@ class Script(BaseScript):
             logging.debug(f"Raw output: {output}")
             output = output.strip()
 
-            # Regex pattern to extract details
-            shelf_pattern = re.compile(r"^\s*\d+\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)", re.MULTILINE | re.DOTALL)
+            # Single-line match — don't let \s+ cross newlines into the
+            # trailing CLI prompt. Part Number / Serial / CLEI may all be
+            # blank on the 1830 if the shelf is unprovisioned, so they're
+            # optional captures.
+            shelf_pattern = re.compile(
+                r"^\s*(\d+)\s+(\S+)(?:\s+(\S+))?(?:\s+(\S+))?(?:\s+(\S+))?\s*$",
+                re.MULTILINE,
+            )
 
             # Process each match from the regex
             matches = re.finditer(shelf_pattern, output)
             for match in matches:
                 try:
-                    shelf_type = match.group(1).strip()  # Group 1: Type
-                    part_number = match.group(2).strip()  # Group 2: Part Number
-                    serial_number = match.group(3).strip()  # Group 3: Serial Number
+                    shelf_type = (match.group(2) or "").strip()
+                    part_number = (match.group(3) or "").strip()
+                    serial_number = (match.group(4) or "").strip()
+                    # Filter out anything that looks like a prompt fragment
+                    if shelf_type.endswith("#") or part_number.endswith("#"):
+                        continue
 
                     # Get description for the part number
                     description = self.db_cache.lookup_part(part_number)
@@ -912,14 +1027,15 @@ class Script(BaseScript):
             logging.info(f"Data successfully saved to {output_file}")
 
             # Open the file (platform-specific handling)
+            # SECURITY: Do not use shell=True; shell is not needed for these platform-specific commands
             if os.name == 'nt':  # Windows
-                subprocess.run(["start", output_file], check=True, shell=True)
+                subprocess.run(["start", "", output_file], check=True)
             else:  # macOS/Linux
-                subprocess.run(["open", output_file], check=True, shell=True)
+                subprocess.run(["open", output_file], check=True)
 
         except Exception as e:
             logging.error(f"Failed to save data to Excel: {e}")
-            messagebox.showerror("Export Error", f"Failed to save Excel file:\n{e}")
+            messagebox.showerror("Export Error", f"Failed to save Excel file:\n{friendly_error(e)}")
         finally:
             # Close the SQLite connection
             if conn:
@@ -931,7 +1047,7 @@ class Script(BaseScript):
 '''if __name__ == "__main__":
     def main():
         # Set target IP and Telnet credentials
-        ip = '172.21.101.171'
+        ip = '10.9.101.120'
         username = 'admin'  # <-- Replace this
         password = 'admin'  # <-- Replace this
 

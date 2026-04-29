@@ -1,0 +1,484 @@
+"""
+Secure credential management with encryption support.
+
+Handles encrypted storage and retrieval of device login credentials from a config file.
+Uses Fernet (symmetric encryption) from the cryptography library for secure storage.
+"""
+
+import json
+import logging
+import os
+from pathlib import Path
+from typing import Optional, Tuple, List, Dict
+from cryptography.fernet import Fernet
+from utils.helpers import get_project_root, restrict_path_to_owner
+
+
+# Encryption key file (in project root, git-ignored)
+CREDS_KEY_FILE = get_project_root() / ".creds_key"
+CREDS_CONFIG_FILE = get_project_root() / "credentials_config.json"
+
+# Built-in seed defaults — used ONLY to populate the encrypted config on first
+# run. After seeding, defaults are read from the encrypted config file and these
+# constants are never consulted again. Override the seed values in a fresh
+# install by setting LAMIS_SEED_DEFAULTS=user1:pw1,user2:pw2 in the environment
+# before first launch, or by editing this list before building.
+#
+# The defaults can be disabled entirely (e.g. for non-lab deployments) by
+# setting LAMIS_DISABLE_DEFAULT_CREDS=1; in that case the credential failure
+# handler will jump straight to prompting the user.
+_BUILTIN_DEFAULT_SEED: List[Tuple[str, str]] = [
+    # Nokia 1830 SSH login: SSH-level user is "cli" with password "admin".
+    # Once authenticated, the device drops into a secondary CLI prompt that
+    # the Nokia_1830 script handles with the interactive cli -> admin -> admin
+    # sequence (see scripts/Nokia_1830.py:181). Tried first because the 1830
+    # is the most common device that rejects plain admin/admin outright, and
+    # Nokia gear that *does* accept admin/admin will reject "cli" quickly.
+    ("cli", "admin"),
+    ("admin", "admin"),
+    ("ADMIN", "ADMIN"),
+]
+
+
+def _load_seed_from_env() -> Optional[List[Tuple[str, str]]]:
+    raw = os.environ.get("LAMIS_SEED_DEFAULTS", "").strip()
+    if not raw:
+        return None
+    out: List[Tuple[str, str]] = []
+    for pair in raw.split(","):
+        if ":" not in pair:
+            continue
+        u, p = pair.split(":", 1)
+        u, p = u.strip(), p.strip()
+        if u and p:
+            out.append((u, p))
+    return out or None
+
+
+def _defaults_disabled() -> bool:
+    return os.environ.get("LAMIS_DISABLE_DEFAULT_CREDS", "").strip() in ("1", "true", "yes")
+
+
+def _get_or_create_key() -> bytes:
+    """Get encryption key from file, or create one if it doesn't exist.
+
+    The key is stored locally in .creds_key (should be git-ignored).
+    This key decrypts the credentials in credentials_config.json.
+    """
+    if CREDS_KEY_FILE.exists():
+        return CREDS_KEY_FILE.read_bytes()
+
+    # Generate new key
+    key = Fernet.generate_key()
+    CREDS_KEY_FILE.write_bytes(key)
+    try:
+        CREDS_KEY_FILE.chmod(0o600)  # POSIX read/write for owner only
+    except Exception:
+        pass
+    restrict_path_to_owner(CREDS_KEY_FILE)  # Windows ACL hardening
+    logging.info(f"[CREDS] Generated new encryption key at {CREDS_KEY_FILE}")
+    return key
+
+
+def _encrypt_password(password: str) -> str:
+    """Encrypt a password string."""
+    key = _get_or_create_key()
+    cipher = Fernet(key)
+    encrypted = cipher.encrypt(password.encode('utf-8'))
+    return encrypted.decode('utf-8')
+
+
+def _decrypt_password(encrypted_password: str) -> str:
+    """Decrypt a password string."""
+    key = _get_or_create_key()
+    cipher = Fernet(key)
+    try:
+        decrypted = cipher.decrypt(encrypted_password.encode('utf-8'))
+        return decrypted.decode('utf-8')
+    except Exception as e:
+        logging.error(f"[CREDS] Failed to decrypt password: {e}")
+        raise
+
+
+def _read_config_file() -> dict:
+    if not CREDS_CONFIG_FILE.exists():
+        return {}
+    try:
+        return json.loads(CREDS_CONFIG_FILE.read_text())
+    except Exception as e:
+        logging.error(f"[CREDS] Failed to parse credentials config: {e}")
+        return {}
+
+
+def _write_config_file(config: dict) -> bool:
+    try:
+        CREDS_CONFIG_FILE.write_text(json.dumps(config, indent=2))
+        try:
+            CREDS_CONFIG_FILE.chmod(0o600)
+        except Exception:
+            pass
+        restrict_path_to_owner(CREDS_CONFIG_FILE)  # Windows ACL hardening
+        return True
+    except Exception as e:
+        logging.error(f"[CREDS] Failed to write credentials config: {e}")
+        return False
+
+
+def _seed_defaults_into_config() -> None:
+    """On first run, encrypt the built-in seed defaults into credentials_config.json.
+
+    Once seeded, the seed constants are no longer consulted. Subsequent reads
+    decrypt the values from the config file. Users wanting to rotate the
+    defaults can edit credentials_config.json (the values are encrypted at
+    rest) or delete the file to re-seed from the current build.
+
+    Migration: if a stored config exists but the build has added *new* default
+    entries (e.g. an upgrade adds "cli/admin" for Nokia 1830), the new entries
+    are appended to the encrypted store without disturbing existing entries
+    or user-saved primary credentials.
+    """
+    config = _read_config_file()
+    seed = _load_seed_from_env() or _BUILTIN_DEFAULT_SEED
+    if not seed:
+        return
+
+    existing_raw = config.get("defaults") or []
+    # Build a username -> entry map (preserves the encrypted password from the
+    # existing config so we don't have to re-encrypt unchanged entries).
+    existing_by_user: Dict[str, dict] = {}
+    for entry in existing_raw:
+        if isinstance(entry, dict):
+            u = (entry.get("username") or "").strip()
+            if u:
+                existing_by_user[u] = entry
+
+    seed_users = [u for u, _ in seed]
+    needs_reorder = False
+    if existing_raw:
+        # Find the seed entries that are present in the existing config and
+        # check whether they appear in the seed's preferred order. If any are
+        # out of order, we rewrite the file so users get the new ordering on
+        # upgrade without having to delete credentials_config.json.
+        existing_seed_users_in_existing_order = [
+            (entry.get("username") or "").strip()
+            for entry in existing_raw
+            if isinstance(entry, dict)
+            and (entry.get("username") or "").strip() in seed_users
+        ]
+        existing_seed_users_in_seed_order = [
+            u for u in seed_users if u in existing_by_user
+        ]
+        if existing_seed_users_in_existing_order != existing_seed_users_in_seed_order:
+            needs_reorder = True
+
+    new_pairs = [(u, p) for u, p in seed if u not in existing_by_user]
+
+    if existing_raw and not new_pairs and not needs_reorder:
+        return  # Already seeded, in the right order, no new defaults to add.
+
+    try:
+        encrypted_new = [
+            {"username": u, "password": _encrypt_password(p)} for u, p in new_pairs
+        ]
+    except Exception as e:
+        logging.error(f"[CREDS] Failed to seed default credentials: {e}")
+        return
+
+    config.setdefault("credentials", {})
+    if existing_raw:
+        # Rebuild defaults: emit seed entries in seed order first (re-using
+        # the existing encrypted password if we already had it, else using
+        # the freshly-encrypted one for this user), then append any extra
+        # user-added entries that aren't in the seed (in their original
+        # relative order).
+        encrypted_new_by_user = {e["username"]: e for e in encrypted_new}
+        rebuilt: List[dict] = []
+        for u in seed_users:
+            if u in existing_by_user:
+                rebuilt.append(existing_by_user[u])
+            elif u in encrypted_new_by_user:
+                rebuilt.append(encrypted_new_by_user[u])
+        for entry in existing_raw:
+            if not isinstance(entry, dict):
+                continue
+            u = (entry.get("username") or "").strip()
+            if u and u not in seed_users:
+                rebuilt.append(entry)
+        config["defaults"] = rebuilt
+    else:
+        config["defaults"] = encrypted_new
+    config.setdefault(
+        "notes",
+        "All credential values are encrypted with Fernet. "
+        "Set LAMIS_DISABLE_DEFAULT_CREDS=1 to skip default-credential attempts.",
+    )
+    if _write_config_file(config):
+        if existing_raw and needs_reorder and not encrypted_new:
+            logging.info(
+                "[CREDS] Reordered default credential sets in encrypted config "
+                "to match new seed priority"
+            )
+        elif existing_raw:
+            logging.info(
+                f"[CREDS] Migrated {len(encrypted_new)} new default credential set(s) "
+                f"into encrypted config (reorder={'yes' if needs_reorder else 'no'})"
+            )
+        else:
+            logging.info(
+                f"[CREDS] Seeded {len(encrypted_new)} default credential set(s) into encrypted config"
+            )
+
+
+def _load_defaults_from_config() -> List[Tuple[str, str]]:
+    """Decrypt and return the stored default credentials list."""
+    config = _read_config_file()
+    raw = config.get("defaults") or []
+    out: List[Tuple[str, str]] = []
+    for entry in raw:
+        try:
+            u = entry.get("username")
+            enc = entry.get("password")
+            if not u or not enc:
+                continue
+            out.append((u, _decrypt_password(enc)))
+        except Exception as e:
+            logging.warning(f"[CREDS] Skipping unreadable default entry: {e}")
+    return out
+
+
+def load_credentials_from_config() -> Tuple[Optional[str], Optional[str]]:
+    """Load primary saved credentials from encrypted config, or fall back to first default.
+
+    Returns:
+        (username, password) if found and decryption succeeds, else (None, None)
+    """
+    # Make sure defaults are seeded on first run so they're available below.
+    _seed_defaults_into_config()
+
+    config = _read_config_file()
+    creds = config.get("credentials", {}) or {}
+
+    if creds.get("username"):
+        encrypted_pwd = creds.get("password")
+        if encrypted_pwd and encrypted_pwd != "[ENCRYPTED]":
+            try:
+                if creds.get("encrypted", True):
+                    password = _decrypt_password(encrypted_pwd)
+                else:
+                    password = encrypted_pwd
+                logging.debug(f"[CREDS] Loaded credentials for user: {creds['username']}")
+                return (creds["username"], password)
+            except Exception as e:
+                logging.error(f"[CREDS] Failed to decrypt stored credentials: {e}")
+
+    # No usable saved credentials — try the first default (unless disabled).
+    if _defaults_disabled():
+        logging.debug("[CREDS] Default credentials disabled by LAMIS_DISABLE_DEFAULT_CREDS")
+        return (None, None)
+    defaults = _load_defaults_from_config()
+    if defaults:
+        return defaults[0]
+    return (None, None)
+
+
+def get_default_credentials_to_try() -> List[Tuple[str, str]]:
+    """Get list of default credentials to try (in order).
+
+    Returns an empty list if defaults have been disabled via the
+    ``LAMIS_DISABLE_DEFAULT_CREDS`` environment variable.
+    """
+    if _defaults_disabled():
+        return []
+    _seed_defaults_into_config()
+    return _load_defaults_from_config()
+
+
+def save_credentials_to_config(username: str, password: str) -> bool:
+    """Save credentials to encrypted config file.
+
+    Args:
+        username: Device username
+        password: Device password
+
+    Returns:
+        True if save succeeded, False otherwise
+    """
+    try:
+        encrypted_pwd = _encrypt_password(password)
+
+        # Preserve any existing fields (notably the encrypted "defaults" block)
+        # so saving user credentials doesn't wipe the seeded defaults.
+        config = _read_config_file()
+        config["credentials"] = {
+            "username": username,
+            "password": encrypted_pwd,
+            "encrypted": True,
+        }
+        config.setdefault(
+            "notes",
+            "All credential values are encrypted with Fernet. "
+            "Set LAMIS_DISABLE_DEFAULT_CREDS=1 to skip default-credential attempts.",
+        )
+
+        if not _write_config_file(config):
+            return False
+
+        logging.info(f"[CREDS] Saved encrypted credentials for user: {username}")
+        return True
+
+    except Exception as e:
+        logging.error(f"[CREDS] Failed to save credentials to config: {e}")
+        return False
+
+
+def setup_credentials_config(username: str, password: str) -> bool:
+    """Convenience function to set up encrypted credentials config.
+
+    Usage:
+        python -c "from utils.credentials import setup_credentials_config; \
+                   setup_credentials_config('admin', 'mypassword')"
+
+    Args:
+        username: Device username
+        password: Device password
+
+    Returns:
+        True if setup succeeded
+    """
+    success = save_credentials_to_config(username, password)
+    if success:
+        print(f"Credentials saved securely to {CREDS_CONFIG_FILE}")
+        print(f"Encryption key stored at {CREDS_KEY_FILE}")
+        print("\nNOTE: Both files should be kept secure:")
+        print("  - Add .creds_key to .gitignore")
+        print("  - Keep credentials_config.json out of version control")
+    return success
+
+
+def delete_credentials_config() -> bool:
+    """Delete the credentials config file."""
+    try:
+        if CREDS_CONFIG_FILE.exists():
+            CREDS_CONFIG_FILE.unlink()
+            logging.info("[CREDS] Deleted credentials config file")
+        return True
+    except Exception as e:
+        logging.error(f"[CREDS] Failed to delete credentials config: {e}")
+        return False
+
+
+def prompt_for_credentials_gui(parent_window=None) -> Optional[Tuple[str, str]]:
+    """Show a GUI dialog to prompt user for credentials.
+
+    Args:
+        parent_window: Parent tkinter window (optional)
+
+    Returns:
+        (username, password) if user confirms, else None if cancelled
+
+    Notes:
+        Tkinter is NOT thread-safe. Calling tk.Tk() from a worker thread on
+        Windows deadlocks the entire process — the dialog's mainloop blocks
+        the worker forever, and Tk's atexit handlers prevent the parent
+        process from exiting even after the user clicks Abort or closes the
+        window. To prevent this, when called from a non-main thread we
+        refuse to create a new Tk root and return None immediately. Callers
+        should marshal credential prompts back to the main thread (or
+        configure default credentials in advance) for unattended scans.
+    """
+    import threading
+    if threading.current_thread() is not threading.main_thread() and parent_window is None:
+        logging.warning(
+            "[CREDS] Skipping credential prompt: called from worker thread "
+            "without a parent_window. Tk dialogs from non-main threads "
+            "deadlock on Windows. Configure credentials in the main GUI "
+            "instead, or pass parent_window from a main-thread caller."
+        )
+        return None
+
+    try:
+        import tkinter as tk
+        from tkinter import simpledialog, messagebox
+
+        owns_root = False
+        if parent_window is None:
+            # Create a hidden root window
+            parent_window = tk.Tk()
+            parent_window.withdraw()
+            owns_root = True
+
+        # Create a top-level dialog
+        dialog = tk.Toplevel(parent_window)
+        dialog.title("Update Device Credentials")
+        dialog.transient(parent_window)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        # Labels and entries
+        tk.Label(dialog, text="Username:", font=("Arial", 10)).pack(pady=10)
+        username_var = tk.StringVar()
+        username_entry = tk.Entry(dialog, textvariable=username_var, width=30)
+        username_entry.pack(pady=5)
+        username_entry.focus()
+
+        tk.Label(dialog, text="Password:", font=("Arial", 10)).pack(pady=10)
+        password_var = tk.StringVar()
+        password_entry = tk.Entry(dialog, textvariable=password_var, show="*", width=30)
+        password_entry.pack(pady=5)
+
+        result = {"ok": False}
+
+        def on_ok():
+            result["ok"] = True
+            dialog.destroy()
+
+        def on_cancel():
+            dialog.destroy()
+
+        # Buttons
+        button_frame = tk.Frame(dialog)
+        button_frame.pack(pady=20)
+        tk.Button(button_frame, text="Save & Continue", command=on_ok, width=15).pack(side=tk.LEFT, padx=5)
+        tk.Button(button_frame, text="Cancel", command=on_cancel, width=15).pack(side=tk.LEFT, padx=5)
+
+        # Size to contents and center on screen
+        dialog.update_idletasks()
+        w = dialog.winfo_reqwidth()
+        h = dialog.winfo_reqheight()
+        sw = dialog.winfo_screenwidth()
+        sh = dialog.winfo_screenheight()
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        dialog.geometry(f"{w}x{h}+{x}+{y}")
+
+        dialog.wait_window()
+
+        try:
+            if result["ok"]:
+                username = username_var.get().strip()
+                password = password_var.get()
+                try:
+                    from utils.helpers import scrub_password_widget
+                    scrub_password_widget(password_entry, password_var)
+                except Exception:
+                    pass
+                if username and password:
+                    logging.debug(f"[CREDS] User entered credentials for: {username}")
+                    return (username, password)
+                else:
+                    messagebox.showerror("Error", "Username and password cannot be empty")
+                    return None
+
+            return None
+        finally:
+            # Always tear down a root we created so the process can exit.
+            if owns_root:
+                try:
+                    parent_window.destroy()
+                except Exception:
+                    pass
+
+    except Exception as e:
+        logging.error(f"[CREDS] Failed to show credential prompt: {e}")
+        return None
+

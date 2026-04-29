@@ -1,5 +1,5 @@
 """
-Configuration constants for LAMIS (LightRiver Automated MultiVendor Inventory System).
+Configuration constants for ATLAS (Automated Toolkit for Lightriver Asset & Systems).
 
 Centralized location for all configuration values to make the system more maintainable
 and easier to customize across different environments.
@@ -23,9 +23,22 @@ TELNET_PORT = 23
 # AUTHENTICATION
 # ============================================================================
 
-# Default credentials for device access
-DEFAULT_USERNAME = "admin"
-DEFAULT_PASSWORD = "admin"
+# Credentials are now stored securely in Windows Credential Manager.
+# Service name for credential storage: "ATLAS"
+# See utils/helpers.py for get_credentials() / save_credentials()
+
+# SSH host-key trust policy.
+# ATLAS is intended for unattended bulk operations across 100+ devices,
+# where prompting the operator to accept each new SSH host key defeats
+# the automation. By default we Trust-On-First-Use (TOFU): any unknown
+# host key is silently recorded in the LAMIS known_hosts file the first
+# time we see it, and enforced strictly thereafter (a *changed* key on a
+# subsequent connection still raises and aborts — protecting against
+# spoofing once the device is known).
+#
+# To restore interactive prompting, set env var LAMIS_PROMPT_HOSTKEYS=1
+# or flip SSH_AUTO_ACCEPT_HOST_KEYS to False below.
+SSH_AUTO_ACCEPT_HOST_KEYS = True
 
 # ============================================================================
 # TIMEOUT SETTINGS (in seconds)
@@ -61,7 +74,7 @@ MAIN_WINDOW_HEIGHT = 750
 
 # Template paths (relative to project root)
 DEVICE_REPORT_TEMPLATE = "data/Device_Report_Template.xlsx"
-PACKING_SLIP_TEMPLATE = "data/LAMIS_Packing_Slip.xlsx"
+PACKING_SLIP_TEMPLATE = "data/ATLAS_Packing_Slip.xlsx"
 
 # Excel column settings
 EXCEL_MIN_COLUMN_WIDTH = 10
@@ -93,10 +106,15 @@ PART_NUMBER_PREFIX_LENGTH = 10      # Use first N characters of part number for 
 # ============================================================================
 
 # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-LOG_LEVEL = "DEBUG"
+# Default INFO; set to DEBUG only for troubleshooting (may contain device output).
+LOG_LEVEL = "INFO"
 
 # Log format
 LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 
 # Suppress verbose library logs
 PIL_LOG_LEVEL = "WARNING"
+
+# Rotating log handler — bound on-disk footprint.
+LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file
+LOG_BACKUP_COUNT = 5             # Keep the latest 5 rotated files

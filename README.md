@@ -1,6 +1,6 @@
-# Lightriver Automated Multivendor Inventory System (LAMIS)
+# Automated Toolkit for Lightriver Asset & Systems (ATLAS)
 
-A comprehensive network inventory and packing slip management system supporting Nokia (7705 SAR-8, 7250 IXR, 1830), Ciena 6500, and Smartoptics DCP devices.
+A comprehensive network device management platform supporting Nokia (7705 SAR-8, 7250 IXR, 1830), Ciena 6500, and Smartoptics DCP devices.
 
 **Key Features:**
 - Automated inventory collection via SSH/Telnet
@@ -23,7 +23,7 @@ A comprehensive network inventory and packing slip management system supporting 
 
 ## Overview
 
-LAMIS is a Python-based network inventory system designed to automate hardware discovery and asset documentation. The application:
+ATLAS is a Python-based network device management platform designed to automate hardware discovery, asset documentation, and device lifecycle operations. The application:
 
 - **Discovers devices** via SSH banner probing + full login authentication (with Telnet fallback)
 - **Collects hardware inventory** including chassis, cards, MDAs, and optical transceivers

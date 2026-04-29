@@ -183,3 +183,9 @@ cython_debug/
 
 # Visual Studio Code configuration data
 .vscode/
+
+# ============================================================================
+# CREDENTIALS & ENCRYPTION KEYS - NEVER COMMIT THESE
+# ============================================================================
+.creds_key
+credentials_config.json

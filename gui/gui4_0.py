@@ -23,7 +23,14 @@ from openpyxl.styles import Font, PatternFill
 import pandas as pd
 import script_interface
 import csv
-from utils.helpers import extract_ip_sort_key, get_database_path
+from utils.helpers import (
+    extract_ip_sort_key,
+    friendly_error,
+    get_database_path,
+    get_project_root,
+    sanitize_filename_component,
+    scrub_password_widget,
+)
 import config
 from gui.workbook_builder import WorkbookBuilder
 from gui.inventory_frame import InventoryFrame
@@ -32,7 +39,7 @@ from gui.packing_slip_frame import PackingSlipFrame
 
 command_tracker = script_interface.CommandTracker()
 db_cache = script_interface.get_cache()
-DATA_DIR = get_database_path().parent
+DATA_DIR = get_project_root() / "data"
 
 class InventoryGUI:
     _manual_script_modules = {
@@ -43,6 +50,12 @@ class InventoryGUI:
         "Ciena 6500": "scripts.Ciena_6500",
         "Ciena RLS": "scripts.Ciena_RLS",
     }
+
+    # F025: explicit allowlist of importable script modules. Any value not in
+    # this frozen set is rejected before reaching importlib, so even if
+    # ``_manual_script_modules`` were ever mutated by attacker-controlled data
+    # we still cannot import an arbitrary module.
+    _ALLOWED_SCRIPT_MODULES = frozenset(_manual_script_modules.values())
 
     _lan_connection_types = {
         "Nokia 1830": "ssh",
@@ -68,13 +81,19 @@ class InventoryGUI:
         self.run_future = None
         self.run_context = None
         self.export_future = None
-        self._worker_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="lamis-worker")
+        self._worker_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="atlas-worker")
         self._stdout_original = sys.stdout
         self.db_file = str(DATA_DIR / "network_inventory.db")
         self.current_script_instance = None
         self.current_mode = tk.StringVar(value="inventory")
         self.output_screen = None
         self.failed_ips: Dict[str, str] = {}
+        # Devices whose default credentials all failed are parked here so the
+        # main run keeps going. After the regular task queue drains, the
+        # worker prompts the user for each parked device on the main thread
+        # via the run_queue ("creds_needed" event).
+        self.pause_queue: List[Tuple[str, Any]] = []
+        self._creds_response_queue: Queue = Queue()
 
         if os.path.isfile(self.db_file):
             if self.db_cache.db_path != self.db_file:
@@ -88,8 +107,14 @@ class InventoryGUI:
             logging.error(f"[DB] Expected DB file not found: {self.db_file}")
         self.template_path = str(DATA_DIR / "Device_Report_Template.xlsx")
         self.psi_template_path = str(DATA_DIR / "Nokia_PSI_Report_Template.xlsx")
-        self.packing_slip_template = str(DATA_DIR / "LAMIS_Packing_Slip.xlsx")
+        self.rls_template_path = str(DATA_DIR / "Ciena_RLS_Report_Template.xlsx")
+        self.packing_slip_template = str(DATA_DIR / "ATLAS_Packing_Slip.xlsx")
+        self.psi_packing_slip_template = str(DATA_DIR / "Nokia_PSI_Packing_Slip.xlsx")
+        self.rls_packing_slip_template = str(DATA_DIR / "Ciena_RLS_Packing_Slip.xlsx")
         self.lock = threading.Lock()
+        # Per-IP device family for export-time template routing.
+        # Values: "rls" (Ciena RLS), "psi" (Nokia PSI), "default" (everything else).
+        self.device_family_by_ip: Dict[str, str] = {}
 
         self.workbook_builder = WorkbookBuilder(self.db_cache, self.template_path, self.packing_slip_template)
 
@@ -160,7 +185,7 @@ class InventoryGUI:
     def build_report_workbook(self, outputs: Dict[str, Any], output_file: str, customer: str = "", project: str = "", customer_po: str = "", sales_order: str = "", append_mode: bool = False) -> Dict[str, Any]:
         return self.workbook_builder.build_report_workbook(outputs, output_file, customer=customer, project=project, customer_po=customer_po, sales_order=sales_order, append_mode=append_mode)
 
-    def build_psi_report_workbook(self, outputs: Dict[str, Any], output_file: str, customer: str = "", project: str = "", customer_po: str = "", sales_order: str = "", append_mode: bool = False) -> Dict[str, Any]:
+    def build_psi_report_workbook(self, outputs: Dict[str, Any], output_file: str, customer: str = "", project: str = "", customer_po: str = "", sales_order: str = "", append_mode: bool = False, template_override: Optional[str] = None) -> Dict[str, Any]:
         return self.workbook_builder.build_psi_report_workbook(
             outputs,
             output_file,
@@ -169,8 +194,39 @@ class InventoryGUI:
             customer_po=customer_po,
             sales_order=sales_order,
             append_mode=append_mode,
+            psi_template_path=template_override or self.psi_template_path,
+        )
+
+    def build_unified_report_workbook(self, family_buckets: Dict[str, Dict[str, Any]], output_file: str, customer: str = "", project: str = "", customer_po: str = "", sales_order: str = "", append_mode: bool = False) -> Dict[str, Any]:
+        return self.workbook_builder.build_unified_report_workbook(
+            family_buckets,
+            output_file,
+            customer=customer,
+            project=project,
+            customer_po=customer_po,
+            sales_order=sales_order,
+            append_mode=append_mode,
+            rls_template_path=self.rls_template_path,
             psi_template_path=self.psi_template_path,
         )
+
+    @staticmethod
+    def _family_for_script(script_instance: Any) -> str:
+        """Return the export-template family for a script instance.
+
+        Used to route per-IP outputs to the correct workbook template at
+        export time. Module name is the most reliable signal because it
+        is fixed at import time and does not depend on user-visible labels.
+        """
+        try:
+            mod = type(script_instance).__module__
+        except Exception:
+            return "default"
+        if mod.endswith("Ciena_RLS"):
+            return "rls"
+        if mod.endswith("Nokia_PSI"):
+            return "psi"
+        return "default"
 
     def copy_sheet(self, source_sheet: Any, target_wb: Any, new_sheet_name: str) -> Any:
         return self.workbook_builder.copy_sheet(source_sheet, target_wb, new_sheet_name)
@@ -178,17 +234,35 @@ class InventoryGUI:
     def build_packing_slip_workbook(self, processed_data: Dict[str, Any], ip_list: List[str], customer: str, project: str, customer_po: str, sales_order: str, save_folder: str) -> str:
         return self.workbook_builder.build_packing_slip_workbook(processed_data, ip_list, customer, project, customer_po, sales_order, save_folder)
 
-    def get_user_inputs(self, default_filename):
-        """Prompt user for project information in a popup"""
+    def build_unified_packing_slip_workbook(self, processed_data: Dict[str, Any], ip_list: List[str], customer: str, project: str, customer_po: str, sales_order: str, save_folder: str, family_for_ip: Optional[Dict[str, str]] = None) -> str:
+        """Per-device-family packing slip workbook (RLS / PSI / default templates merged)."""
+        return self.workbook_builder.build_unified_packing_slip_workbook(
+            processed_data, ip_list, customer, project, customer_po, sales_order, save_folder,
+            family_for_ip=family_for_ip,
+            rls_packing_slip_template=self.rls_packing_slip_template,
+            psi_packing_slip_template=self.psi_packing_slip_template,
+        )
+
+    def get_user_inputs(self, default_filename, prefill: Optional[Dict[str, str]] = None):
+        """Prompt user for project information in a popup.
+
+        Args:
+            default_filename: Default value for the Filename field.
+            prefill: Optional dict with keys "customer", "project", "po", "so".
+                When provided (e.g. from an uploaded inventory report), the
+                corresponding fields are pre-populated so the user only has
+                to confirm rather than retype.
+        """
+        prefill = prefill or {}
         root = tk.Toplevel()  # Create a new popup window
         root.title("User Inputs")
 
         # Dictionary to store input values
         user_inputs = {
-            "Customer": tk.StringVar(),
-            "Project": tk.StringVar(),
-            "Purchase Order": tk.StringVar(),
-            "Sales Order": tk.StringVar(),
+            "Customer": tk.StringVar(value=prefill.get("customer", "")),
+            "Project": tk.StringVar(value=prefill.get("project", "")),
+            "Purchase Order": tk.StringVar(value=prefill.get("po", "")),
+            "Sales Order": tk.StringVar(value=prefill.get("so", "")),
             "Filename": tk.StringVar(value=default_filename),
         }
 
@@ -225,7 +299,10 @@ class InventoryGUI:
             and os.path.isfile(self.inventory_frame.inventory_report_path)
         )
 
-        user_inputs = self.get_user_inputs(default_filename)
+        user_inputs = self.get_user_inputs(
+            default_filename,
+            prefill=getattr(self.inventory_frame, "uploaded_metadata", {}) or {},
+        )
         if not user_inputs:
             messagebox.showerror("Input Error", "User input window was closed without entering details.")
             return None
@@ -248,13 +325,19 @@ class InventoryGUI:
             output_file = os.path.normpath(self.inventory_frame.inventory_report_path)
         else:
             filename = user_inputs["Filename"]
-            filename = "".join(c for c in filename if c.isalnum() or c in (" ", "_", "-")).strip()
+            # Sanitize filename: only alphanumeric, underscore, and hyphen (no spaces for better compatibility)
+            filename = "".join(c for c in filename if c.isalnum() or c in ("_", "-")).strip()
             if not filename:
                 messagebox.showerror("Input Error", "Invalid filename entered.")
                 return None
 
             timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M')
-            final_filename = f"{filename}_{customer}_{project}_Inventory_{timestamp}"
+            # F018: sanitize customer/project before composing the on-disk filename;
+            # they originate from imported XLSX values and could contain `..\` or other
+            # path-traversal sequences.
+            safe_customer = sanitize_filename_component(customer, fallback="Customer")
+            safe_project = sanitize_filename_component(project, fallback="Project")
+            final_filename = f"{filename}_{safe_customer}_{safe_project}_Inventory_{timestamp}"
 
             save_folder = filedialog.askdirectory(title="Select Save Location")
             if not save_folder:
@@ -311,6 +394,10 @@ class InventoryGUI:
                     "username": username,
                     "password": password,
                 })
+                # Clear password from Entry widget to prevent lingering in memory
+                scrub_password_widget(self.inventory_frame.lan_password_entry)
+                # Overwrite local password variable to prevent plaintext exposure via memory inspection
+                del password
             else:
                 serial_port = self.inventory_frame.serial_port_var.get().strip()
                 baud_raw = self.inventory_frame.serial_baud_var.get().strip()
@@ -338,6 +425,9 @@ class InventoryGUI:
                     "username": username,
                     "password": password,
                 })
+                # Clear password from Entry widget to prevent lingering in memory
+                scrub_password_widget(self.inventory_frame.serial_password_entry)
+                del password
 
             return context
 
@@ -395,6 +485,11 @@ class InventoryGUI:
         module_name = self._manual_script_modules.get(script_name)
         if not module_name:
             raise ValueError(f"Unsupported script selection: {script_name}")
+        # F025: defense-in-depth — refuse to import anything outside the allowlist.
+        if module_name not in self._ALLOWED_SCRIPT_MODULES:
+            raise ValueError(
+                f"Refusing to import non-allowlisted module: {module_name!r}"
+            )
 
         module = importlib.import_module(module_name)
         script_class = module.Script
@@ -446,12 +541,20 @@ class InventoryGUI:
                 queue.put(("progress", (0, 1, "Preparing 0/1")))
                 manual_script = self._build_manual_script_instance(context)
                 self.task_queue = Queue()
+                self.device_family_by_ip[context["target_id"]] = self._family_for_script(manual_script)
                 self.task_queue.put((context["target_id"], manual_script))
                 self.process_task_queue(queue)
                 queue.put(("inventory_complete", True))
                 return
 
             self.failed_ips = {}
+            self.pause_queue = []
+            # Drain stale credential responses left over from a prior run.
+            while not self._creds_response_queue.empty():
+                try:
+                    self._creds_response_queue.get_nowait()
+                except Empty:
+                    break
             total_ips = len(context["ip_list"])
             reachable_ips = []
             for idx, ip in enumerate(context["ip_list"], start=1):
@@ -487,10 +590,33 @@ class InventoryGUI:
                     return
 
                 queue.put(("progress", (idx, total_reachable, f"Identifying {idx}/{total_reachable}")))
-                device_type, device_name = device_identifier.identify_device(ip, queue, None, self.should_stop)
-                script_instance = script_selector.select_script(device_type, ip, stop_callback=self.should_stop)
+                try:
+                    device_type, device_name = device_identifier.identify_device(
+                        ip, queue, None, self.should_stop
+                    )
+                except script_interface.CredentialPromptRequired:
+                    # Defaults exhausted at identification time. Park the IP
+                    # so the user can supply credentials at the end of the
+                    # run; identification will be re-attempted then.
+                    queue.put((
+                        "log",
+                        f"[{ip}] Default credentials exhausted — parked for "
+                        f"manual credential entry after the rest of the run.",
+                    ))
+                    self.pause_queue.append((ip, None))
+                    continue
+                # Nokia 1830s only accept the operator login via the cli/admin/admin
+                # three-stage shell on Telnet. SSH to the cli account uses
+                # auth_none/keyboard-interactive (not a real password) so a
+                # plain ssh.exe spawn will hang on auth. Force Telnet for 1830s
+                # — identification has already auto-allowlisted the host.
+                conn_type = 'telnet' if (device_type or '').strip().lower() == '1830' else 'ssh'
+                script_instance = script_selector.select_script(device_type, ip, connection_type=conn_type, stop_callback=self.should_stop)
 
                 if script_instance:
+                    fam = self._family_for_script(script_instance)
+                    logging.debug(f"[FAMILY] ip={ip} mod={type(script_instance).__module__} → fam={fam!r}")
+                    self.device_family_by_ip[ip] = fam
                     self.task_queue.put((ip, script_instance))
                 else:
                     reason = f"Unknown device type: {device_type}" if device_type else "Identification failed"
@@ -508,30 +634,64 @@ class InventoryGUI:
             queue.put(("inventory_complete", True))
         except Exception as exc:
             logging.exception("Background inventory run failed")
-            queue.put(("error", str(exc)))
+            queue.put(("error", friendly_error(exc)))
 
     def run_export_worker(self, context: Dict[str, Any], _processed_data: Optional[Dict[str, Any]]) -> None:
         try:
             with self.lock:
                 outputs_copy = dict(self.outputs)
-            builder = (
-                self.build_psi_report_workbook
-                if context.get("manual_script") == "Nokia PSI"
-                else self.build_report_workbook
-            )
-            processed_data = builder(
-                outputs_copy,
-                context["output_file"],
+                family_map = dict(self.device_family_by_ip)
+
+            logging.debug(f"[EXPORT] outputs keys: {list(outputs_copy.keys())}")
+            logging.debug(f"[EXPORT] family_map: {family_map}")
+
+            # Partition outputs by family. IPs with no recorded family
+            # (e.g., legacy in-memory data from a prior run) fall through
+            # to "default" so we never silently drop them.
+            buckets: Dict[str, Dict[str, Any]] = {"rls": {}, "psi": {}, "default": {}}
+            for ip, data in outputs_copy.items():
+                fam = family_map.get(ip, "default")
+                logging.debug(f"[EXPORT] IP={ip!r} → family={fam!r}")
+                buckets.setdefault(fam, {})[ip] = data
+
+            non_empty = {fam: ips for fam, ips in buckets.items() if ips}
+            output_file = context["output_file"]
+
+            if not non_empty:
+                self.run_queue.put(("export_complete", {"processed_data": {}, "output_file": output_file}))
+                return
+
+            common_kwargs = dict(
                 customer=context["customer"],
                 project=context["project"],
                 customer_po=context["customer_po"],
                 sales_order=context["sales_order"],
                 append_mode=context.get("append_mode", False),
             )
-            self.run_queue.put(("export_complete", {"processed_data": processed_data, "output_file": context["output_file"]}))
+
+            # Single-family scans bypass the unified builder so behavior
+            # exactly matches the prior single-template path.
+            if len(non_empty) == 1:
+                fam = next(iter(non_empty))
+                ips = non_empty[fam]
+                if fam == "rls":
+                    processed_data = self.build_psi_report_workbook(
+                        ips, output_file, template_override=self.rls_template_path, **common_kwargs
+                    )
+                elif fam == "psi":
+                    processed_data = self.build_psi_report_workbook(ips, output_file, **common_kwargs)
+                else:
+                    processed_data = self.build_report_workbook(ips, output_file, **common_kwargs)
+            else:
+                processed_data = self.build_unified_report_workbook(non_empty, output_file, **common_kwargs)
+
+            self.run_queue.put((
+                "export_complete",
+                {"processed_data": processed_data, "output_file": output_file},
+            ))
         except Exception as exc:
             logging.exception("Background export failed")
-            self.run_queue.put(("export_error", str(exc)))
+            self.run_queue.put(("export_error", friendly_error(exc)))
 
     def should_stop(self):
         return self.stop_threads
@@ -597,6 +757,29 @@ class InventoryGUI:
                 messagebox.showerror("Packing Slip Error", f"Error:\n{payload}")
                 should_reschedule = False
                 break
+            elif event_type == "creds_needed":
+                # Worker has parked an IP and is blocked waiting for the user
+                # to type credentials. Prompt on the main (Tk) thread, then
+                # push the answer (or None) back to the worker's response
+                # queue so the worker can retry that single device.
+                ip = payload
+                try:
+                    from utils.credentials import prompt_for_credentials_gui
+                    self.output_screen.insert(
+                        tk.END,
+                        f"\n[{ip}] Default credentials failed — please enter credentials.\n",
+                    )
+                    self.output_screen.see(tk.END)
+                    answer = prompt_for_credentials_gui(parent_window=self.root)
+                except Exception as prompt_err:
+                    logging.exception(f"Credential prompt failed for {ip}")
+                    self.output_screen.insert(
+                        tk.END,
+                        f"[{ip}] Credential prompt failed: {friendly_error(prompt_err)}\n",
+                    )
+                    answer = None
+                # Always push *something* so the worker doesn't hang.
+                self._creds_response_queue.put(answer if answer else (None, None))
             else:
                 self.output_screen.insert(tk.END, str(payload) + '\n')
                 self.output_screen.see(tk.END)
@@ -626,6 +809,7 @@ class InventoryGUI:
 
         with self.lock:
             self.outputs.clear()
+            self.device_family_by_ip.clear()
         self.stop_threads = False
         self.is_paused = False
 
@@ -671,7 +855,17 @@ class InventoryGUI:
                     if error == "Aborted":
                         queue.put(("aborted", None))
                         return
-                    if error:
+                    if error == script_interface.NEEDS_CREDENTIALS_SENTINEL:
+                        # All default credentials failed for this device.
+                        # Park it, keep the rest of the run moving, and we'll
+                        # prompt the user for new creds at the end.
+                        self.pause_queue.append((ip, script_instance))
+                        queue.put((
+                            "log",
+                            f"[{ip}] Default credentials exhausted — parking for "
+                            f"manual credential entry after the rest of the run.",
+                        ))
+                    elif error:
                         logging.warning(f"[TASK] Script execution error for {ip}: {error}")
                         queue.put(("log", f"Error in normal inventory for {ip}: {error}"))
                         if any(kw in error.lower() for kw in ("auth", "login", "credential", "password", "invalid")):
@@ -688,7 +882,164 @@ class InventoryGUI:
 
             except Exception as e:
                 logging.exception(f"[TASK] Unhandled error processing {ip}")
-                queue.put(("log", f"Error processing {ip}: {e}"))
+                queue.put(("log", f"Error processing {ip}: {friendly_error(e)}"))
+
+        # Main queue drained — now process anything that needed manual creds.
+        if self.pause_queue and not self.stop_threads:
+            self._drain_pause_queue(queue)
+
+    def _drain_pause_queue(self, queue: Queue) -> None:
+        """Prompt user for credentials per parked IP and retry collection.
+
+        Runs on the worker thread. For each parked (ip, script_instance):
+          1. Post ("creds_needed", ip) on the run queue. The main thread sees
+             this in poll_run_queue, prompts the user with a Tk dialog, and
+             pushes the answer (or None) to ``self._creds_response_queue``.
+          2. Block on the response queue (with stop/pause checks).
+          3. If user provided creds, swap them onto the script_instance and
+             re-run execute_commands. Otherwise mark the IP as skipped.
+        """
+        parked = list(self.pause_queue)
+        self.pause_queue.clear()
+        total = len(parked)
+        # Need our own identifier/selector since the worker's locals are out
+        # of scope here. They're cheap to construct.
+        device_identifier = script_interface.DeviceIdentifier()
+        script_selector = script_interface.ScriptSelector()
+        queue.put((
+            "log",
+            f"\n--- Processing {total} device(s) that need manual credentials ---",
+        ))
+        for idx, (ip, script_instance) in enumerate(parked, start=1):
+            if self.stop_threads:
+                queue.put(("aborted", None))
+                return
+            while self.is_paused and not self.stop_threads:
+                time.sleep(0.1)
+            if self.stop_threads:
+                queue.put(("aborted", None))
+                return
+
+            queue.put((
+                "progress",
+                (idx, total, f"Manual credentials {idx}/{total}"),
+            ))
+            queue.put(("log", f"[{ip}] Requesting credentials from user..."))
+
+            # Drain any stale response just in case.
+            while not self._creds_response_queue.empty():
+                try:
+                    self._creds_response_queue.get_nowait()
+                except Empty:
+                    break
+
+            queue.put(("creds_needed", ip))
+
+            new_creds: Optional[Tuple[Optional[str], Optional[str]]] = None
+            while True:
+                if self.stop_threads:
+                    queue.put(("aborted", None))
+                    return
+                try:
+                    new_creds = self._creds_response_queue.get(timeout=0.25)
+                    break
+                except Empty:
+                    continue
+
+            if not new_creds or not new_creds[0]:
+                self.failed_ips[ip] = (
+                    "Login failed: user declined to provide credentials"
+                )
+                queue.put((
+                    "log",
+                    f"[{ip}] Skipped — no credentials provided by user.",
+                ))
+                continue
+
+            new_user, new_pass = new_creds
+
+            # Identify-time park: no script_instance was ever built. Re-run
+            # identification with the user-provided creds, build the script,
+            # then execute it.
+            if script_instance is None:
+                queue.put(("log", f"[{ip}] Re-identifying with user-provided credentials..."))
+                try:
+                    device_type, device_name = device_identifier.identify_device(
+                        ip,
+                        queue,
+                        None,
+                        self.should_stop,
+                        explicit_credentials=(new_user, new_pass),
+                    )
+                except script_interface.CredentialPromptRequired:
+                    self.failed_ips[ip] = "Login failed: user-provided credentials rejected at identification"
+                    queue.put(("log", f"[{ip}] User-provided credentials rejected during identification."))
+                    continue
+                except Exception as e:
+                    logging.exception(f"[PAUSE] Re-identify error for {ip}")
+                    self.failed_ips[ip] = f"Identification failed: {friendly_error(e)}"
+                    queue.put(("log", f"[{ip}] Re-identify error: {friendly_error(e)}"))
+                    continue
+
+                if not device_type:
+                    self.failed_ips[ip] = "Identification failed even with user-provided credentials"
+                    queue.put(("log", f"[{ip}] Could not identify device with user-provided credentials."))
+                    continue
+
+                conn_type = 'telnet' if (device_type or '').strip().lower() == '1830' else 'ssh'
+                script_instance = script_selector.select_script(
+                    device_type, ip, connection_type=conn_type, stop_callback=self.should_stop
+                )
+                if not script_instance:
+                    self.failed_ips[ip] = f"Unknown device type: {device_type}"
+                    queue.put(("log", f"[{ip}] No script for device type {device_type!r}"))
+                    continue
+
+            # Record the export-template family before running. The
+            # bulk-identify path (run_inventory_worker) does this inline,
+            # but parked IPs land here without it being set, which would
+            # leave them routed to the default workbook builder.
+            fam = self._family_for_script(script_instance)
+            logging.info(f"[FAMILY] (pause-queue) ip={ip} → fam={fam!r}")
+            self.device_family_by_ip[ip] = fam
+
+            # Push the user-provided creds onto whichever attribute the script
+            # uses. SAR/IXR take them as method args; Smartoptics_DCP and
+            # Nokia_1830 hold them as instance state.
+            if hasattr(script_instance, "username"):
+                script_instance.username = new_user
+            if hasattr(script_instance, "password"):
+                script_instance.password = new_pass
+
+            queue.put(("log", f"[{ip}] Retrying with user-provided credentials..."))
+            try:
+                commands = script_instance.get_commands() or []
+                outputs_list, error = script_instance.execute_commands(commands)
+                if error == "Aborted":
+                    queue.put(("aborted", None))
+                    return
+                if error == script_interface.NEEDS_CREDENTIALS_SENTINEL:
+                    # User-provided creds also failed default-set → record
+                    # and move on. We do not re-prompt the same IP twice.
+                    self.failed_ips[ip] = "Login failed: user-provided credentials rejected"
+                    queue.put((
+                        "log",
+                        f"[{ip}] User-provided credentials also failed. Skipping.",
+                    ))
+                elif error:
+                    logging.warning(f"[PAUSE] Retry error for {ip}: {error}")
+                    queue.put(("log", f"[{ip}] Retry error: {error}"))
+                    self.failed_ips[ip] = f"Login failed: {error}"
+                elif outputs_list and hasattr(script_instance, "process_outputs"):
+                    with self.lock:
+                        script_instance.process_outputs(outputs_list, ip, self.outputs)
+                    queue.put(("log", f"[{ip}] Inventory completed via manual credentials"))
+                    self.failed_ips.pop(ip, None)
+                else:
+                    queue.put(("log", f"[{ip}] No output after manual credential retry"))
+            except Exception as e:
+                logging.exception(f"[PAUSE] Unhandled error processing {ip}")
+                queue.put(("log", f"[{ip}] Retry error: {friendly_error(e)}"))
 
     def update_gui_from_queue(self, queue):
         while not queue.empty():
@@ -729,7 +1080,7 @@ class ConsoleRedirector:
         pass  # Required for compatibility with logging
     
 def main():
-    logging.info("Starting LAMIS Inventory System")
+    logging.info("Starting ATLAS")
     root = tk.Tk()
     # Reuse the already-created instances
     app = InventoryGUI(

@@ -1,5 +1,5 @@
 @echo off
-REM LAMIS Build Script - Creates onedir executable with bundled resources
+REM ATLAS Build Script - Creates onedir executable with bundled resources
 REM Usage: build.bat [--clean] [--sign <path_to_cert.pfx>]
 REM
 REM Examples:
@@ -18,7 +18,7 @@ if exist ".venv\Scripts\python.exe" (
 )
 
 REM Configuration
-set APP_NAME=LAMIS
+set APP_NAME=ATLAS
 set ENTRY_POINT=main.py
 set ICON=icon.ico
 set BUILD_MODE=--onedir
@@ -70,16 +70,16 @@ if errorlevel 1 (
 
 REM Verify data files exist
 echo [*] Verifying data files...
-if not exist "L.A.M.I.S Logo.png" (
-    echo [!] ERROR: L.A.M.I.S Logo.png not found
+if not exist "ATLAS Logo.png" (
+    echo [!] ERROR: ATLAS Logo.png not found
     exit /b 1
 )
-if not exist "data\LAMIS_Packing_Slip.xlsx" (
-    echo [!] ERROR: data\LAMIS_Packing_Slip.xlsx not found
+if not exist "data\ATLAS_Packing_Slip.xlsx" (
+    echo [!] ERROR: data\ATLAS_Packing_Slip.xlsx not found
     exit /b 1
 )
-if not exist "data\LAMIS_Consolidated_Packing_Slip.xlsx" (
-    echo [!] ERROR: data\LAMIS_Consolidated_Packing_Slip.xlsx not found
+if not exist "data\ATLAS_Consolidated_Packing_Slip.xlsx" (
+    echo [!] ERROR: data\ATLAS_Consolidated_Packing_Slip.xlsx not found
     exit /b 1
 )
 if not exist "data\Device_Report_Template.xlsx" (
@@ -96,7 +96,7 @@ echo.
 if exist "%ICON%" (
     echo Using icon: %ICON%
     %PYTHON% -m PyInstaller %BUILD_MODE% --windowed --name "%APP_NAME%" ^
-        --add-data "L.A.M.I.S Logo.png:." ^
+        --add-data "ATLAS Logo.png:." ^
         --add-data "data:data" ^
         --collect-all paramiko ^
         --collect-all openpyxl ^
@@ -107,7 +107,7 @@ if exist "%ICON%" (
 ) else (
     echo [!] WARNING: icon.ico not found - building without icon
     %PYTHON% -m PyInstaller %BUILD_MODE% --windowed --name "%APP_NAME%" ^
-        --add-data "L.A.M.I.S Logo.png:." ^
+        --add-data "ATLAS Logo.png:." ^
         --add-data "data:data" ^
         --collect-all paramiko ^
         --collect-all openpyxl ^
@@ -151,15 +151,15 @@ echo [!] NSIS not found - install NSIS and add to PATH, or install to default lo
 exit /b 1
 
 :invoke_nsis_x86
-"C:\Program Files (x86)\NSIS\makensis.exe" LAMIS.nsi
+"C:\Program Files (x86)\NSIS\makensis.exe" ATLAS.nsi
 goto :nsis_check
 
 :invoke_nsis_x64
-"C:\Program Files\NSIS\makensis.exe" LAMIS.nsi
+"C:\Program Files\NSIS\makensis.exe" ATLAS.nsi
 goto :nsis_check
 
 :invoke_nsis_system
-makensis LAMIS.nsi
+makensis ATLAS.nsi
 
 :nsis_check
 if errorlevel 1 (
@@ -167,7 +167,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [OK] Installer built: dist\LAMIS_Setup.exe
+echo [OK] Installer built: dist\ATLAS_Setup.exe
 
 REM Sign the installer too
 if "%DO_SIGN%"=="1" (
@@ -194,8 +194,8 @@ echo.
 echo ============================================
 echo Build Summary
 echo ============================================
-if exist dist\LAMIS_Setup.exe (
-    echo Final Deliverable: dist\LAMIS_Setup.exe
+if exist dist\ATLAS_Setup.exe (
+    echo Final Deliverable: dist\ATLAS_Setup.exe
 ) else (
     echo Executable : dist\%APP_NAME%\%APP_NAME%.exe
 )

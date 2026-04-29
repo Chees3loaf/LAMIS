@@ -145,17 +145,21 @@ class TestSetupSummarySheetHeader(unittest.TestCase):
         builder._setup_summary_sheet_header(ws, "Acme", "Proj-X", [])
         self.assertEqual(ws["D7"].value, "Proj-X")
 
-    def test_ip_list_joined_in_f7(self):
+    def test_device_count_initialized_to_zero_in_f7(self):
+        # F7 holds the device count, not a joined IP list. The count starts at
+        # 0 and is overwritten with len(ordered_items) once processing finishes
+        # (see workbook_builder.py:242).
         builder = _make_builder()
         ws = self._blank_ws()
         builder._setup_summary_sheet_header(ws, "", "", ["10.0.0.1", "10.0.0.2"])
-        self.assertEqual(ws["F7"].value, "10.0.0.1, 10.0.0.2")
+        self.assertEqual(ws["F7"].value, 0)
 
-    def test_empty_ip_list_f7_empty_string(self):
+    def test_device_count_label_written_to_f5(self):
         builder = _make_builder()
         ws = self._blank_ws()
         builder._setup_summary_sheet_header(ws, "C", "P", [])
-        self.assertEqual(ws["F7"].value, "")
+        self.assertEqual(ws["F5"].value, "Device Count")
+        self.assertEqual(ws["F7"].value, 0)
 
     def test_capture_time_written_to_a2(self):
         builder = _make_builder()

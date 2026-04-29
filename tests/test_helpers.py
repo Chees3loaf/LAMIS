@@ -102,14 +102,21 @@ class TestGetDatabasePath(unittest.TestCase):
         path = get_database_path()
         self.assertEqual(path.name, "network_inventory.db")
 
-    def test_parent_dir_is_data(self):
+    def test_parent_dir_is_atlas_appdata(self):
+        # F019: DB lives under %APPDATA%\ATLAS so non-Admin installs (Program
+        # Files is read-only for standard users) can still write to it.
         path = get_database_path()
-        self.assertEqual(path.parent.name, "data")
+        self.assertEqual(path.parent.name, "ATLAS")
 
-    def test_path_is_inside_project_root(self):
-        root = get_project_root()
+    def test_path_is_inside_appdata(self):
+        # The path should resolve under the user's APPDATA (or HOME fallback).
+        import os
+        app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
         db = get_database_path()
-        self.assertTrue(str(db).startswith(str(root)))
+        self.assertTrue(
+            str(db).startswith(str(Path(app_data).resolve())),
+            f"Expected DB under {app_data}, got {db}",
+        )
 
 
 if __name__ == "__main__":

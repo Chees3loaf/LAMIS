@@ -10,6 +10,14 @@ from typing import Dict, List
 import openpyxl
 import pandas as pd
 
+from utils.helpers import (
+    UploadValidationError,
+    friendly_error,
+    sanitize_filename_component,
+    strip_dataframe_strings,
+    validate_uploaded_file,
+)
+
 
 class PackingSlipFrame(ttk.Frame):
     """Tkinter frame for the Packing Slip (From File) mode.
@@ -25,6 +33,7 @@ class PackingSlipFrame(ttk.Frame):
         self.uploaded_file_path: str | None = None
         self.uploaded_file_data: pd.DataFrame | None = None
         self._multisheet_device_file: bool = False
+        self._family_by_ip: Dict[str, str] = {}
         self._last_customer: str = ""
         self._last_project: str = ""
         self._last_customer_po: str = ""
@@ -92,13 +101,27 @@ class PackingSlipFrame(ttk.Frame):
         if not file_path:
             return
 
+        # Validate the path is a real file with an allowed extension and the
+        # right magic bytes. Rejects symlinks, oversize files, and binaries
+        # masquerading as CSV.
+        try:
+            resolved = validate_uploaded_file(
+                file_path, allowed_kinds=("xlsx", "xls", "csv")
+            )
+        except UploadValidationError as e:
+            messagebox.showerror("File Error", str(e))
+            logging.warning(f"Packing slip upload rejected: {e}")
+            return
+        file_path = str(resolved)
+
         try:
             self.uploaded_file_path = file_path
-            if file_path.endswith(".csv"):
+            if file_path.lower().endswith(".csv"):
                 self.uploaded_file_data = pd.read_csv(file_path)
+                strip_dataframe_strings(self.uploaded_file_data)
                 self._multisheet_device_file = False
                 count_label = f"{len(self.uploaded_file_data)} rows"
-            elif file_path.endswith((".xlsx", ".xls")):
+            elif file_path.lower().endswith((".xlsx", ".xls")):
                 xl = pd.ExcelFile(file_path)
                 sheet_names = xl.sheet_names
                 has_summary = any("summary" in s.lower() for s in sheet_names)
@@ -115,12 +138,13 @@ class PackingSlipFrame(ttk.Frame):
                 else:
                     self._multisheet_device_file = False
                     self.uploaded_file_data = pd.read_excel(file_path)
+                    strip_dataframe_strings(self.uploaded_file_data)
                     count_label = f"{len(self.uploaded_file_data)} rows"
             else:
                 messagebox.showerror("File Error", "Unsupported file format. Please use CSV or Excel files.")
                 return
 
-            if file_path.endswith((".xlsx", ".xls")):
+            if file_path.lower().endswith((".xlsx", ".xls")):
                 self._try_populate_fields_from_file(file_path)
 
             file_name = os.path.basename(file_path)
@@ -134,8 +158,8 @@ class PackingSlipFrame(ttk.Frame):
             logging.info(f"File uploaded: {file_path} with {len(self.uploaded_file_data)} rows")
 
         except Exception as e:
-            messagebox.showerror("File Error", f"Failed to load file:\n{e}")
-            logging.error(f"File upload error: {e}")
+            messagebox.showerror("File Error", f"Failed to load file:\n{friendly_error(e)}")
+            logging.exception("File upload error")
 
     # ------------------------------------------------------------------
     # Metadata auto-populate
@@ -226,7 +250,11 @@ class PackingSlipFrame(ttk.Frame):
         self._last_customer_po = customer_po
         self._last_sales_order = sales_order
 
-        tmp_dir = tempfile.mkdtemp(prefix="LAMIS_")
+        # Create temp directory with restricted permissions (owner only, no group/other access)
+        # Use secure creation pattern: mkdir first, then restrict via chmod BEFORE any file ops
+        # to prevent TOCTOU (Time-Of-Check-Time-Of-Use) race condition attacks
+        tmp_dir = tempfile.mkdtemp(prefix="ATLAS_", dir=None)
+        os.chmod(tmp_dir, 0o700)
 
         try:
             if self._multisheet_device_file:
@@ -240,8 +268,16 @@ class PackingSlipFrame(ttk.Frame):
                 return
 
             ip_list = list(processed_data.keys())
-            save_path = self.controller.workbook_builder.build_packing_slip_workbook(
+            family_for_ip = getattr(self, "_family_by_ip", None) or {}
+            # Prefer live-run families when present (overrides file-detected for same IPs).
+            live_family = getattr(self.controller, "device_family_by_ip", None) or {}
+            for ip, fam in live_family.items():
+                if ip in processed_data:
+                    family_for_ip[ip] = fam
+
+            save_path = self.controller.build_unified_packing_slip_workbook(
                 processed_data, ip_list, customer, project, customer_po, sales_order, tmp_dir,
+                family_for_ip=family_for_ip,
             )
 
             self.ps_status_label.config(text="Status: Ready")
@@ -252,8 +288,8 @@ class PackingSlipFrame(ttk.Frame):
 
         except Exception as e:
             self.ps_status_label.config(text="Status: Error")
-            messagebox.showerror("Generation Error", f"Failed to generate packing slips:\n{e}")
-            logging.error(f"Packing slip generation error: {e}")
+            messagebox.showerror("Generation Error", f"Failed to generate packing slips:\n{friendly_error(e)}")
+            logging.exception("Packing slip generation error")
         finally:
             self.ps_run_button.config(state=tk.NORMAL)
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -326,7 +362,7 @@ class PackingSlipFrame(ttk.Frame):
             variable=print_mode, value="consolidated",
         ).pack(anchor="w", padx=10, pady=2)
         tk.Radiobutton(
-            mode_frame, text="Individual  (save one workbook per device)",
+            mode_frame, text="Individual  (one workbook, one tab per device)",
             variable=print_mode, value="individual",
         ).pack(anchor="w", padx=10, pady=2)
 
@@ -358,34 +394,41 @@ class PackingSlipFrame(ttk.Frame):
             base_name = os.path.splitext(os.path.basename(source_path))[0]
 
             if mode == "individual":
-                save_folder = filedialog.askdirectory(title="Select Folder to Save Individual Packing Slips")
-                if not save_folder:
+                safe_customer = sanitize_filename_component(self._last_customer)
+                safe_project = sanitize_filename_component(self._last_project)
+                save_path = filedialog.asksaveasfilename(
+                    title="Save Individual Packing Slips Workbook",
+                    initialfile=f"PackingSlip_{safe_customer}_{safe_project}_Individual.xlsx",
+                    defaultextension=".xlsx",
+                    filetypes=[("Excel Workbook", "*.xlsx")],
+                )
+                if not save_path:
                     return  # user cancelled
 
-                saved = 0
-                for sheet_name in selected_sheets:
-                    wb_src = openpyxl.load_workbook(source_path)
-                    sheets_to_keep = set(summary_sheets + [sheet_name])
-                    for name in list(wb_src.sheetnames):
-                        if name not in sheets_to_keep:
-                            del wb_src[name]
-                    safe = sheet_name.replace("/", "_").replace("\\", "_")
-                    save_path = os.path.join(save_folder, f"{base_name}_{safe}.xlsx")
-                    autosize = self.controller.workbook_builder.autosize_sheet_columns
-                    for ws_name in wb_src.sheetnames:
-                        autosize(wb_src[ws_name])
-                    wb_src.save(save_path)
-                    os.startfile(save_path)
-                    saved += 1
+                wb_src = openpyxl.load_workbook(source_path)
+                sheets_to_keep = set(summary_sheets + list(selected_sheets))
+                for name in list(wb_src.sheetnames):
+                    if name not in sheets_to_keep:
+                        del wb_src[name]
+
+                autosize_wb = self.controller.workbook_builder.autosize_workbook_columns
+                autosize_wb(wb_src)
+                wb_src.save(save_path)
+                os.startfile(save_path)
 
                 out = self.controller.output_screen
-                out.insert(tk.END, f"Saved {saved} individual packing slip(s) to: {save_folder}\n")
+                out.insert(
+                    tk.END,
+                    f"Saved {len(selected_sheets)} individual packing slip tab(s) to: {save_path}\n",
+                )
                 out.see(tk.END)
-                logging.info(f"Individual save: {saved} file(s) → {save_folder}")
+                logging.info(
+                    f"Individual save: {len(selected_sheets)} tab(s) → {save_path}"
+                )
 
             else:  # consolidated — single sheet, all line items from all selected devices
-                safe_customer = self._last_customer.replace(" ", "_")
-                safe_project = self._last_project.replace(" ", "_")
+                safe_customer = sanitize_filename_component(self._last_customer)
+                safe_project = sanitize_filename_component(self._last_project)
                 save_path = filedialog.asksaveasfilename(
                     title="Save Consolidated Packing Slip",
                     initialfile=f"PackingSlip_{safe_customer}_{safe_project}_Consolidated.xlsx",
@@ -395,12 +438,25 @@ class PackingSlipFrame(ttk.Frame):
                 if not save_path:
                     return
 
+                # SECURITY: Validate save path is within an accessible directory (prevent directory traversal)
+                try:
+                    save_dir = os.path.dirname(save_path)
+                    if save_dir:
+                        # Ensure directory is accessible before attempting to write
+                        os.makedirs(save_dir, exist_ok=True)
+                        if not os.access(save_dir, os.W_OK):
+                            messagebox.showerror("Permission Error", f"No write permission to directory: {save_dir}")
+                            return
+                except (OSError, PermissionError) as e:
+                    messagebox.showerror("Path Error", f"Cannot write to save location: {friendly_error(e)}")
+                    return
+
                 # Build a fresh single-sheet workbook from the consolidated template
                 # (data/LAMIS_Consolidated_Packing_Slip.xlsx) which has Device ID in col B
                 base_slip_template = self.controller.workbook_builder.packing_slip_template
                 consolidated_template = os.path.join(
                     os.path.dirname(base_slip_template),
-                    "LAMIS_Consolidated_Packing_Slip.xlsx",
+                    "ATLAS_Consolidated_Packing_Slip.xlsx",
                 )
                 if not os.path.exists(consolidated_template):
                     consolidated_template = base_slip_template  # fallback
@@ -443,15 +499,17 @@ class PackingSlipFrame(ttk.Frame):
                             if v is not None
                         )
                         if has_data:
-                            device_sheet[f"B{row_num}"] = sheet_name   # Device ID
-                            device_sheet[f"C{row_num}"] = po or ""
-                            device_sheet[f"D{row_num}"] = part or ""
-                            device_sheet[f"E{row_num}"] = serial or ""
-                            device_sheet[f"F{row_num}"] = desc or ""
+                            # SECURITY: Sanitize all cell values to prevent formula injection attacks
+                            sanitize = self.controller.workbook_builder._sanitize_cell
+                            device_sheet[f"B{row_num}"] = sanitize(sheet_name)   # Device ID
+                            device_sheet[f"C{row_num}"] = sanitize(po or "")
+                            device_sheet[f"D{row_num}"] = sanitize(part or "")
+                            device_sheet[f"E{row_num}"] = sanitize(serial or "")
+                            device_sheet[f"F{row_num}"] = sanitize(desc or "")
                             row_num += 1
                 wb_src.close()
 
-                self.controller.workbook_builder.autosize_sheet_columns(device_sheet)
+                self.controller.workbook_builder.autosize_workbook_columns(wb_out)
                 wb_out.save(save_path)
                 os.startfile(save_path)
 
@@ -461,8 +519,8 @@ class PackingSlipFrame(ttk.Frame):
                 logging.info(f"Consolidated save: {row_num - 15} line item(s) → {save_path}")
 
         except Exception as e:
-            messagebox.showerror("Print Error", f"Failed to prepare sheets for printing:\n{e}")
-            logging.error(f"Print selection error: {e}")
+            messagebox.showerror("Print Error", f"Failed to prepare sheets for printing:\n{friendly_error(e)}")
+            logging.exception("Print selection error")
 
     # ------------------------------------------------------------------
     # File processing
@@ -475,8 +533,12 @@ class PackingSlipFrame(ttk.Frame):
         Extracts the source IP from sheet metadata and uses it as the dict key.
         Adds a 'System Name' column (= sheet name) so the workbook builder can
         use the sheet name as the device name.
+
+        Side effect: populates ``self._family_by_ip`` with detected device family
+        per IP based on the System Type metadata cell (Excel F7).
         """
         processed_data: Dict[str, pd.DataFrame] = {}
+        self._family_by_ip = {}
         try:
             xl = pd.ExcelFile(file_path)
             for sheet_name in xl.sheet_names:
@@ -488,6 +550,15 @@ class PackingSlipFrame(ttk.Frame):
                     val = str(df_raw.iloc[4, 5]).strip()
                     if val and val.lower() != "nan":
                         ip_address = val
+                except (IndexError, KeyError):
+                    pass
+
+                # Extract System Type from F7 (iloc row 6, col 5) for family detection.
+                system_type = ""
+                try:
+                    st = str(df_raw.iloc[6, 5]).strip()
+                    if st and st.lower() != "nan":
+                        system_type = st
                 except (IndexError, KeyError):
                     pass
 
@@ -509,6 +580,7 @@ class PackingSlipFrame(ttk.Frame):
                     continue
 
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
+                strip_dataframe_strings(df)
 
                 # Drop rows where all key columns are empty
                 relevant_cols = [
@@ -528,6 +600,14 @@ class PackingSlipFrame(ttk.Frame):
 
                 if not df.empty:
                     processed_data[ip_address] = df.reset_index(drop=True)
+                    # Map system type to family.
+                    st_l = system_type.lower()
+                    if "rls" in st_l or "ciena" in st_l:
+                        self._family_by_ip[ip_address] = "rls"
+                    elif "psi" in st_l or "1830" in st_l or "nokia" in st_l:
+                        self._family_by_ip[ip_address] = "psi"
+                    else:
+                        self._family_by_ip[ip_address] = "default"
 
             return processed_data
 

@@ -11,9 +11,10 @@ import subprocess
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 import serial
-from script_interface import BaseScript
+from script_interface import BaseScript, ssh_connect_with_credential_fallback, CredentialPromptRequired, NEEDS_CREDENTIALS_SENTINEL
+from utils.helpers import get_known_hosts_path, get_database_path, get_host_key_policy
 
-db_path = os.path.join(os.path.dirname(__file__),"..", "data", "network_inventory.db")
+db_path = str(get_database_path())
 
 class Script(BaseScript):
     def __init__(self, db_name='network_inventory.db', connection_type='serial', **kwargs):
@@ -84,17 +85,32 @@ class Script(BaseScript):
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         shell = None
         try:
+            _kh = str(get_known_hosts_path())
             self.ssh_client = paramiko.SSHClient()
             self.ssh_client.load_system_host_keys()
-            self.ssh_client.set_missing_host_key_policy(paramiko.WarningPolicy())
+            self.ssh_client.load_host_keys(_kh)
+            self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
             logging.info(f"Connecting to {ip_address}")
-            self.ssh_client.connect(ip_address,
-                               username=username,
-                               password=password, 
-                               look_for_keys=False,
-                               allow_agent=False,
-                               timeout=10
-                               )
+            try:
+                used_user, used_pass = ssh_connect_with_credential_fallback(
+                    self.ssh_client,
+                    ip_address,
+                    username,
+                    password,
+                    timeout=10,
+                )
+            except CredentialPromptRequired:
+                logging.info(
+                    f"Default credentials exhausted for {ip_address}; "
+                    f"parking in pause queue for user-credential entry"
+                )
+                return [], NEEDS_CREDENTIALS_SENTINEL
+            except paramiko.AuthenticationException as ae:
+                logging.error(f"Authentication failed for {ip_address}: {ae}")
+                return [], (
+                    f"Authentication failed for {ip_address}. Skipping this device."
+                )
+            self.ssh_client.save_host_keys(_kh)
             logging.info(f"Connected to {ip_address}")
 
             shell = self.ssh_client.invoke_shell()
