@@ -83,6 +83,18 @@ def restrict_path_to_owner(path: Union[str, Path], is_dir: bool = False) -> bool
 
 
 
+def get_data_dir() -> Path:
+    """Return the path to the bundled data directory (templates, DB seeds, etc.).
+
+    When running as a PyInstaller onedir bundle, ``--add-data "data:data"``
+    places all data files inside ``sys._MEIPASS/data/``.  At dev-time the
+    data folder lives next to the project root.
+    """
+    if getattr(sys, 'frozen', False):
+        return Path(sys._MEIPASS) / "data"  # type: ignore[attr-defined]
+    return get_project_root() / "data"
+
+
 def get_project_root() -> Path:
     """
     Get the LAMIS project root directory.
@@ -133,11 +145,24 @@ def get_database_path() -> Path:
     """
     # Store the database in %APPDATA%\ATLAS so it's writable when installed
     # in Program Files (which is read-only for standard users).
-    import os
+    import os, shutil, sys
     app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
     db_dir = Path(app_data) / "ATLAS"
     db_dir.mkdir(parents=True, exist_ok=True)
-    return (db_dir / "network_inventory.db").resolve()
+    dest = (db_dir / "network_inventory.db").resolve()
+
+    # If the destination DB is missing or empty, seed it from the bundled copy.
+    if not dest.exists() or dest.stat().st_size == 0:
+        # When frozen (PyInstaller), data/ is under sys._MEIPASS; otherwise
+        # it's relative to this file's project root.
+        if getattr(sys, "frozen", False):
+            source = Path(sys._MEIPASS) / "data" / "network_inventory.db"
+        else:
+            source = Path(__file__).parent.parent / "data" / "network_inventory.db"
+        if source.exists():
+            shutil.copy2(str(source), str(dest))
+
+    return dest
 
 
 def get_known_hosts_path() -> Path:

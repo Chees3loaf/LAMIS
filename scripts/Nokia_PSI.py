@@ -7,7 +7,7 @@ from tkinter import messagebox
 import pandas as pd
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
-from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
+from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache, NEEDS_CREDENTIALS_SENTINEL
 from utils.helpers import ensure_host_key_known, get_known_hosts_path
 from utils.telnet import Telnet
 
@@ -108,7 +108,7 @@ class Script(BaseScript):
             'show shelf 1',              # shelf name + type info
             'show shelf inventory *',    # shelf hardware
             'show card inventory *',     # card inventory
-            'show module inventory *',   # module / transceiver inventory
+            'show interface inventory *', # module / transceiver inventory
             'show software dynamic',     # software release info
             'show slot *',               # slot programming state
             'show redundancy 1 detail',  # redundancy / clock switch
@@ -123,7 +123,7 @@ class Script(BaseScript):
     def execute_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         if self.connection_type == 'ssh':
             outputs, error = self.execute_ssh_commands(commands)
-            if error and error != "Aborted":
+            if error and error not in ("Aborted", NEEDS_CREDENTIALS_SENTINEL):
                 logging.warning(f"SSH failed for {self.ip_address}: {error}. Falling back to Telnet.")
                 return self._execute_telnet_commands(commands)
             return outputs, error
@@ -215,7 +215,7 @@ class Script(BaseScript):
             if idx is None:
                 self.child.close(force=True); self.child = None; return [], "Aborted"
             if idx in (1, 2):
-                self.child.close(force=True); self.child = None; return [], "Authentication failed"
+                self.child.close(force=True); self.child = None; return [], NEEDS_CREDENTIALS_SENTINEL
             if idx in (3, 4):
                 self.child.close(force=True); self.child = None; return [], "SSH session closed unexpectedly"
 
@@ -368,7 +368,7 @@ class Script(BaseScript):
     # ------------------------------------------------------------------
 
     def get_part_description(self, part_number: str) -> str:
-        return self.db_cache.lookup_part(part_number)
+        return self.db_cache.lookup_part(part_number[:10])
 
     # ------------------------------------------------------------------
     # Output parsers
@@ -440,7 +440,7 @@ class Script(BaseScript):
                     serial_number = match.group(4).strip()
                     clei = match.group(5).strip() if match.group(5) else ''
 
-                    description = self.db_cache.lookup_part(part_number)
+                    description = self.db_cache.lookup_part(part_number[:10])
                     shelf_data.append({
                         'System Name': '',
                         'System Type': shelf_type,
@@ -494,7 +494,7 @@ class Script(BaseScript):
                     if part_number.upper() in ('PART', 'NUMBER', 'TYPE'):
                         continue
 
-                    description = self.db_cache.lookup_part(part_number)
+                    description = self.db_cache.lookup_part(part_number[:10])
                     card_data.append({
                         'System Name': '',
                         'System Type': '',
@@ -542,7 +542,7 @@ class Script(BaseScript):
                     part_number = match.group(3).strip()
                     serial_number = match.group(4).strip()
 
-                    description = self.db_cache.lookup_part(part_number)
+                    description = self.db_cache.lookup_part(part_number[:10])
                     module_data.append({
                         'System Name': '',
                         'System Type': '',
@@ -869,7 +869,7 @@ class Script(BaseScript):
             if command.startswith("show card inventory"):
                 return bool(re.search(r"^\s*\d+/\d+\s+\S+\s+\S+\s+\S+\s+\S+", output, re.MULTILINE))
 
-            if command.startswith("show module inventory"):
+            if command.startswith("show interface inventory"):
                 return bool(re.search(r"^\s*\d+/\S+\s+\S+\s+\S+\s+\S+", output, re.MULTILINE))
 
             if command.startswith("show software dynamic"):

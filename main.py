@@ -1,6 +1,7 @@
 import logging
 import logging.handlers
 import os
+import sys
 from datetime import datetime
 from tkinter import Tk, Label
 from PIL import Image, ImageTk
@@ -69,7 +70,10 @@ class LoadingScreen:
         self.root.geometry(f'+{int(x)}+{int(y)}')
 
         try:
-            logo_path = os.path.join(os.path.dirname(__file__), "ATLAS Logo.png")
+            logo_path = os.path.join(
+                getattr(sys, '_MEIPASS', os.path.dirname(__file__)),
+                "ATLAS Logo.png"
+            )
             logo = Image.open(logo_path).resize((800, 600), Image.LANCZOS)
             self.logo = ImageTk.PhotoImage(logo)
             self.logo_label = Label(self.root, image=self.logo)
@@ -97,8 +101,11 @@ def show_loading_screen():
 
 
 def check_updates(loading_screen):
-    updater = Updater(os.path.dirname(__file__))
-    update_available = updater.check_for_updates()
+    try:
+        updater = Updater(os.path.dirname(__file__))
+        update_available = updater.check_for_updates()
+    except Exception:
+        update_available = False
     loading_screen.update_status("Update Available" if update_available else "No Updates")
     loading_screen.close()
     start_gui(update_available)

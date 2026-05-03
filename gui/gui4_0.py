@@ -9,7 +9,7 @@ import sqlite3
 import sys
 import threading
 import subprocess
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 from queue import Empty, Queue
@@ -26,6 +26,7 @@ import csv
 from utils.helpers import (
     extract_ip_sort_key,
     friendly_error,
+    get_data_dir,
     get_database_path,
     get_project_root,
     sanitize_filename_component,
@@ -36,10 +37,12 @@ from gui.workbook_builder import WorkbookBuilder
 from gui.inventory_frame import InventoryFrame
 from gui.tds_frame import TDSFrame
 from gui.packing_slip_frame import PackingSlipFrame
+from gui.raw_frame import RawFrame
+from gui.provision_frame import ProvisionFrame
 
 command_tracker = script_interface.CommandTracker()
 db_cache = script_interface.get_cache()
-DATA_DIR = get_project_root() / "data"
+DATA_DIR = get_data_dir()
 
 class InventoryGUI:
     _manual_script_modules = {
@@ -49,6 +52,8 @@ class InventoryGUI:
         "Nokia PSI": "scripts.Nokia_PSI",
         "Ciena 6500": "scripts.Ciena_6500",
         "Ciena RLS": "scripts.Ciena_RLS",
+        "Ciena SAOS": "scripts.Ciena_SAOS_Inv",
+        "Ciena SAOS 10": "scripts.Ciena_SAOS10_Inv",
     }
 
     # F025: explicit allowlist of importable script modules. Any value not in
@@ -62,9 +67,11 @@ class InventoryGUI:
         "Nokia PSI": "ssh",
         "Ciena 6500": "ssh",
         "Ciena RLS": "ssh",
+        "Ciena SAOS": "ssh",
+        "Ciena SAOS 10": "ssh",
     }
 
-    _allowed_lan_scripts = {"Nokia 1830", "Nokia PSI", "Ciena 6500", "Ciena RLS"}
+    _allowed_lan_scripts = {"Nokia 1830", "Nokia PSI", "Ciena 6500", "Ciena RLS", "Ciena SAOS", "Ciena SAOS 10"}
     _allowed_serial_scripts = {"Nokia SAR", "Nokia IXR"}
 
     def __init__(self, root, update_available, command_tracker, db_cache):
@@ -83,10 +90,11 @@ class InventoryGUI:
         self.export_future = None
         self._worker_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="atlas-worker")
         self._stdout_original = sys.stdout
-        self.db_file = str(DATA_DIR / "network_inventory.db")
+        self.db_file = str(get_database_path())
         self.current_script_instance = None
         self.current_mode = tk.StringVar(value="inventory")
         self.output_screen = None
+        self.raw_frame = None  # initialized in setup_gui
         self.failed_ips: Dict[str, str] = {}
         # Devices whose default credentials all failed are parked here so the
         # main run keeps going. After the regular task queue drains, the
@@ -116,6 +124,11 @@ class InventoryGUI:
         # Values: "rls" (Ciena RLS), "psi" (Nokia PSI), "default" (everything else).
         self.device_family_by_ip: Dict[str, str] = {}
 
+        # Tracks script instances that are actively executing so abort_program
+        # can stop all of them immediately, regardless of concurrency.
+        self._active_scripts: Dict[str, Any] = {}
+        self._active_scripts_lock = threading.Lock()
+
         self.workbook_builder = WorkbookBuilder(self.db_cache, self.template_path, self.packing_slip_template)
 
         # Setup GUI Components
@@ -138,6 +151,8 @@ class InventoryGUI:
         tk.Radiobutton(mode_frame, text="Inventory (Network Scan)", variable=self.current_mode, value="inventory", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(mode_frame, text="TDS (Diagnostics)", variable=self.current_mode, value="tds", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(mode_frame, text="Packing Slip (From File)", variable=self.current_mode, value="packing_slip", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Raw (File Processing)", variable=self.current_mode, value="raw", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Provision (Nokia 7705/7250)", variable=self.current_mode, value="provision", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         
         # Container frame for all mode frames
         self.content_frame = ttk.Frame(self.root)
@@ -147,6 +162,8 @@ class InventoryGUI:
         self.inventory_frame = InventoryFrame(self.content_frame, self)
         self.tds_frame = TDSFrame(self.content_frame, self)
         self.packing_slip_frame = PackingSlipFrame(self.content_frame, self)
+        self.raw_frame = RawFrame(self.content_frame, self)
+        self.provision_frame = ProvisionFrame(self.content_frame, self)
         
         # Show the initial frame
         self.switch_mode()
@@ -161,6 +178,10 @@ class InventoryGUI:
             self.tds_frame.pack_forget()
         if self.packing_slip_frame:
             self.packing_slip_frame.pack_forget()
+        if self.raw_frame:
+            self.raw_frame.pack_forget()
+        if self.provision_frame:
+            self.provision_frame.pack_forget()
         
         if mode == "inventory":
             self.inventory_frame.pack(fill=tk.BOTH, expand=True)
@@ -168,6 +189,10 @@ class InventoryGUI:
             self.tds_frame.pack(fill=tk.BOTH, expand=True)
         elif mode == "packing_slip":
             self.packing_slip_frame.pack(fill=tk.BOTH, expand=True)
+        elif mode == "raw":
+            self.raw_frame.pack(fill=tk.BOTH, expand=True)
+        elif mode == "provision":
+            self.provision_frame.pack(fill=tk.BOTH, expand=True)
 
     def update_status(self, message: str) -> None:
         self.inventory_frame.update_status(message)
@@ -557,73 +582,75 @@ class InventoryGUI:
                     break
             total_ips = len(context["ip_list"])
             reachable_ips = []
-            for idx, ip in enumerate(context["ip_list"], start=1):
-                if self.stop_threads:
-                    queue.put(("aborted", None))
-                    return
-                if script_interface.is_reachable(ip):
-                    reachable_ips.append(ip)
-                else:
-                    self.failed_ips[ip] = "Unreachable"
-                queue.put(("progress", (idx, total_ips, f"Pinging {idx}/{total_ips}")))
+            reachable_lock = threading.Lock()
+
+            def _probe(ip):
+                return ip, script_interface.is_reachable(ip)
+
+            with ThreadPoolExecutor(max_workers=min(20, total_ips or 1)) as ping_pool:
+                futures = {ping_pool.submit(_probe, ip): ip for ip in context["ip_list"]}
+                for idx, future in enumerate(as_completed(futures), start=1):
+                    if self.stop_threads:
+                        ping_pool.shutdown(wait=False, cancel_futures=True)
+                        queue.put(("aborted", None))
+                        return
+                    ip, alive = future.result()
+                    if alive:
+                        with reachable_lock:
+                            reachable_ips.append(ip)
+                    else:
+                        self.failed_ips[ip] = "Unreachable"
+                    queue.put(("progress", (idx, total_ips, f"Pinging {idx}/{total_ips}")))
 
             if not reachable_ips:
                 queue.put(("log", "No reachable IPs found."))
                 queue.put(("inventory_complete", False))
                 return
 
-            device_identifier = script_interface.DeviceIdentifier()
-            script_selector = script_interface.ScriptSelector()
-            self.task_queue = Queue()
             total_reachable = len(reachable_ips)
+            completed_count = 0
+            completed_lock = threading.Lock()
 
-            for idx, ip in enumerate(reachable_ips, start=1):
-                if self.stop_threads:
-                    queue.put(("aborted", None))
-                    return
+            # Combined identify + execute pipeline: each of up to 5 concurrent
+            # workers handles one device end-to-end, reusing the SSH connection
+            # when possible so we avoid a second authentication round-trip.
+            with ThreadPoolExecutor(
+                max_workers=min(5, total_reachable or 1),
+                thread_name_prefix="atlas-scan",
+            ) as scan_pool:
+                scan_futures = {
+                    scan_pool.submit(self._process_single_device, ip, queue): ip
+                    for ip in reachable_ips
+                }
+                for future in as_completed(scan_futures):
+                    if self.stop_threads:
+                        scan_pool.shutdown(wait=False, cancel_futures=True)
+                        queue.put(("aborted", None))
+                        return
 
-                while self.is_paused and not self.stop_threads:
-                    time.sleep(0.1)
+                    while self.is_paused and not self.stop_threads:
+                        time.sleep(0.1)
 
-                if self.stop_threads:
-                    queue.put(("aborted", None))
-                    return
+                    ip, status, script_instance, fam = future.result()
 
-                queue.put(("progress", (idx, total_reachable, f"Identifying {idx}/{total_reachable}")))
-                try:
-                    device_type, device_name = device_identifier.identify_device(
-                        ip, queue, None, self.should_stop
-                    )
-                except script_interface.CredentialPromptRequired:
-                    # Defaults exhausted at identification time. Park the IP
-                    # so the user can supply credentials at the end of the
-                    # run; identification will be re-attempted then.
-                    queue.put((
-                        "log",
-                        f"[{ip}] Default credentials exhausted — parked for "
-                        f"manual credential entry after the rest of the run.",
-                    ))
-                    self.pause_queue.append((ip, None))
-                    continue
-                # Nokia 1830s only accept the operator login via the cli/admin/admin
-                # three-stage shell on Telnet. SSH to the cli account uses
-                # auth_none/keyboard-interactive (not a real password) so a
-                # plain ssh.exe spawn will hang on auth. Force Telnet for 1830s
-                # — identification has already auto-allowlisted the host.
-                conn_type = 'telnet' if (device_type or '').strip().lower() == '1830' else 'ssh'
-                script_instance = script_selector.select_script(device_type, ip, connection_type=conn_type, stop_callback=self.should_stop)
+                    with completed_lock:
+                        completed_count += 1
+                        count = completed_count
 
-                if script_instance:
-                    fam = self._family_for_script(script_instance)
-                    logging.debug(f"[FAMILY] ip={ip} mod={type(script_instance).__module__} → fam={fam!r}")
-                    self.device_family_by_ip[ip] = fam
-                    self.task_queue.put((ip, script_instance))
-                else:
-                    reason = f"Unknown device type: {device_type}" if device_type else "Identification failed"
-                    self.failed_ips[ip] = reason
-                    queue.put(("log", f"No script selected for {ip}: {reason}"))
+                    queue.put(("progress", (count, total_reachable, f"Scanning {count}/{total_reachable}")))
 
-            self.process_task_queue(queue)
+                    if status == "ABORTED":
+                        scan_pool.shutdown(wait=False, cancel_futures=True)
+                        queue.put(("aborted", None))
+                        return
+                    elif status == "CREDS_REQUIRED":
+                        self.pause_queue.append((ip, script_instance))
+                    elif status:
+                        self.failed_ips[ip] = status
+                        queue.put(("log", f"[{ip}] Error: {status}"))
+
+            if self.pause_queue and not self.stop_threads:
+                self._drain_pause_queue(queue)
 
             if self.failed_ips:
                 lines = ["\n--- FAILED IPs ---"]
@@ -856,20 +883,28 @@ class InventoryGUI:
                         queue.put(("aborted", None))
                         return
                     if error == script_interface.NEEDS_CREDENTIALS_SENTINEL:
-                        # All default credentials failed for this device.
-                        # Park it, keep the rest of the run moving, and we'll
-                        # prompt the user for new creds at the end.
+                        # Credentials failed — park for user prompt after the
+                        # rest of the run completes.
                         self.pause_queue.append((ip, script_instance))
                         queue.put((
                             "log",
-                            f"[{ip}] Default credentials exhausted — parking for "
+                            f"[{ip}] Credentials failed — parking for "
                             f"manual credential entry after the rest of the run.",
                         ))
                     elif error:
                         logging.warning(f"[TASK] Script execution error for {ip}: {error}")
                         queue.put(("log", f"Error in normal inventory for {ip}: {error}"))
                         if any(kw in error.lower() for kw in ("auth", "login", "credential", "password", "invalid")):
-                            self.failed_ips[ip] = f"Login failed: {error}"
+                            # Defensive fallback: a script returned an auth-related
+                            # error string instead of NEEDS_CREDENTIALS_SENTINEL.
+                            # Park for retry rather than recording as a hard failure.
+                            self.pause_queue.append((ip, script_instance))
+                            queue.put((
+                                "log",
+                                f"[{ip}] Auth error detected — parking for manual credential entry.",
+                            ))
+                        else:
+                            self.failed_ips[ip] = error
                     elif outputs_list and hasattr(script_instance, "process_outputs"):
                         with self.lock:
                             script_instance.process_outputs(outputs_list, ip, self.outputs)
@@ -887,6 +922,124 @@ class InventoryGUI:
         # Main queue drained — now process anything that needed manual creds.
         if self.pause_queue and not self.stop_threads:
             self._drain_pause_queue(queue)
+
+    def _process_single_device(
+        self,
+        ip: str,
+        queue: Queue,
+    ) -> Tuple[str, Optional[str], Any, Optional[str]]:
+        """Identify and collect inventory for a single device in one pass.
+
+        Called from the concurrent scan pool in ``run_inventory_worker``.
+        Creates its own ``DeviceIdentifier`` and ``ScriptSelector`` instances
+        so multiple devices can run completely in parallel without sharing state.
+
+        Returns:
+            (ip, status, script_instance, family)
+            - status is ``None`` on success, ``"CREDS_REQUIRED"``, ``"ABORTED"``,
+              or an error string.
+            - script_instance is the Script object (``None`` if identification failed).
+            - family is the export-template routing key (``None`` if unavailable).
+        """
+        device_identifier = script_interface.DeviceIdentifier()
+        script_selector = script_interface.ScriptSelector()
+        script_instance = None
+        fam = None
+
+        # ── Phase A: Identify ─────────────────────────────────────────────
+        try:
+            device_type, device_name = device_identifier.identify_device(
+                ip, queue, None, self.should_stop
+            )
+        except script_interface.CredentialPromptRequired:
+            queue.put((
+                "log",
+                f"[{ip}] Default credentials exhausted — parked for manual credential entry.",
+            ))
+            return ip, "CREDS_REQUIRED", None, None
+        except Exception as exc:
+            logging.exception(f"[PIPELINE] Identification error for {ip}")
+            return ip, f"Identification error: {friendly_error(exc)}", None, None
+
+        if self.stop_threads:
+            return ip, "ABORTED", None, None
+
+        if not device_type:
+            return ip, "Identification failed", None, None
+
+        # ── Phase B: Select script and optionally inject kept SSH client ───
+        # Nokia 1830s use Telnet/wexpect spawn and cannot reuse the paramiko
+        # transport.  All other SSH-identified devices can.
+        conn_type = 'telnet' if (device_type or '').strip().lower() == '1830' else 'ssh'
+        script_instance = script_selector.select_script(
+            device_type, ip, connection_type=conn_type, stop_callback=self.should_stop
+        )
+        if not script_instance:
+            reason = f"Unknown device type: {device_type}"
+            return ip, reason, None, None
+
+        fam = self._family_for_script(script_instance)
+        logging.debug(f"[FAMILY] (pipeline) ip={ip} mod={type(script_instance).__module__} → fam={fam!r}")
+        with self.lock:
+            self.device_family_by_ip[ip] = fam
+
+        # Hand off the SSH client kept alive during identification so the
+        # script can skip the second authentication round-trip.
+        kept_client = device_identifier.take_identified_client()
+        if kept_client is not None and hasattr(script_instance, 'set_existing_ssh_client'):
+            script_instance.set_existing_ssh_client(kept_client)
+
+        # ── Phase C: Execute ───────────────────────────────────────────────
+        with self._active_scripts_lock:
+            self._active_scripts[ip] = script_instance
+        try:
+            if self.stop_threads:
+                return ip, "ABORTED", script_instance, fam
+
+            while self.is_paused and not self.stop_threads:
+                time.sleep(0.1)
+
+            if self.stop_threads:
+                return ip, "ABORTED", script_instance, fam
+
+            commands = script_instance.get_commands() or []
+            if not commands:
+                queue.put(("log", f"No commands for {ip}"))
+                return ip, None, script_instance, fam
+
+            outputs_list, error = script_instance.execute_commands(commands)
+
+            if error == "Aborted":
+                return ip, "ABORTED", script_instance, fam
+
+            if error == script_interface.NEEDS_CREDENTIALS_SENTINEL:
+                queue.put((
+                    "log",
+                    f"[{ip}] Credentials failed during execution — parking for manual entry.",
+                ))
+                return ip, "CREDS_REQUIRED", script_instance, fam
+
+            if error:
+                if any(kw in error.lower() for kw in ("auth", "login", "credential", "password", "invalid")):
+                    queue.put(("log", f"[{ip}] Auth error — parking for manual credential entry."))
+                    return ip, "CREDS_REQUIRED", script_instance, fam
+                return ip, error, script_instance, fam
+
+            if outputs_list and hasattr(script_instance, "process_outputs"):
+                with self.lock:
+                    script_instance.process_outputs(outputs_list, ip, self.outputs)
+                queue.put(("log", f"Inventory completed for {ip}"))
+            else:
+                queue.put(("log", f"No output from {ip}"))
+
+            return ip, None, script_instance, fam
+
+        except Exception as exc:
+            logging.exception(f"[PIPELINE] Unhandled error processing {ip}")
+            return ip, friendly_error(exc), script_instance, fam
+        finally:
+            with self._active_scripts_lock:
+                self._active_scripts.pop(ip, None)
 
     def _drain_pause_queue(self, queue: Queue) -> None:
         """Prompt user for credentials per parked IP and retry collection.
@@ -1058,7 +1211,15 @@ class InventoryGUI:
     def abort_program(self):
         with self.lock:
             self.stop_threads = True
-            # Forcefully close any active connection in the current script
+            # Stop any script that is actively executing (concurrent pipeline).
+            with self._active_scripts_lock:
+                for ip, script_inst in list(self._active_scripts.items()):
+                    if hasattr(script_inst, 'abort_connection'):
+                        try:
+                            script_inst.abort_connection()
+                        except Exception as e:
+                            logging.debug(f"Error calling abort_connection for {ip}: {e}")
+            # Also stop the legacy single-instance reference (LAN/Serial modes).
             if self.current_script_instance and hasattr(self.current_script_instance, 'abort_connection'):
                 try:
                     self.current_script_instance.abort_connection()

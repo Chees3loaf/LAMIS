@@ -102,34 +102,44 @@ class Script(BaseScript):
     
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         shell = None
+        _owns_client = False  # True only when WE opened the connection
         try:
-            _kh = str(get_known_hosts_path())
-            self.ssh_client = paramiko.SSHClient()
-            self.ssh_client.load_system_host_keys()
-            self.ssh_client.load_host_keys(_kh)
-            self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
-            logging.info(f"Connecting to {ip_address}")
-            try:
-                used_user, used_pass = ssh_connect_with_credential_fallback(
-                    self.ssh_client,
-                    ip_address,
-                    username,
-                    password,
-                    timeout=10,
-                )
-            except CredentialPromptRequired:
-                logging.info(
-                    f"Default credentials exhausted for {ip_address}; "
-                    f"parking in pause queue for user-credential entry"
-                )
-                return [], NEEDS_CREDENTIALS_SENTINEL
-            except paramiko.AuthenticationException as ae:
-                logging.error(f"Authentication failed for {ip_address}: {ae}")
-                return [], (
-                    f"Authentication failed for {ip_address}. Skipping this device."
-                )
-            self.ssh_client.save_host_keys(_kh)
-            logging.info(f"Connected to {ip_address}")
+            injected = getattr(self, '_injected_ssh_client', None)
+            if injected is not None:
+                # Reuse the already-authenticated transport from the
+                # identification phase — skip the connect round-trip entirely.
+                self.ssh_client = injected
+                self._injected_ssh_client = None
+                logging.info(f"Reusing existing SSH connection to {ip_address}")
+            else:
+                _owns_client = True
+                _kh = str(get_known_hosts_path())
+                self.ssh_client = paramiko.SSHClient()
+                self.ssh_client.load_system_host_keys()
+                self.ssh_client.load_host_keys(_kh)
+                self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
+                logging.info(f"Connecting to {ip_address}")
+                try:
+                    used_user, used_pass = ssh_connect_with_credential_fallback(
+                        self.ssh_client,
+                        ip_address,
+                        username,
+                        password,
+                        timeout=10,
+                    )
+                except CredentialPromptRequired:
+                    logging.info(
+                        f"Default credentials exhausted for {ip_address}; "
+                        f"parking in pause queue for user-credential entry"
+                    )
+                    return [], NEEDS_CREDENTIALS_SENTINEL
+                except paramiko.AuthenticationException as ae:
+                    logging.error(f"Authentication failed for {ip_address}: {ae}")
+                    return [], (
+                        f"Authentication failed for {ip_address}. Skipping this device."
+                    )
+                self.ssh_client.save_host_keys(_kh)
+                logging.info(f"Connected to {ip_address}")
 
             shell = self.ssh_client.invoke_shell()
             if self.sleep_with_abort(1):
@@ -157,7 +167,7 @@ class Script(BaseScript):
                     shell.close()
                 except Exception as e:
                     logging.debug(f"Error closing shell: {e}")
-            if self.ssh_client is not None:
+            if self.ssh_client is not None and _owns_client:
                 try:
                     self.ssh_client.close()
                 except Exception as e:

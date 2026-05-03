@@ -102,6 +102,8 @@ if exist "%ICON%" (
         --collect-all openpyxl ^
         --collect-all pandas ^
         --collect-all PIL ^
+        --collect-all serial ^
+        --collect-all scripts ^
         --icon "%ICON%" ^
         %ENTRY_POINT%
 ) else (
@@ -113,6 +115,8 @@ if exist "%ICON%" (
         --collect-all openpyxl ^
         --collect-all pandas ^
         --collect-all PIL ^
+        --collect-all serial ^
+        --collect-all scripts ^
         %ENTRY_POINT%
 )
 

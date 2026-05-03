@@ -151,6 +151,7 @@ class TDSFrame(ttk.Frame):
                     text=True,
                     cwd=os.path.dirname(tds_script_path),
                     timeout=config.TDS_TIMEOUT,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 )
 
                 # Clear password widget immediately after use

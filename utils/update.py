@@ -4,6 +4,9 @@ import subprocess
 import sys
 from typing import Optional, Tuple, List
 
+# Suppress console windows when running as a frozen GUI app on Windows.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 class Updater:
     """
     Secure update manager with user confirmation, change preview, and source validation.
@@ -80,6 +83,7 @@ class Updater:
                 capture_output=True,
                 text=True,
                 check=True,
+                creationflags=_NO_WINDOW,
             )
             return result.stdout.strip()
         except subprocess.CalledProcessError:
@@ -119,6 +123,7 @@ class Updater:
                 capture_output=True,
                 text=True,
                 check=False,
+                creationflags=_NO_WINDOW,
             )
 
             if result.returncode != 0:
@@ -181,6 +186,7 @@ class Updater:
                 capture_output=True,
                 text=True,
                 check=False,
+                creationflags=_NO_WINDOW,
             )
             
             if result.stdout:
@@ -200,6 +206,7 @@ class Updater:
                 capture_output=True,
                 text=True,
                 check=True,
+                creationflags=_NO_WINDOW,
             )
             logging.debug(f"Git fetch output: {result.stdout}")
             
@@ -209,6 +216,7 @@ class Updater:
                 capture_output=True,
                 text=True,
                 check=True,
+                creationflags=_NO_WINDOW,
             )
             logging.debug(f"Git status output: {result.stdout}")
             
@@ -302,6 +310,7 @@ class Updater:
                 capture_output=True,
                 text=True,
                 check=True,
+                creationflags=_NO_WINDOW,
             )
             logging.info(f"Updates applied: {result.stdout}")
             return True, "✓ Updates applied successfully. Restart ATLAS to complete."

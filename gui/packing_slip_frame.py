@@ -582,6 +582,19 @@ class PackingSlipFrame(ttk.Frame):
                 df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
                 strip_dataframe_strings(df)
 
+                # Truncate at the "ADDITIONAL NODE INFORMATION" sentinel row — everything
+                # after that line (software, slots, redundancy, power, topology) is not
+                # needed in a packing slip.
+                sentinel_mask = df.apply(
+                    lambda row: row.astype(str).str.upper().str.contains(
+                        r"ADDITIONAL\s+NODE\s+INFORMATION", regex=True
+                    ).any(),
+                    axis=1,
+                )
+                if sentinel_mask.any():
+                    cutoff = sentinel_mask.idxmax()
+                    df = df.loc[:cutoff - 1] if cutoff > df.index[0] else pd.DataFrame(columns=df.columns)
+
                 # Drop rows where all key columns are empty
                 relevant_cols = [
                     c for c in df.columns
@@ -619,6 +632,17 @@ class PackingSlipFrame(ttk.Frame):
         """Convert uploaded DataFrame to per-device dict for the workbook builder."""
         processed_data: Dict[str, pd.DataFrame] = {}
         try:
+            # Truncate at "ADDITIONAL NODE INFORMATION" sentinel — not needed in packing slips.
+            sentinel_mask = df.apply(
+                lambda row: row.astype(str).str.upper().str.contains(
+                    r"ADDITIONAL\s+NODE\s+INFORMATION", regex=True
+                ).any(),
+                axis=1,
+            )
+            if sentinel_mask.any():
+                cutoff = sentinel_mask.idxmax()
+                df = df.loc[:cutoff - 1] if cutoff > df.index[0] else pd.DataFrame(columns=df.columns)
+
             # Use lowercased column names only for device key detection; preserve
             # original column casing so the workbook builder can access "Part Number" etc.
             col_lower_map = {col: str(col).lower() for col in df.columns}

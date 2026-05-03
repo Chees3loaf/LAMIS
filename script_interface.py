@@ -47,19 +47,39 @@ def get_inventory_db_path() -> str:
     """
     return str(get_database_path())
 
-def is_reachable(ip: str) -> bool:
-    """Return True if the host at *ip* responds to a single ping."""
+def is_reachable(ip: str, port: int = 22, timeout: float = 2.0) -> bool:
+    """Return True if the host at *ip* accepts a TCP connection on *port*.
+
+    Uses a direct socket connect rather than spawning a ping subprocess so
+    no CMD windows appear and the check completes in at most *timeout*
+    seconds per host (vs. the OS ping default of ~4 s per packet).
+    Falls back to port 23 (Telnet) if port 22 is refused immediately.
+    """
     try:
         if not acquire_ping_token(ip, timeout=5.0):
             logging.warning(f"[PING] Rate limiter timeout for {ip}; treating as unreachable")
             return False
-        logging.debug(f"[PING] Checking reachability for {ip}")
-        result = subprocess.run(["ping", "-n", "1", ip], capture_output=True, text=True)
-        reachable = result.returncode == 0
-        logging.debug(f"[PING] {ip} is {'reachable' if reachable else 'not reachable'}")
-        return reachable
+        logging.debug(f"[PING] TCP-probe {ip}:{port}")
+        with socket.create_connection((ip, port), timeout=timeout):
+            logging.debug(f"[PING] {ip} reachable on port {port}")
+            return True
+    except ConnectionRefusedError:
+        # Port actively refused means the host is up, just not SSH.
+        logging.debug(f"[PING] {ip} port {port} refused — host is up")
+        return True
+    except (OSError, socket.timeout):
+        # Try Telnet port as a secondary probe (for 1830-type devices).
+        if port != 23:
+            try:
+                with socket.create_connection((ip, 23), timeout=timeout):
+                    logging.debug(f"[PING] {ip} reachable on port 23")
+                    return True
+            except (OSError, socket.timeout):
+                pass
+        logging.debug(f"[PING] {ip} unreachable")
+        return False
     except Exception as e:
-        logging.warning(f"[PING] Ping check failed for {ip}: {e}")
+        logging.warning(f"[PING] Probe failed for {ip}: {e}")
         return False
 
 
@@ -253,6 +273,17 @@ class BaseScript(ABC):
         """Return True if a stop has been requested via the stop_callback."""
         return bool(getattr(self, 'stop_callback', None) and self.stop_callback())
 
+    def set_existing_ssh_client(self, client: "paramiko.SSHClient") -> None:
+        """Inject an already-authenticated SSH client to avoid re-login.
+
+        Called by the inventory pipeline when the identification step kept the
+        SSH transport alive after probing the device.  Scripts that use
+        paramiko directly (Nokia SAR, IXR, Smartoptics DCP) check
+        ``self._injected_ssh_client`` in ``execute_ssh_commands`` and skip
+        the connect step when it is set.
+        """
+        self._injected_ssh_client = client
+
 class CommandTracker:
     """Track which CLI commands have already been run on a given device.
 
@@ -320,7 +351,7 @@ class DatabaseCache:
                 description = result[0] if result else "Not Found"
         except Exception as e:
             logging.exception(f"[CACHE] DB error on '{key}'")
-            description = f"DB Error: {e}"
+            description = "Not Found"
         
         # Always cache the result before returning
         self.cache[key] = description
@@ -344,6 +375,27 @@ def get_tracker():
 
 class DeviceIdentifier:
     """Identify a network device's type and name by probing it via SSH then Telnet."""
+
+    def __init__(self) -> None:
+        # Holds the open paramiko SSHClient kept alive after a successful
+        # non-1830 identification so the pipeline can inject it into the script
+        # and skip the second login round-trip.  Thread-safe as long as each
+        # concurrent device uses its own DeviceIdentifier instance (which the
+        # pipeline guarantees).
+        self._identified_client: Optional["paramiko.SSHClient"] = None
+
+    def take_identified_client(self) -> Optional["paramiko.SSHClient"]:
+        """Return and clear the SSH client preserved after successful identification.
+
+        Scripts that use paramiko directly (Nokia SAR, IXR, Smartoptics DCP)
+        receive this via ``set_existing_ssh_client()`` so they can reuse the
+        already-authenticated transport instead of opening a new connection.
+        Returns ``None`` for Nokia 1830 devices (which use Telnet/spawn) or
+        when identification did not succeed via the SSH path.
+        """
+        client = self._identified_client
+        self._identified_client = None
+        return client
 
     # SSH-level credentials used for the first stage of the Nokia 1830 two-stage
     # login. The 1830 SSH server only accepts the "cli" account; once SSH is
@@ -409,6 +461,20 @@ class DeviceIdentifier:
             "device_type": "1830",
             "name_from_prompt": re.compile(r"([A-Za-z0-9._-]+)\s*[#>]\s*$"),
             "name_default": "Nokia 1830",
+        },
+        {
+            # Nokia 7250 IXR — TiMOS banner: "Nokia 7250 IXR-R6" / "7250 IXR-R6d"
+            "regex": re.compile(r"\bNokia\s+7250\s+IXR[-\s]?R6D?\b", re.IGNORECASE),
+            "device_type": "7250 ixr-r6",
+            "name_from_prompt": re.compile(r"([A-Za-z0-9._-]+)\s*[#>]\s*$"),
+            "name_default": "Nokia 7250 IXR-R6",
+        },
+        {
+            # Nokia 7705 SAR — TiMOS banner: "Nokia 7705 SAR-8" variants
+            "regex": re.compile(r"\bNokia\s+7705\s+SAR\b", re.IGNORECASE),
+            "device_type": "7705 sar-8 v2",
+            "name_from_prompt": re.compile(r"([A-Za-z0-9._-]+)\s*[#>]\s*$"),
+            "name_default": "Nokia 7705 SAR-8",
         },
     )
 
@@ -740,6 +806,11 @@ class DeviceIdentifier:
                 assert last_auth_err is not None
                 raise last_auth_err
 
+        # Track the shell channel so we can close just the channel in `finally`
+        # while optionally keeping the SSH transport alive for the script to reuse.
+        session = None
+        _keep_client = False  # set True on successful non-1830 identification
+
         try:
             AuthLockout.register_success(ip)
             try:
@@ -823,9 +894,13 @@ class DeviceIdentifier:
                         f"type={dt_fp!r} name={dn_fp!r}"
                     )
                     queue.put(f"[IDENTIFY] {dn_fp} ({dt_fp}) at {ip}\n")
+                    # Keep the SSH transport alive for paramiko-based scripts
+                    # (SAR, IXR, Smartoptics DCP) so they can skip re-login.
+                    # 1830 scripts use Telnet/spawn so they cannot reuse it.
+                    if dt_fp.lower() != "1830":
+                        _keep_client = True
+                        self._identified_client = ssh_client
                     return dt_fp, dn_fp
-
-            for command in self._IDENT_COMMANDS:
                 if should_stop():
                     queue.put(f"[ABORT] SSH identification cancelled for {ip}.\n")
                     return None, None
@@ -849,10 +924,16 @@ class DeviceIdentifier:
                         f"type={dt_fp!r} name={dn_fp!r}"
                     )
                     queue.put(f"[IDENTIFY] {dn_fp} ({dt_fp}) at {ip}\n")
+                    if dt_fp.lower() != "1830":
+                        _keep_client = True
+                        self._identified_client = ssh_client
                     return dt_fp, dn_fp
 
                 device_type, device_name = self.parse_device_info(output, queue)
                 if device_type:
+                    if device_type.lower() != "1830":
+                        _keep_client = True
+                        self._identified_client = ssh_client
                     return device_type, device_name
                 # Generic 1830 fingerprint fallback (matches "1830" anywhere
                 # in the output — uses no word boundaries because "_" is a
@@ -862,10 +943,21 @@ class DeviceIdentifier:
                     return "1830", "Nokia 1830"
             return None, None
         finally:
-            try:
-                ssh_client.close()
-            except Exception:
-                pass
+            # Close the identification shell channel regardless.
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+            # Close the SSH transport only when identification failed or the device
+            # is a Nokia 1830 (whose scripts use Telnet/spawn, not paramiko).
+            # When _keep_client is True the transport is stored on
+            # self._identified_client and will be closed by the script after use.
+            if not _keep_client:
+                try:
+                    ssh_client.close()
+                except Exception:
+                    pass
 
     def _identify_via_telnet_1830(self, ip: str, queue: Queue,
                                   should_stop: Callable[[], bool],
@@ -1035,6 +1127,9 @@ class DeviceIdentifier:
                 worker) is expected to park this IP for a main-thread
                 credential prompt and retry.
         """
+        # Clear any client kept from a previous call on this instance.
+        self._identified_client = None
+
         if explicit_credentials and explicit_credentials[0]:
             username, password = explicit_credentials
             # Skip default-rotation entirely on the retry path: the user just

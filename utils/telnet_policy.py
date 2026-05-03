@@ -80,7 +80,12 @@ class TelnetPolicyError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 def _allowlist_path() -> Path:
-    return get_project_root() / "data" / _ALLOWLIST_FILENAME
+    # Store the allowlist in %APPDATA%\ATLAS\data so it is writable without
+    # admin privileges when ATLAS is installed in Program Files.
+    app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
+    atlas_data = Path(app_data) / "ATLAS" / "data"
+    atlas_data.mkdir(parents=True, exist_ok=True)
+    return atlas_data / _ALLOWLIST_FILENAME
 
 
 def load_telnet_allowlist() -> Dict[str, str]:

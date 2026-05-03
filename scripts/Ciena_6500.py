@@ -12,7 +12,7 @@ try:
 except ImportError:
     from pexpect import spawn, EOF, TIMEOUT  # type: ignore[import-not-found]
 
-from script_interface import BaseScript
+from script_interface import BaseScript, NEEDS_CREDENTIALS_SENTINEL
 from utils.helpers import ensure_host_key_known, get_known_hosts_path, get_database_path
 
 
@@ -132,7 +132,7 @@ class Script(BaseScript):
                 return [], "Aborted"
             if idx in [1, 2]:
                 logging.error("Authentication failed")
-                return [], "Authentication failed"
+                return [], NEEDS_CREDENTIALS_SENTINEL
 
             # Capture prompt
             prompt = self.child.after.strip()

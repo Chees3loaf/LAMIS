@@ -14,9 +14,18 @@ from cryptography.fernet import Fernet
 from utils.helpers import get_project_root, restrict_path_to_owner
 
 
-# Encryption key file (in project root, git-ignored)
-CREDS_KEY_FILE = get_project_root() / ".creds_key"
-CREDS_CONFIG_FILE = get_project_root() / "credentials_config.json"
+def _get_user_data_dir() -> Path:
+    """Return the per-user ATLAS data directory (%APPDATA%\\ATLAS), creating it if needed."""
+    app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
+    d = Path(app_data) / "ATLAS"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+# Credential files live in %APPDATA%\ATLAS so they are writable without
+# admin privileges when ATLAS is installed in Program Files.
+CREDS_KEY_FILE = _get_user_data_dir() / ".creds_key"
+CREDS_CONFIG_FILE = _get_user_data_dir() / "credentials_config.json"
 
 # Built-in seed defaults — used ONLY to populate the encrypted config on first
 # run. After seeding, defaults are read from the encrypted config file and these
@@ -28,15 +37,16 @@ CREDS_CONFIG_FILE = get_project_root() / "credentials_config.json"
 # setting LAMIS_DISABLE_DEFAULT_CREDS=1; in that case the credential failure
 # handler will jump straight to prompting the user.
 _BUILTIN_DEFAULT_SEED: List[Tuple[str, str]] = [
-    # Nokia 1830 SSH login: SSH-level user is "cli" with password "admin".
-    # Once authenticated, the device drops into a secondary CLI prompt that
-    # the Nokia_1830 script handles with the interactive cli -> admin -> admin
-    # sequence (see scripts/Nokia_1830.py:181). Tried first because the 1830
-    # is the most common device that rejects plain admin/admin outright, and
-    # Nokia gear that *does* accept admin/admin will reject "cli" quickly.
-    ("cli", "admin"),
+    # Most devices default to admin/admin (Smartoptics DCP, Nokia SAR/IXR).
+    # Tried first since it is the most common single credential across the
+    # supported device population.
     ("admin", "admin"),
-    ("ADMIN", "ADMIN"),
+    # Nokia 1830 SSH-level login: user is "cli" with password "admin".
+    # Once authenticated, the Nokia_1830 script performs the secondary
+    # interactive cli -> admin -> admin sequence (see scripts/Nokia_1830.py).
+    ("cli", "admin"),
+    # Ciena 6500 / RLS default: su / Ciena123.
+    ("su", "Ciena123"),
 ]
 
 

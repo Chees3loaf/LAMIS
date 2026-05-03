@@ -842,12 +842,13 @@ class TestScrubPasswordWidget(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Default credential seed — Nokia 1830 "cli" entry + upgrade migration
+# Default credential seed — order: admin/admin, cli/admin, su/Ciena123
 # ---------------------------------------------------------------------------
 class TestDefaultCredentialSeed(unittest.TestCase):
-    """The built-in seed must include cli/admin (Nokia 1830) as the FIRST
-    entry, and the seeding routine must migrate pre-existing encrypted
-    config files by appending newly-added entries (without disturbing the
+    """The built-in seed must be admin/admin first, cli/admin (Nokia 1830)
+    second, su/Ciena123 (Ciena) third, and the seeding routine must migrate
+    pre-existing encrypted config files by appending newly-added entries
+    (without disturbing the
     user's primary credentials or the order of existing defaults)."""
 
     def setUp(self):
@@ -864,11 +865,11 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         self.creds_mod.CREDS_CONFIG_FILE = self._orig_path
         self._tmpdir.cleanup()
 
-    def test_seed_order_includes_cli_admin_first(self):
-        """cli/admin (Nokia 1830), then admin/admin, then ADMIN/ADMIN."""
+    def test_seed_order_includes_admin_first(self):
+        """admin/admin first, cli/admin second, su/Ciena123 third."""
         self.assertEqual(
             self.creds_mod._BUILTIN_DEFAULT_SEED,
-            [("cli", "admin"), ("admin", "admin"), ("ADMIN", "ADMIN")],
+            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123")],
         )
 
     def test_fresh_install_seeds_all_three(self):
@@ -876,13 +877,13 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         pairs = self.creds_mod.get_default_credentials_to_try()
         self.assertEqual(
             pairs,
-            [("cli", "admin"), ("admin", "admin"), ("ADMIN", "ADMIN")],
+            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123")],
         )
 
     def test_upgrade_migration_adds_new_entry(self):
-        """Simulate a legacy install that only has the original two entries
-        and verify the new cli/admin entry is added AND the seed-priority
-        order is enforced (cli/admin first)."""
+        """Simulate a legacy install that only has admin/admin + ADMIN/ADMIN and
+        verify cli/admin and su/Ciena123 are added with the new seed priority
+        (admin first), while ADMIN/ADMIN becomes a non-seed trailing entry."""
         import json
         legacy = {
             "credentials": {"primary": {"username": "operator",
@@ -901,28 +902,27 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         pairs = self.creds_mod.get_default_credentials_to_try()
         self.assertEqual(
             pairs,
-            [("cli", "admin"), ("admin", "admin"), ("ADMIN", "ADMIN")],
+            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123"), ("ADMIN", "ADMIN")],
         )
         # Primary user creds preserved.
         cfg = json.loads(self._tmppath.read_text())
         self.assertEqual(cfg["credentials"]["primary"]["username"], "operator")
 
     def test_upgrade_reorders_existing_entries_in_place(self):
-        """Old install where all three entries are present but in the
-        previous (admin, ADMIN, cli) order — seeder must rewrite to the new
-        (cli, admin, ADMIN) order without touching encrypted passwords or
-        any non-seed entries the user may have added."""
+        """Old install where the previous order was cli/admin/ADMIN — seeder must
+        rewrite to the new (admin, cli, su) seed order, leaving ADMIN/ADMIN and any
+        user-added extras as trailing non-seed entries."""
         import json
         legacy = {
             "credentials": {"primary": {"username": "operator",
                                           "password": self.creds_mod._encrypt_password("s3cret")}},
             "defaults": [
+                {"username": "cli",
+                 "password": self.creds_mod._encrypt_password("admin")},
                 {"username": "admin",
                  "password": self.creds_mod._encrypt_password("admin")},
                 {"username": "ADMIN",
                  "password": self.creds_mod._encrypt_password("ADMIN")},
-                {"username": "cli",
-                 "password": self.creds_mod._encrypt_password("admin")},
                 # User-added extra that's not in the seed.
                 {"username": "operator",
                  "password": self.creds_mod._encrypt_password("custom")},
@@ -935,7 +935,7 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         pairs = self.creds_mod.get_default_credentials_to_try()
         self.assertEqual(
             pairs,
-            [("cli", "admin"), ("admin", "admin"), ("ADMIN", "ADMIN"), ("operator", "custom")],
+            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123"), ("ADMIN", "ADMIN"), ("operator", "custom")],
         )
 
     def test_re_seed_is_noop_when_all_present(self):

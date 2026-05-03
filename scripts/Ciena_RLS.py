@@ -8,7 +8,7 @@ import pandas as pd
 import paramiko
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
-from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
+from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache, NEEDS_CREDENTIALS_SENTINEL
 from utils.helpers import ensure_host_key_known, get_known_hosts_path
 from utils.telnet import Telnet
 
@@ -211,7 +211,7 @@ class Script(BaseScript):
             except paramiko.AuthenticationException as ae:
                 logging.error(f"[RLS] SSH auth failed for {self.ip_address}: {ae}")
                 client.close()
-                return [], "Authentication failed"
+                return [], NEEDS_CREDENTIALS_SENTINEL
             except Exception as ce:
                 logging.exception(f"[RLS] SSH connect failed for {self.ip_address}")
                 client.close()

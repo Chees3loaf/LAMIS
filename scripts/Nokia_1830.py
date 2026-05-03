@@ -17,7 +17,7 @@ _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
-from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
+from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache, NEEDS_CREDENTIALS_SENTINEL
 from utils.helpers import ensure_host_key_known, friendly_error, get_known_hosts_path
 from utils.telnet import Telnet
 
@@ -120,7 +120,7 @@ class Script(BaseScript):
     def execute_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         if self.connection_type == 'ssh':
             outputs, error = self.execute_ssh_commands(commands)
-            if error and error != "Aborted":
+            if error and error not in ("Aborted", NEEDS_CREDENTIALS_SENTINEL):
                 logging.warning(f"SSH failed for {self.ip_address}: {error}. Falling back to Telnet.")
                 return self._execute_telnet_commands(commands)
             return outputs, error
@@ -133,7 +133,7 @@ class Script(BaseScript):
             # handles all 5 inventory commands cleanly. Per-command sessions
             # were a workaround for an unrelated bug (CRLF vs LF, SPACE flush).
             if not self.telnet_login():
-                return outputs, "Aborted" if self.should_stop() else "Telnet login failed."
+                return outputs, "Aborted" if self.should_stop() else NEEDS_CREDENTIALS_SENTINEL
 
             total = len(commands)
             logging.info(f"Collecting inventory from {self.ip_address} ({total} commands)")
@@ -237,7 +237,7 @@ class Script(BaseScript):
                     self.child.sendline("y")
                     continue
                 if idx in (2, 3):
-                    self.child.close(force=True); self.child = None; return [], "Authentication failed"
+                    self.child.close(force=True); self.child = None; return [], NEEDS_CREDENTIALS_SENTINEL
                 if idx in (4, 5):
                     self.child.close(force=True); self.child = None; return [], "SSH session closed unexpectedly"
             else:

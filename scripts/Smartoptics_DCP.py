@@ -106,38 +106,46 @@ class Script(BaseScript):
     def _execute_ssh_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         shell = None
         outputs: List[str] = []
+        _owns_client = False
         try:
-            _kh = str(get_known_hosts_path())
-            self.ssh_client = paramiko.SSHClient()
-            self.ssh_client.load_system_host_keys()
-            self.ssh_client.load_host_keys(_kh)
-            self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
+            injected = getattr(self, '_injected_ssh_client', None)
+            if injected is not None:
+                self.ssh_client = injected
+                self._injected_ssh_client = None
+                logging.info(f"Reusing existing SSH connection to {self.ip_address}")
+            else:
+                _owns_client = True
+                _kh = str(get_known_hosts_path())
+                self.ssh_client = paramiko.SSHClient()
+                self.ssh_client.load_system_host_keys()
+                self.ssh_client.load_host_keys(_kh)
+                self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
 
-            logging.info(f"Connecting to {self.ip_address}")
-            try:
-                used_user, used_pass = ssh_connect_with_credential_fallback(
-                    self.ssh_client,
-                    self.ip_address,
-                    self.username,
-                    self.password,
-                    timeout=self.timeout,
-                )
-            except CredentialPromptRequired:
-                logging.info(
-                    f"Default credentials exhausted for {self.ip_address}; "
-                    f"parking in pause queue for user-credential entry"
-                )
-                return outputs, NEEDS_CREDENTIALS_SENTINEL
-            except paramiko.AuthenticationException as ae:
-                logging.error(
-                    f"Authentication failed for {self.ip_address}: {ae}"
-                )
-                return outputs, (
-                    f"Authentication failed for {self.ip_address}. Skipping this device."
-                )
-            self.username, self.password = used_user, used_pass
-            self.ssh_client.save_host_keys(_kh)
-            logging.info(f"Connected to {self.ip_address}")
+                logging.info(f"Connecting to {self.ip_address}")
+                try:
+                    used_user, used_pass = ssh_connect_with_credential_fallback(
+                        self.ssh_client,
+                        self.ip_address,
+                        self.username,
+                        self.password,
+                        timeout=self.timeout,
+                    )
+                except CredentialPromptRequired:
+                    logging.info(
+                        f"Default credentials exhausted for {self.ip_address}; "
+                        f"parking in pause queue for user-credential entry"
+                    )
+                    return outputs, NEEDS_CREDENTIALS_SENTINEL
+                except paramiko.AuthenticationException as ae:
+                    logging.error(
+                        f"Authentication failed for {self.ip_address}: {ae}"
+                    )
+                    return outputs, (
+                        f"Authentication failed for {self.ip_address}. Skipping this device."
+                    )
+                self.username, self.password = used_user, used_pass
+                self.ssh_client.save_host_keys(_kh)
+                logging.info(f"Connected to {self.ip_address}")
 
             shell = self.ssh_client.invoke_shell()
             if self.sleep_with_abort(1):
@@ -185,12 +193,12 @@ class Script(BaseScript):
                     shell.close()
                 except Exception as e:
                     logging.debug(f"Error closing shell: {e}")
-            if self.ssh_client is not None:
+            if self.ssh_client is not None and _owns_client:
                 try:
                     self.ssh_client.close()
                 except Exception as e:
                     logging.debug(f"Error closing SSH client: {e}")
-                self.ssh_client = None
+            self.ssh_client = None
 
     def _capture_full_output_ssh(self, shell, command: str) -> Optional[str]:
         try:
