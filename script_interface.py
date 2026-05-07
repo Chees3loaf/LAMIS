@@ -901,6 +901,9 @@ class DeviceIdentifier:
                         _keep_client = True
                         self._identified_client = ssh_client
                     return dt_fp, dn_fp
+
+            # No banner fingerprint match — probe with vendor ident commands.
+            for command in self._IDENT_COMMANDS:
                 if should_stop():
                     queue.put(f"[ABORT] SSH identification cancelled for {ip}.\n")
                     return None, None
@@ -1167,25 +1170,7 @@ class DeviceIdentifier:
             queue.put(f"[ABORT] Identification cancelled for {ip}.\n")
             return None, None
 
-        # Telnet-FIRST probe targeting the Nokia 1830 three-stage login
-        # (login: cli → Username: → Password:). This matches the legacy
-        # working pattern. Fast-fail (~3s budget) for non-1830 hosts so
-        # we don't slow down identification of the rest of the fleet.
-        logging.info(f"[IDENTIFY] Trying Nokia 1830 Telnet probe for {ip}")
-        try:
-            dt, dn = self._identify_via_telnet_1830(
-                ip, queue, should_stop, sleep_with_abort
-            )
-            if dt:
-                return dt, dn
-        except Exception as e:
-            logging.debug(f"[IDENTIFY] 1830 Telnet probe raised for {ip}: {e}")
-
-        if should_stop():
-            queue.put(f"[ABORT] Identification cancelled for {ip}.\n")
-            return None, None
-
-        logging.info(f"[IDENTIFY] Falling through to SSH identification for {ip}")
+        logging.info(f"[IDENTIFY] Trying SSH identification for {ip}")
 
         try:
             transport = paramiko.Transport((ip, 22))
@@ -1305,27 +1290,37 @@ class DeviceIdentifier:
                 logging.info(f"[IDENTIFY] Retrying SSH to {ip} with credentials: {current_user}")
                 queue.put(f"Retrying SSH connection to {ip}...\n")
 
-            # SSH cycle finished without identifying the device. Telnet
-            # fallback was removed from the identification stack — the
-            # Nokia 1830 Telnet probe still runs at the *top* of identify_device
-            # for devices that need it, but generic-Telnet identification
-            # is no longer attempted here. If we get here without a result,
-            # treat it as identification failure.
+            # SSH cycle finished without identifying the device. Try Telnet
+            # as a fallback for devices (like the Nokia 1830) that use a
+            # three-stage shell login not reachable via standard SSH auth.
             if ssh_failures_logged:
                 AuthLockout.refund(ip, ssh_failures_logged)
                 logging.info(
                     f"[AUTH] Refunded {ssh_failures_logged} SSH auth failure(s) for {ip}"
                 )
         except CredentialPromptRequired:
-            # Defaults exhausted at SSH-identify time. Re-raise so the
-            # GUI worker can park this IP for a main-thread credential prompt.
             raise
         except AuthenticationException:
-            # Already handled inside the loop; identification failed.
             queue.put(f"SSH authentication failed for {ip}; identification could not complete.\n")
         except Exception as e:
             logging.warning(f"[IDENTIFY] SSH error for {ip}: {e}")
             queue.put(f"SSH connection failed for {ip}: {friendly_error(e)}\n")
+
+        if should_stop():
+            queue.put(f"[ABORT] Identification cancelled for {ip}.\n")
+            return None, None
+
+        # Telnet fallback — targeting the Nokia 1830 three-stage login
+        # (login: cli → Username: → Password:).
+        logging.info(f"[IDENTIFY] SSH identification failed; trying Nokia 1830 Telnet probe for {ip}")
+        try:
+            dt, dn = self._identify_via_telnet_1830(
+                ip, queue, should_stop, sleep_with_abort
+            )
+            if dt:
+                return dt, dn
+        except Exception as e:
+            logging.debug(f"[IDENTIFY] 1830 Telnet probe raised for {ip}: {e}")
 
         return None, None
 

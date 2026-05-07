@@ -35,7 +35,7 @@ from utils.helpers import (
 import config
 from gui.workbook_builder import WorkbookBuilder
 from gui.inventory_frame import InventoryFrame
-from gui.tds_frame import TDSFrame
+from gui.diagnostics_frame import DiagnosticsFrame
 from gui.packing_slip_frame import PackingSlipFrame
 from gui.raw_frame import RawFrame
 from gui.provision_frame import ProvisionFrame
@@ -137,22 +137,22 @@ class InventoryGUI:
         # Initialize ScrolledText for Output at the bottom
         self.output_screen = scrolledtext.ScrolledText(self.root, height=8, width=120)
         self.output_screen.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.output_screen.insert(tk.END, "Lightriver Automated Multivendor Inventory System Started\n")
+        self.output_screen.insert(tk.END, "Automatied Toolkit for Lightriver Asset & Systems (ATLAS)\n")
         self.output_screen.insert(tk.END, "Select mode above to begin\n")
 
     def setup_gui(self):
-        self.root.title("Lightriver Automated Multivendor Inventory System")
+        self.root.title("Automatied Toolkit for Lightriver Asset & Systems (ATLAS)")
         self.root.geometry('900x750')
         
         # Top frame: Mode selector
         mode_frame = ttk.LabelFrame(self.root, text="Select Mode")
         mode_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        tk.Radiobutton(mode_frame, text="Inventory (Network Scan)", variable=self.current_mode, value="inventory", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
-        tk.Radiobutton(mode_frame, text="TDS (Diagnostics)", variable=self.current_mode, value="tds", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
-        tk.Radiobutton(mode_frame, text="Packing Slip (From File)", variable=self.current_mode, value="packing_slip", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
-        tk.Radiobutton(mode_frame, text="Raw (File Processing)", variable=self.current_mode, value="raw", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
-        tk.Radiobutton(mode_frame, text="Provision (Nokia 7705/7250)", variable=self.current_mode, value="provision", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Inventory", variable=self.current_mode, value="inventory", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Diagnostics", variable=self.current_mode, value="tds", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Packing Slip Generator", variable=self.current_mode, value="packing_slip", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Raw File Processing", variable=self.current_mode, value="raw", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Provisioning", variable=self.current_mode, value="provision", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         
         # Container frame for all mode frames
         self.content_frame = ttk.Frame(self.root)
@@ -160,7 +160,7 @@ class InventoryGUI:
         
         # Create frames for each mode
         self.inventory_frame = InventoryFrame(self.content_frame, self)
-        self.tds_frame = TDSFrame(self.content_frame, self)
+        self.tds_frame = DiagnosticsFrame(self.content_frame, self)
         self.packing_slip_frame = PackingSlipFrame(self.content_frame, self)
         self.raw_frame = RawFrame(self.content_frame, self)
         self.provision_frame = ProvisionFrame(self.content_frame, self)
@@ -560,6 +560,12 @@ class InventoryGUI:
 
     def run_inventory_worker(self, context: Dict[str, Any]) -> None:
         queue = self.run_queue
+
+        # Reset the command tracker so re-running the same device in the same
+        # app session doesn't skip commands marked "already executed".
+        script_interface.get_tracker().reset()
+
+
 
         try:
             if context.get("connection_mode") in ("LAN", "Serial"):
@@ -968,9 +974,8 @@ class InventoryGUI:
             return ip, "Identification failed", None, None
 
         # ── Phase B: Select script and optionally inject kept SSH client ───
-        # Nokia 1830s use Telnet/wexpect spawn and cannot reuse the paramiko
-        # transport.  All other SSH-identified devices can.
-        conn_type = 'telnet' if (device_type or '').strip().lower() == '1830' else 'ssh'
+        # Nokia 1830 now uses SSH (paramiko auth_none + two-stage shell login).
+        conn_type = 'ssh'
         script_instance = script_selector.select_script(
             device_type, ip, connection_type=conn_type, stop_callback=self.should_stop
         )
@@ -1139,7 +1144,7 @@ class InventoryGUI:
                     queue.put(("log", f"[{ip}] Could not identify device with user-provided credentials."))
                     continue
 
-                conn_type = 'telnet' if (device_type or '').strip().lower() == '1830' else 'ssh'
+                conn_type = 'ssh'
                 script_instance = script_selector.select_script(
                     device_type, ip, connection_type=conn_type, stop_callback=self.should_stop
                 )

@@ -109,11 +109,30 @@ class Script(BaseScript):
         _owns_client = False
         try:
             injected = getattr(self, '_injected_ssh_client', None)
-            if injected is not None:
-                self.ssh_client = injected
-                self._injected_ssh_client = None
-                logging.info(f"Reusing existing SSH connection to {self.ip_address}")
-            else:
+            self._injected_ssh_client = None
+            _transport = injected.get_transport() if injected is not None else None
+            if _transport is not None and _transport.is_active():
+                try:
+                    self.ssh_client = injected
+                    shell = self.ssh_client.invoke_shell()
+                    logging.info(f"Reusing existing SSH connection to {self.ip_address}")
+                except Exception:
+                    logging.info(f"Injected shell failed for {self.ip_address}, opening fresh connection")
+                    shell = None
+                    try:
+                        injected.close()
+                    except Exception:
+                        pass
+                    self.ssh_client = None
+                    injected = None
+            elif injected is not None:
+                logging.info(f"Injected SSH transport is no longer active for {self.ip_address}, opening fresh connection")
+                try:
+                    injected.close()
+                except Exception:
+                    pass
+
+            if self.ssh_client is None:
                 _owns_client = True
                 _kh = str(get_known_hosts_path())
                 self.ssh_client = paramiko.SSHClient()
@@ -146,8 +165,7 @@ class Script(BaseScript):
                 self.username, self.password = used_user, used_pass
                 self.ssh_client.save_host_keys(_kh)
                 logging.info(f"Connected to {self.ip_address}")
-
-            shell = self.ssh_client.invoke_shell()
+                shell = self.ssh_client.invoke_shell()
             if self.sleep_with_abort(1):
                 return outputs, "Aborted"
 

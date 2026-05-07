@@ -88,7 +88,7 @@ class Script(BaseScript):
             'show chassis detail  | match "(Name.+)|(Type.+)|(Part.+)|(Serial.+)" pre-lines 1 expression',
             'show card a detail | match expression "(Slot)|(^A)|(Part number)|(Serial number)"',
             'show card b detail | match expression "(Slot)|(^B)|(Part number)|(Serial number)"',
-            'show mda detail | match "(Slot)|(up)|(Serial.+)|(Part.+)" post-lines 1 expression',
+            'show mda detail',
             'show port detail | match "(Optical Compliance.+)|(Serial.+)|(Model.+)|(Part.+)|(Interface +: [0-9/]+)" expression'
         ]
 
@@ -102,44 +102,43 @@ class Script(BaseScript):
     
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         shell = None
-        _owns_client = False  # True only when WE opened the connection
         try:
+            # Nokia 7705/7250 SSH servers don't support exec_command and close the
+            # transport when the identification shell channel ends — always open a
+            # fresh connection here.
             injected = getattr(self, '_injected_ssh_client', None)
+            self._injected_ssh_client = None
             if injected is not None:
-                # Reuse the already-authenticated transport from the
-                # identification phase — skip the connect round-trip entirely.
-                self.ssh_client = injected
-                self._injected_ssh_client = None
-                logging.info(f"Reusing existing SSH connection to {ip_address}")
-            else:
-                _owns_client = True
-                _kh = str(get_known_hosts_path())
-                self.ssh_client = paramiko.SSHClient()
-                self.ssh_client.load_system_host_keys()
-                self.ssh_client.load_host_keys(_kh)
-                self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
-                logging.info(f"Connecting to {ip_address}")
                 try:
-                    used_user, used_pass = ssh_connect_with_credential_fallback(
-                        self.ssh_client,
-                        ip_address,
-                        username,
-                        password,
-                        timeout=10,
-                    )
-                except CredentialPromptRequired:
-                    logging.info(
-                        f"Default credentials exhausted for {ip_address}; "
-                        f"parking in pause queue for user-credential entry"
-                    )
-                    return [], NEEDS_CREDENTIALS_SENTINEL
-                except paramiko.AuthenticationException as ae:
-                    logging.error(f"Authentication failed for {ip_address}: {ae}")
-                    return [], (
-                        f"Authentication failed for {ip_address}. Skipping this device."
-                    )
-                self.ssh_client.save_host_keys(_kh)
-                logging.info(f"Connected to {ip_address}")
+                    injected.close()
+                except Exception:
+                    pass
+
+            _kh = str(get_known_hosts_path())
+            self.ssh_client = paramiko.SSHClient()
+            self.ssh_client.load_system_host_keys()
+            self.ssh_client.load_host_keys(_kh)
+            self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
+            logging.info(f"Connecting to {ip_address}")
+            try:
+                used_user, used_pass = ssh_connect_with_credential_fallback(
+                    self.ssh_client,
+                    ip_address,
+                    username,
+                    password,
+                    timeout=10,
+                )
+            except CredentialPromptRequired:
+                logging.info(
+                    f"Default credentials exhausted for {ip_address}; "
+                    f"parking in pause queue for user-credential entry"
+                )
+                return [], NEEDS_CREDENTIALS_SENTINEL
+            except paramiko.AuthenticationException as ae:
+                logging.error(f"Authentication failed for {ip_address}: {ae}")
+                return [], f"Authentication failed for {ip_address}. Skipping this device."
+            self.ssh_client.save_host_keys(_kh)
+            logging.info(f"Connected to {ip_address}")
 
             shell = self.ssh_client.invoke_shell()
             if self.sleep_with_abort(1):
@@ -165,16 +164,16 @@ class Script(BaseScript):
             if shell is not None:
                 try:
                     shell.close()
-                except Exception as e:
-                    logging.debug(f"Error closing shell: {e}")
-            if self.ssh_client is not None and _owns_client:
+                except Exception:
+                    pass
+            if self.ssh_client is not None:
                 try:
                     self.ssh_client.close()
-                except Exception as e:
-                    logging.debug(f"Error closing SSH client: {e}")
+                except Exception:
+                    pass
             self.ssh_client = None
 
-    def capture_full_output_ssh(self, shell, command: str) -> str:
+    def capture_full_output_ssh(self, shell, command: str) -> Optional[str]:
         try:
             logging.debug(f"Executing command: {command}")
             shell.send(command + '\n')
@@ -184,18 +183,13 @@ class Script(BaseScript):
                 if self.should_stop():
                     return None
                 if shell.recv_ready():
-                    chunk = shell.recv(65535).decode('utf-8')
+                    chunk = shell.recv(65535).decode('utf-8', errors='replace')
                     output += chunk
                     if "Press any key to continue" in chunk:
                         shell.send(' ')
                         output = output.replace("Press any key to continue (Q to quit)", "")
                         if self.sleep_with_abort(2):
                             return None
-                    if shell.recv_stderr_ready():
-                        error_chunk = shell.recv_stderr(65535).decode('utf-8')
-                        if error_chunk:
-                            logging.error(f"Error output: {error_chunk}")
-                            break
                 else:
                     if self.sleep_with_abort(1):
                         return None
@@ -203,11 +197,10 @@ class Script(BaseScript):
                         break
 
             logging.debug(f"Output: {output}")
-
             return output
 
         except Exception as e:
-            logging.error(f"Exception in executing command: {e}")
+            logging.error(f"Exception executing command: {e}")
             return None
 
     def execute_serial_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
@@ -237,10 +230,6 @@ class Script(BaseScript):
         except Exception as e:
             logging.error(f"Serial connection failed: {e}")
             self.serial_port_obj = None
-            return [], str(e)
-
-        except Exception as e:
-            logging.error(f"Serial connection failed: {e}")
             return [], str(e)
 
     def capture_full_output_serial(self, ser, command: str) -> str:
@@ -448,56 +437,110 @@ class Script(BaseScript):
 
     def extract_mda_details(self, output, cache_callback=None, ip=None):
         """
-        Extracts MDA details using regex to capture relevant fields.
+        Extracts MDA details from 'show mda detail' output.
+
+        Handles two cases:
+          - Provisioned MDAs (up or down): captured via their Provisioned Type.
+          - Equipped-but-unprovisioned MDAs: Provisioned Type is "(not provisioned)";
+            the Equipped Type is used as a fallback so the physical card is still recorded.
         """
         mda_data = []
 
         try:
             output = output.replace("Press any key to continue (Q to quit)", "").strip()
-
-            # When MDA is "(not provisioned)", the equipped type appears on the next line - collapse it onto the same line
-            output = re.sub(r'\(not provisioned\)\s*\n\s+(\S+)', r'\1', output)
-
-            # Combined regex to capture MDA, Type, Part Number, and Serial Number
-            mda_block_pattern = re.compile(
-                r"^\s*\d*\s+(?P<MDA>\d+)\s+(?P<Type>[\w\(\)\-\+]+).*?"
-                r"Part number\s*:\s*(?P<PartNumber>[^\r\n]+).*?"
-                r"Serial number\s*:\s*(?P<SerialNumber>[^\r\n]+)",
-                re.DOTALL | re.MULTILINE
-            )
-
             logging.debug(f"Raw MDA output:\n{output}")
 
-            match_found = False  # Flag to check if at least one match was found
+            # --- Primary: parse structured per-MDA detail blocks ---
+            # 'show mda detail' produces blocks separated by ===... / MDA N/M / ===... headers.
+            # Split on those separators so each chunk covers exactly one MDA.
+            block_splitter = re.compile(
+                r"={5,}[\s\S]*?MDA\s+[\d/]+[\s\S]*?={5,}", re.MULTILINE
+            )
+            block_starts = [m.start() for m in block_splitter.finditer(output)]
 
-            for match in mda_block_pattern.finditer(output):
-                match_found = True
-                part_number = match.group("PartNumber").strip()[:10] if match.group("PartNumber") else "Unknown"
-                serial_number = match.group("SerialNumber").strip() if match.group("SerialNumber") else "Unknown"
-                mda_type = match.group("Type").strip() if match.group("Type") else "Unknown"
+            detail_entries = {}  # mda_num -> entry dict (so duplicates from summary are avoided)
 
-                # Get part description
-                description = self.get_part_description(part_number)
+            if block_starts:
+                for i, start in enumerate(block_starts):
+                    end = block_starts[i + 1] if i + 1 < len(block_starts) else len(output)
+                    block = output[start:end]
 
-                entry = {
-                    'System Name': '',
-                    'System Type': '',
-                    'Type': mda_type,
-                    'Part Number': part_number,
-                    'Serial Number': serial_number,
-                    'Description': description,
-                    'Information Type': "MDA Card",
-                    'Name': match.group("MDA"),
-                    'Source': ip or 'Unknown'
-                }
+                    mda_m = re.search(r'MDA\s*:\s*(\d+)', block)
+                    prov_m = re.search(r'Provisioned Type\s*:\s*([^\r\n]+)', block, re.IGNORECASE)
+                    equip_m = re.search(r'Equipped Type\s*:\s*([^\r\n]+)', block, re.IGNORECASE)
+                    part_m = re.search(r'Part number\s*:\s*([^\r\n]+)', block, re.IGNORECASE)
+                    serial_m = re.search(r'Serial number\s*:\s*([^\r\n]+)', block, re.IGNORECASE)
 
-                logging.debug(f"Extracted MDA entry: {entry}")
-                mda_data.append(entry)
+                    if not mda_m or not part_m or not serial_m:
+                        continue
 
-            # If no matches were found, log an error
-            if not match_found:
+                    mda_num = mda_m.group(1).strip()
+                    prov_type = prov_m.group(1).strip() if prov_m else ""
+                    equip_type = equip_m.group(1).strip() if equip_m else ""
+
+                    # Provisioned → use as-is.  Not provisioned → fall back to equipped type.
+                    if "(not provisioned)" in prov_type.lower() or not prov_type:
+                        mda_type = equip_type
+                    else:
+                        mda_type = prov_type
+
+                    if not mda_type or "(empty)" in mda_type.lower():
+                        continue  # Empty slot — nothing physically installed
+
+                    part_number = part_m.group(1).strip()[:10]
+                    serial_number = serial_m.group(1).strip()
+                    description = self.get_part_description(part_number)
+
+                    entry = {
+                        'System Name': '',
+                        'System Type': '',
+                        'Type': mda_type,
+                        'Part Number': part_number,
+                        'Serial Number': serial_number,
+                        'Description': description,
+                        'Information Type': "MDA Card",
+                        'Name': mda_num,
+                        'Source': ip or 'Unknown',
+                    }
+                    detail_entries[mda_num] = entry
+                    logging.debug(f"Detail-block MDA entry: {entry}")
+
+            mda_data.extend(detail_entries.values())
+
+            # --- Fallback: summary-table regex for outputs without detail blocks ---
+            # Collapse "(not provisioned)\n  <equipped_type>" lines before matching.
+            if not mda_data:
+                output_sub = re.sub(r'\(not provisioned\)\s*\n\s+(\S+)', r'\1', output)
+                summary_pattern = re.compile(
+                    r"^\s*\d*\s+(?P<MDA>\d+)\s+(?P<Type>[\w\(\)\-\+]+).*?"
+                    r"Part number\s*:\s*(?P<PartNumber>[^\r\n]+).*?"
+                    r"Serial number\s*:\s*(?P<SerialNumber>[^\r\n]+)",
+                    re.DOTALL | re.MULTILINE,
+                )
+                for match in summary_pattern.finditer(output_sub):
+                    mda_type = match.group("Type").strip()
+                    if "(not provisioned)" in mda_type.lower():
+                        continue
+                    part_number = match.group("PartNumber").strip()[:10]
+                    serial_number = match.group("SerialNumber").strip()
+                    description = self.get_part_description(part_number)
+                    entry = {
+                        'System Name': '',
+                        'System Type': '',
+                        'Type': mda_type,
+                        'Part Number': part_number,
+                        'Serial Number': serial_number,
+                        'Description': description,
+                        'Information Type': "MDA Card",
+                        'Name': match.group("MDA"),
+                        'Source': ip or 'Unknown',
+                    }
+                    logging.debug(f"Summary-table MDA entry: {entry}")
+                    mda_data.append(entry)
+
+            if not mda_data:
                 logging.error("No MDA details found in the provided output.")
-                return None  # Prevent further processing if no matches were found
+                return None
 
         except Exception as e:
             logging.error(f"Error extracting MDA details: {e}")
@@ -510,7 +553,7 @@ class Script(BaseScript):
                 'Description': 'Error',
                 'Information Type': 'Error',
                 'Name': 'Error',
-                'Source': 'Error'
+                'Source': 'Error',
             })
 
         # Convert to DataFrame

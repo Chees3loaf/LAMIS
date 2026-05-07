@@ -84,42 +84,43 @@ class Script(BaseScript):
     
     def execute_ssh_commands(self, ip_address: str, username: str, password: str, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         shell = None
-        _owns_client = False
         try:
+            # Nokia 7250 IXR SSH servers don't support exec_command and close the
+            # transport when the identification shell channel ends — always open a
+            # fresh connection here.
             injected = getattr(self, '_injected_ssh_client', None)
+            self._injected_ssh_client = None
             if injected is not None:
-                self.ssh_client = injected
-                self._injected_ssh_client = None
-                logging.info(f"Reusing existing SSH connection to {ip_address}")
-            else:
-                _owns_client = True
-                _kh = str(get_known_hosts_path())
-                self.ssh_client = paramiko.SSHClient()
-                self.ssh_client.load_system_host_keys()
-                self.ssh_client.load_host_keys(_kh)
-                self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
-                logging.info(f"Connecting to {ip_address}")
                 try:
-                    used_user, used_pass = ssh_connect_with_credential_fallback(
-                        self.ssh_client,
-                        ip_address,
-                        username,
-                        password,
-                        timeout=10,
-                    )
-                except CredentialPromptRequired:
-                    logging.info(
-                        f"Default credentials exhausted for {ip_address}; "
-                        f"parking in pause queue for user-credential entry"
-                    )
-                    return [], NEEDS_CREDENTIALS_SENTINEL
-                except paramiko.AuthenticationException as ae:
-                    logging.error(f"Authentication failed for {ip_address}: {ae}")
-                    return [], (
-                        f"Authentication failed for {ip_address}. Skipping this device."
-                    )
-                self.ssh_client.save_host_keys(_kh)
-                logging.info(f"Connected to {ip_address}")
+                    injected.close()
+                except Exception:
+                    pass
+
+            _kh = str(get_known_hosts_path())
+            self.ssh_client = paramiko.SSHClient()
+            self.ssh_client.load_system_host_keys()
+            self.ssh_client.load_host_keys(_kh)
+            self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
+            logging.info(f"Connecting to {ip_address}")
+            try:
+                used_user, used_pass = ssh_connect_with_credential_fallback(
+                    self.ssh_client,
+                    ip_address,
+                    username,
+                    password,
+                    timeout=10,
+                )
+            except CredentialPromptRequired:
+                logging.info(
+                    f"Default credentials exhausted for {ip_address}; "
+                    f"parking in pause queue for user-credential entry"
+                )
+                return [], NEEDS_CREDENTIALS_SENTINEL
+            except paramiko.AuthenticationException as ae:
+                logging.error(f"Authentication failed for {ip_address}: {ae}")
+                return [], f"Authentication failed for {ip_address}. Skipping this device."
+            self.ssh_client.save_host_keys(_kh)
+            logging.info(f"Connected to {ip_address}")
 
             shell = self.ssh_client.invoke_shell()
             if self.sleep_with_abort(1):
@@ -145,16 +146,16 @@ class Script(BaseScript):
             if shell is not None:
                 try:
                     shell.close()
-                except Exception as e:
-                    logging.debug(f"Error closing shell: {e}")
-            if self.ssh_client is not None and _owns_client:
+                except Exception:
+                    pass
+            if self.ssh_client is not None:
                 try:
                     self.ssh_client.close()
-                except Exception as e:
-                    logging.debug(f"Error closing SSH client: {e}")
+                except Exception:
+                    pass
             self.ssh_client = None
 
-    def capture_full_output_ssh(self, shell, command: str) -> str:
+    def capture_full_output_ssh(self, shell, command: str) -> Optional[str]:
         try:
             logging.debug(f"Executing command: {command}")
             shell.send(command + '\n')
@@ -164,18 +165,13 @@ class Script(BaseScript):
                 if self.should_stop():
                     return None
                 if shell.recv_ready():
-                    chunk = shell.recv(65535).decode('utf-8')
+                    chunk = shell.recv(65535).decode('utf-8', errors='replace')
                     output += chunk
                     if "Press any key to continue" in chunk:
                         shell.send(' ')
                         output = output.replace("Press any key to continue (Q to quit)", "")
                         if self.sleep_with_abort(2):
                             return None
-                    if shell.recv_stderr_ready():
-                        error_chunk = shell.recv_stderr(65535).decode('utf-8')
-                        if error_chunk:
-                            logging.error(f"Error output: {error_chunk}")
-                            break
                 else:
                     if self.sleep_with_abort(1):
                         return None
@@ -183,11 +179,10 @@ class Script(BaseScript):
                         break
 
             logging.debug(f"Output: {output}")
-
             return output
 
         except Exception as e:
-            logging.error(f"Exception in executing command: {e}")
+            logging.error(f"Exception executing command: {e}")
             return None
 
     def execute_serial_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:

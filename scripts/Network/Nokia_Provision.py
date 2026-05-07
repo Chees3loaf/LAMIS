@@ -49,6 +49,10 @@ _PROMPT_RE = re.compile(r"[A-Za-z0-9_\-@:]+[#>$]\s*$")
 _LOGIN_RE = re.compile(r"[Ll]ogin:\s*$|[Uu]ser[Nn]ame:\s*$")
 _PASSWORD_RE = re.compile(r"[Pp]assword:\s*$")
 
+# Auto-Discovery warning that can appear before the CLI prompt after login.
+# The device asks whether to terminate auto-discovery; we always answer "y".
+_AUTO_DISC_RE = re.compile(r"[Dd]o you wish to terminate Auto-Discovery\s*\(y/n\)\?", re.IGNORECASE)
+
 
 def _detect_device_type(hostname: str) -> Optional[str]:
     """Infer device type from hostname suffix (_7705 or _7250)."""
@@ -278,6 +282,11 @@ class Script(BaseScript):
             if waiting:
                 chunk = ser.read(waiting).decode("utf-8", errors="replace")
                 buf += chunk
+                # Auto-dismiss the Auto-Discovery termination prompt
+                if _AUTO_DISC_RE.search(buf):
+                    self._log("[AUTO-DISC] Auto-Discovery prompt detected — answering 'y'.")
+                    ser.write(b"y\r\n")
+                    buf += "\ny\n"
                 for pat in patterns:
                     if pat.search(buf):
                         return buf, pat
@@ -326,8 +335,7 @@ class Script(BaseScript):
 
             self._log("Sending password...")
             ser.write((pwd + "\r").encode())
-            time.sleep(2)  # Allow device time to process credentials before reading
-            out3, m3 = self._serial_read_until(ser, [_PROMPT_RE, _LOGIN_RE], timeout=20)
+            out3, m3 = self._serial_read_until(ser, [_PROMPT_RE, _LOGIN_RE], timeout=30)
             self._log(f"After password: {out3.strip()[-200:]}")
 
             if m3 is _PROMPT_RE:
@@ -352,8 +360,7 @@ class Script(BaseScript):
                 return False
             self._log("Sending password...")
             ser.write((pwd + "\r").encode())
-            time.sleep(2)  # Allow device time to process credentials before reading
-            out3, m3 = self._serial_read_until(ser, [_PROMPT_RE, _LOGIN_RE], timeout=20)
+            out3, m3 = self._serial_read_until(ser, [_PROMPT_RE, _LOGIN_RE], timeout=30)
             if m3 is _PROMPT_RE:
                 self._log(f"Login succeeded as '{user}'.")
                 self.username = user
@@ -415,11 +422,23 @@ class Script(BaseScript):
         self.ssh_client.save_host_keys(_kh)
         self._log(f"SSH connected to {self.ip_address}")
         shell = self.ssh_client.invoke_shell()
-        time.sleep(1.5)
-        # Drain banner
-        if shell.recv_ready():
-            banner = shell.recv(65535).decode("utf-8", errors="replace")
-            self._log(f"Banner: {banner.strip()[-300:]}")
+        # Drain the login banner, handling the Auto-Discovery prompt if present.
+        # Give the device up to 15 s to show either the prompt or the warning.
+        banner = ""
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if shell.recv_ready():
+                chunk = shell.recv(65535).decode("utf-8", errors="replace")
+                banner += chunk
+                if _AUTO_DISC_RE.search(banner):
+                    self._log("[AUTO-DISC] Auto-Discovery prompt detected — answering 'y'.")
+                    shell.send("y\n")
+                    banner += "\ny\n"
+                if _PROMPT_RE.search(banner):
+                    break
+            else:
+                time.sleep(0.1)
+        self._log(f"Banner: {banner.strip()[-300:]}")
         return shell
 
     def _ssh_send(
@@ -440,6 +459,12 @@ class Script(BaseScript):
             if shell.recv_ready():
                 chunk = shell.recv(65535).decode("utf-8", errors="replace")
                 buf += chunk
+                # Auto-dismiss the Auto-Discovery termination prompt
+                if _AUTO_DISC_RE.search(buf):
+                    self._log("[AUTO-DISC] Auto-Discovery prompt detected — answering 'y'.")
+                    shell.send("y\n")
+                    buf += "\ny\n"
+                    continue
                 if "Press any key" in chunk:
                     shell.send(" ")
                     continue
@@ -504,11 +529,11 @@ class Script(BaseScript):
         send_fn(f'configure system name "{self.hostname}"')
 
         self._log("Setting BOF management IP...")
-        send_fn(f"bof primary-address {self.target_ip}/{self.prefix_len}")
+        send_fn(f"bof address {self.target_ip}/{self.prefix_len}")
 
         self._log("Setting static route...")
         send_fn(
-            f"bof static-route-entry {self.static_route_dest} next-hop {self.gateway}"
+            f"bof static-route {self.static_route_dest} next-hop {self.gateway}"
         )
 
         if self.configure_card:
@@ -579,10 +604,10 @@ class Script(BaseScript):
         send(f"admin save cf3://{self.hostname}.cfg")
 
         self._log("Setting BOF management IP...")
-        send(f"bof primary-address {self.target_ip}/{self.prefix_len}")
+        send(f"bof address {self.target_ip}/{self.prefix_len}")
 
         self._log("Setting BOF static route...")
-        send(f"bof static-route-entry {self.static_route_dest} next-hop {self.gateway}")
+        send(f"bof static-route {self.static_route_dest} next-hop {self.gateway}")
 
         if self.configure_card:
             self._log("Configuring card type (iom-ixr-r6)...")
@@ -596,9 +621,9 @@ class Script(BaseScript):
         send(f"bof primary-config cf3:/{self.hostname}.cfg")
         send("bof save")
 
-        self._log("Syncing CPMs (this may take several minutes)...")
-        send("admin redundancy sync boot-env", timeout=600)
-        self._log("You may now safely disconnect the console cable.")
+        if self.sync_redundancy:
+            self._log("Syncing CPMs (this may take several minutes)...")
+            send("admin redundancy sync boot-env", timeout=600)
 
         return True
 
@@ -657,10 +682,10 @@ class Script(BaseScript):
         send2(f"admin save cf3://{self.hostname}.cfg")
 
         self._log("Setting BOF management IP...")
-        send2(f"bof primary-address {self.target_ip}/{self.prefix_len}")
+        send2(f"bof address {self.target_ip}/{self.prefix_len}")
 
         self._log("Setting BOF static route...")
-        send2(f"bof static-route-entry {self.static_route_dest} next-hop {self.gateway}")
+        send2(f"bof static-route {self.static_route_dest} next-hop {self.gateway}")
 
         if self.configure_card:
             self._log("Configuring card type (iom-ixr-r6)...")
@@ -674,9 +699,9 @@ class Script(BaseScript):
         send2(f"bof primary-config cf3:/{self.hostname}.cfg")
         send2("bof save")
 
-        self._log("Syncing CPMs (this may take several minutes)...")
-        send2("admin redundancy sync boot-env", timeout=600)
-        self._log("You may now safely disconnect the console cable.")
+        if self.sync_redundancy:
+            self._log("Syncing CPMs (this may take several minutes)...")
+            send2("admin redundancy sync boot-env", timeout=600)
 
         return new_shell
 

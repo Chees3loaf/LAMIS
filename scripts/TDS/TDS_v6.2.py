@@ -92,6 +92,12 @@ def _parse_startup_args():
     parser.add_argument('--file-name', dest='file_name', default='')
     parser.add_argument('--non-interactive', dest='non_interactive', action='store_true')
     parser.add_argument('--read-password-stdin', dest='read_password_stdin', action='store_true')
+    parser.add_argument('--validate', dest='validate', action='store_true',
+                        help='Run engineering validations after RLS collection')
+    parser.add_argument('--walk-mode', dest='walk_mode', action='store_true',
+                        help='One hop of a Network Audit walk; relaxes --file-name requirement')
+    parser.add_argument('--hop', dest='hop', type=int, default=0,
+                        help='Hop depth in walk (informational)')
     args, _ = parser.parse_known_args()
     return args
 
@@ -145,13 +151,17 @@ def _resolve_startup_inputs():
         sys.exit()
 
     if not expected_tid:
-        print('Missing required --file-name.')
-        sys.exit()
+        if args.walk_mode:
+            expected_tid = ''  # discovered hosts may not have a known TID up front
+        else:
+            print('Missing required --file-name.')
+            sys.exit()
 
-    return (host, platform, user, password, expected_tid)
+    return (host, platform, user, password, expected_tid,
+            bool(args.validate), bool(args.walk_mode), int(args.hop or 0))
 
 
-HOST, PLATFORM_MODE, USER, PASS, EXPECTED_TID = _resolve_startup_inputs()
+HOST, PLATFORM_MODE, USER, PASS, EXPECTED_TID, RUN_VALIDATIONS, WALK_MODE, WALK_HOP = _resolve_startup_inputs()
 
 if PLATFORM_MODE == '6500':
     METHOD = 'TELNET'
@@ -2364,7 +2374,50 @@ def PARSE_COLLECTED_DATA_RLS(WindowsHost):
     
     if debug_xlsx_path:
         print('6500 RLS Debug workbook generated: ' + debug_xlsx_path)
-    
+
+    if RUN_VALIDATIONS:
+        try:
+            import rls_validations
+            host_data = {
+                'expected_tid': expected_tid_clean,
+                'detected_tid': detected_tid,
+                'active_version': active_version,
+                'running_version': running_version,
+                'committed_version': committed_version,
+                'cpu_idle': cpu_idle,
+                'mem_used': mem_used,
+                'critical': critical,
+                'major': major,
+                'minor': minor,
+                'warning': warning,
+                'osc_neighbor_ifaces': [i for i in neighbor_ifaces if 'osc' in (i or '').lower()],
+                'osc_power_map': osc_power_map,
+                'total_ok': total_ok,
+                'total_warn': total_warn,
+            }
+            verdicts = rls_validations.run_validations(host_data)
+            validation_csv = WindowsHost + '_RLS_Validation.csv'
+            rls_validations.write_csv(verdicts, validation_csv)
+            counts = rls_validations.summarize(verdicts)
+            print('Validations: PASS=%d WARN=%d FAIL=%d INFO=%d -> %s' % (
+                counts.get('PASS', 0), counts.get('WARN', 0),
+                counts.get('FAIL', 0), counts.get('INFO', 0), validation_csv))
+        except Exception as _verr:
+            print('Validation step failed: %s' % str(_verr))
+            F_DBG.write('\nValidation step failed: %s\n' % str(_verr))
+
+    if WALK_MODE:
+        try:
+            walk_neighbors_csv = WindowsHost + '_RLS_Walk_Neighbors.csv'
+            with open(walk_neighbors_csv, 'w', newline='') as _f:
+                _w = csv.writer(_f)
+                _w.writerow(['Interface', 'Neighbor System Name', 'Management Address', 'Neighbor Port'])
+                for iface, system_name, mgmt_addr, port_id in neighbor_details:
+                    _w.writerow([iface, system_name or '', mgmt_addr or '', port_id or ''])
+            print('Walk neighbors written: ' + walk_neighbors_csv)
+        except Exception as _werr:
+            print('Walk neighbor export failed: %s' % str(_werr))
+
     return ErrorMessage
 
 

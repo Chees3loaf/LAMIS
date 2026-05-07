@@ -363,26 +363,25 @@ class WorkbookBuilder:
                 summary_sheet = wb.create_sheet(title="Summary", index=0)
 
             if append_mode:
-                for row_num in range(10, summary_sheet.max_row + 1):
-                    existing_ip = summary_sheet[f"C{row_num}"].value
-                    existing_name = summary_sheet[f"D{row_num}"].value
-                    if existing_ip is None or existing_name is None:
+                # Read existing devices directly from their sheets (F5=IP, F6=device name).
+                # This is more reliable than parsing Summary rows, which can become stale
+                # after a partial run leaves rows with orphaned hyperlinks and no IP values.
+                for sname in wb.sheetnames:
+                    if sname == "Summary":
                         continue
-
-                    existing_ip_str = str(existing_ip).strip()
-                    existing_name_str = str(existing_name).strip()
-                    if not existing_ip_str:
-                        continue
-
-                    sheet_title = None
-                    if summary_sheet[f"D{row_num}"].hyperlink and summary_sheet[f"D{row_num}"].hyperlink.target:
-                        target = summary_sheet[f"D{row_num}"].hyperlink.target
-                        match = re.match(r"#'(.+)'!", str(target))
-                        if match:
-                            sheet_title = match.group(1)
-
-                    if sheet_title and sheet_title in wb.sheetnames:
-                        summary_index[existing_ip_str] = (existing_name_str, sheet_title)
+                    try:
+                        ws = wb[sname]
+                        ip_val = ws["F5"].value
+                        name_val = ws["F6"].value
+                        if ip_val is None or name_val is None:
+                            continue
+                        ip_str = str(ip_val).strip()
+                        name_str = str(name_val).strip()
+                        if not ip_str or ip_str.lower() == "nan":
+                            continue
+                        summary_index[ip_str] = (name_str, sname)
+                    except Exception as _exc:
+                        logging.debug(f"[EXCEL] Could not read device info from sheet '{sname}': {_exc}")
 
             self._setup_summary_sheet_header(summary_sheet, customer, project, list(outputs.keys()))
 
@@ -431,11 +430,7 @@ class WorkbookBuilder:
                         prior_sheet_title = summary_index[ip_key][1]
 
                     new_sheet_title = make_unique_sheet_title(system_name)
-                    if append_mode:
-                        new_sheet = self.copy_sheet(template_sheet, wb, new_sheet_title)
-                    else:
-                        new_sheet = wb.copy_worksheet(sheet)
-                        new_sheet.title = new_sheet_title
+                    new_sheet = self.copy_sheet(template_sheet, wb, new_sheet_title)
 
                     # Add quick navigation back to summary for easier review workflow.
                     new_sheet["A1"] = "Return"
@@ -525,9 +520,10 @@ class WorkbookBuilder:
 
             if summary_sheet.max_row >= 10:
                 for row_num in range(10, summary_sheet.max_row + 1):
-                    summary_sheet[f"B{row_num}"] = None
-                    summary_sheet[f"C{row_num}"] = None
-                    summary_sheet[f"D{row_num}"] = None
+                    for col in ("B", "C", "D"):
+                        cell = summary_sheet[f"{col}{row_num}"]
+                        cell.value = None
+                        cell.hyperlink = None
 
             # Populate summary table using shared helper (also sets the correct device count).
             summary_items = [(ip, device_name, sheet_title) for ip, (device_name, sheet_title) in summary_index.items()]
