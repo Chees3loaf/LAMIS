@@ -8,6 +8,7 @@ from tkinter import messagebox
 import pandas as pd
 import subprocess
 import paramiko
+from pexpect import TIMEOUT
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
@@ -179,7 +180,23 @@ class Script(BaseScript):
 
             if re.search(r'(?i)(incorrect|invalid|fail|denied)', post):
                 return [], "Authentication failed"
-            if not re.search(r'[#>]\s*$', post):
+
+            # Some 1830 firmware versions display a Y/n acknowledgement banner
+            # (EULA / session-warning) before the shell prompt. Auto-answer up
+            # to three times so the script doesn't stall.
+            for _ in range(3):
+                if re.search(r'[#>$]\s*$', post):
+                    break
+                if re.search(
+                    r'(?i)\(\s*y\s*/\s*n\s*\)|\[\s*y\s*/\s*n\s*\]|continue\?|accept\?|press\s+y',
+                    post
+                ):
+                    channel.send("y\n")
+                    post += drain(timeout=8.0, idle=1.0)
+                else:
+                    break
+
+            if not re.search(r'[#>$]\s*$', post):
                 return [], f"[1830] No shell prompt after login (got: {post[-200:]!r})"
 
             prompt_match = re.search(r'(\S+[#>])\s*$', post)

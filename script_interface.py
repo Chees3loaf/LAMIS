@@ -144,7 +144,13 @@ def handle_credential_failure(ip: str, queue: Queue, tried_defaults: bool = Fals
     defaults = get_default_credentials_to_try() or []
 
     if not tried_defaults:
-        next_idx = _AUTH_DEFAULT_INDEX.get(ip, 1)
+        # Start from index 0 so that "cli" (the Nokia 1830 SSH account) is
+        # always tried, even when the configured primary credential is a
+        # different account (e.g. admin/admin stored in the Credential Manager).
+        # Previously this defaulted to 1, assuming defaults[0] had already been
+        # used as the primary — but that assumption is wrong when the primary
+        # comes from the Credential Manager rather than from the defaults list.
+        next_idx = _AUTH_DEFAULT_INDEX.get(ip, 0)
         if next_idx < len(defaults):
             _AUTH_DEFAULT_INDEX[ip] = next_idx + 1
             queue.put("[AUTH] Trying alternate default credentials...\n")
@@ -1249,8 +1255,11 @@ class DeviceIdentifier:
                     )
                     if device_type:
                         return device_type, device_name
-                    # Authenticated but no useful response — stop probing.
-                    break
+                    # Auth succeeded but no useful response. Don't break — continue
+                    # rotating credentials. A different account (e.g. "cli" for the
+                    # Nokia 1830) may use a completely different SSH code path that
+                    # DOES return identification data, even when a standard admin
+                    # account connected but produced no output.
                 except AuthenticationException as ae:
                     AuthLockout.register_failure(ip)
                     ssh_failures_logged += 1
