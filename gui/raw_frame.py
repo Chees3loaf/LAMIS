@@ -21,15 +21,19 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+import pandas as pd
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
+AUTO_DETECT_NOKIA = "Auto Detect Nokia"
+
 # Display name → module path for the script dropdown
 SCRIPT_OPTIONS: Dict[str, str] = {
+    AUTO_DETECT_NOKIA: "",
     "Nokia PSI":   "scripts.Nokia_PSI",
     "Nokia 1830":  "scripts.Nokia_1830",
-    "Nokia SAR":   "scripts.Nokia_SAR",
-    "Nokia IXR":   "scripts.Nokia_IXR",
+    "Nokia SAR":   "scripts.Nokia_SAR_Raw",
+    "Nokia IXR":   "scripts.Nokia_IXR_Raw",
     "Ciena 6500":  "scripts.Ciena_6500",
     "Ciena RLS":   "scripts.Ciena_RLS",
 }
@@ -111,13 +115,100 @@ def _read_excel_sheets(file_path: str) -> Dict[str, str]:
     return sheets
 
 
+def _read_text_folder(folder_path: str) -> Dict[str, str]:
+    """Read every .txt file in a folder tree and return ``{device_id: raw_text}``."""
+    devices: Dict[str, str] = {}
+
+    for txt_path in sorted(Path(folder_path).rglob("*")):
+        if not txt_path.is_file() or txt_path.suffix.lower() != ".txt":
+            continue
+        device_id = _normalize_device_id(txt_path.stem)
+        unique_id = device_id
+        counter = 2
+        while unique_id in devices:
+            unique_id = f"{device_id}_{counter:02d}"
+            counter += 1
+        devices[unique_id] = txt_path.read_text(encoding="utf-8", errors="replace")
+
+    return devices
+
+
+def _normalize_device_id(value: str) -> str:
+    """Normalize site/device names from raw imports.
+
+    Strips common capture timestamp prefixes such as:
+      11-27-2023 - 20.33 ET - SITE-NAME
+    """
+    text = (value or "").strip()
+
+    # Remove one leading timestamp block if present.
+    text = re.sub(
+        r"^\s*\d{1,2}[-_/]\d{1,2}[-_/]\d{2,4}\s*-\s*"
+        r"\d{1,2}[\.:]\d{2}(?:\s*[AP]M)?(?:\s*[A-Z]{2,5})?\s*-\s*",
+        "",
+        text,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # Avoid empty IDs after cleanup.
+    return text or (value or "").strip() or "Manual"
+
+
+def _normalize_device_map(devices: Dict[str, str]) -> Dict[str, str]:
+    """Normalize and de-duplicate device keys for multi-device inputs."""
+    normalized: Dict[str, str] = {}
+    for raw_name, raw_text in devices.items():
+        base = _normalize_device_id(raw_name)
+        key = base
+        counter = 2
+        while key in normalized:
+            key = f"{base}_{counter:02d}"
+            counter += 1
+        normalized[key] = raw_text
+    return normalized
+
+
+def _detect_nokia_raw_script(raw_text: str, device_id: str = "") -> Optional[str]:
+    """Best-effort detect Nokia family for raw transcripts."""
+    haystack = f"{device_id}\n{raw_text}"
+
+    if re.search(r"(?<![0-9A-Za-z])(7250|ixr(?:-r6d?)?)(?![0-9A-Za-z])", haystack, re.IGNORECASE):
+        return "scripts.Nokia_IXR_Raw"
+    if re.search(r"(?<![0-9A-Za-z])(7705|sar(?:-8)?)(?![0-9A-Za-z])", haystack, re.IGNORECASE):
+        return "scripts.Nokia_SAR_Raw"
+
+    has_mda_detail = re.search(r"^MDA\s+\d+/\d+\s+detail", raw_text, re.IGNORECASE | re.MULTILINE)
+    has_chassis_detail = re.search(r"^\s*Chassis\s+1\s+Detail", raw_text, re.IGNORECASE | re.MULTILINE)
+    if has_mda_detail and has_chassis_detail:
+        # Favor IXR when the prompt/file name is absent and only the matched-output
+        # capture remains; IXR and SAR raw formats are otherwise very similar.
+        return "scripts.Nokia_IXR_Raw"
+
+    return None
+
+
+def _resolve_script_module(raw_text: str, device_id: str, script_name: str) -> str:
+    """Resolve the parser module for a raw transcript."""
+    if script_name == AUTO_DETECT_NOKIA:
+        detected = _detect_nokia_raw_script(raw_text, device_id)
+        if not detected:
+            raise RuntimeError(
+                f"Could not auto-detect Nokia family for {device_id!r}. "
+                "Select Nokia SAR or Nokia IXR explicitly."
+            )
+        return detected
+
+    return SCRIPT_OPTIONS[script_name]
+
+
 class RawFrame(ttk.Frame):
     """UI panel for the 'Raw' mode."""
 
     def __init__(self, parent: tk.Widget, gui: Any) -> None:
         super().__init__(parent)
         self.gui = gui  # reference to InventoryGUI instance
-        self._file_path: Optional[str] = None
+        self._input_path: Optional[str] = None
         self._running = False
         self._setup_ui()
 
@@ -131,16 +222,19 @@ class RawFrame(ttk.Frame):
         # ── File upload row ──────────────────────────────────────────
         file_frame = ttk.LabelFrame(
             self,
-            text="Input File  (.txt plain text  OR  .xlsx/.xls multi-tab workbook — one device per sheet)",
+            text="Input Source  (.txt file, .xlsx/.xls workbook, or folder of .txt files)",
         )
         file_frame.pack(fill=tk.X, **pad)
 
-        self._file_label = tk.StringVar(value="No file selected")
+        self._file_label = tk.StringVar(value="No file or folder selected")
         ttk.Label(
             file_frame, textvariable=self._file_label, width=65, anchor="w"
         ).pack(side=tk.LEFT, padx=6, pady=6)
         ttk.Button(
-            file_frame, text="Browse…", command=self._browse_file
+            file_frame, text="Browse File…", command=self._browse_file
+        ).pack(side=tk.LEFT, padx=6, pady=6)
+        ttk.Button(
+            file_frame, text="Browse Folder…", command=self._browse_folder
         ).pack(side=tk.LEFT, padx=6, pady=6)
 
         # ── Script + device label row ────────────────────────────────
@@ -150,7 +244,7 @@ class RawFrame(ttk.Frame):
         ttk.Label(cfg_frame, text="Device Type:").grid(
             row=0, column=0, padx=(8, 4), pady=6, sticky="w"
         )
-        self._script_var = tk.StringVar(value="Nokia PSI")
+        self._script_var = tk.StringVar(value=AUTO_DETECT_NOKIA)
         script_cb = ttk.Combobox(
             cfg_frame,
             textvariable=self._script_var,
@@ -162,7 +256,7 @@ class RawFrame(ttk.Frame):
 
         ttk.Label(
             cfg_frame,
-            text="Device ID  (single .txt only — ignored for multi-sheet Excel):",
+            text="Device ID  (single file only — ignored for multi-device workbook/folder):",
         ).grid(row=0, column=2, padx=(24, 4), pady=6, sticky="w")
         self._device_id_var = tk.StringVar()
         ttk.Entry(cfg_frame, textvariable=self._device_id_var, width=24).grid(
@@ -175,16 +269,22 @@ class RawFrame(ttk.Frame):
             row=1, column=0, columnspan=4, padx=8, pady=(0, 4), sticky="w"
         )
 
+        ttk.Label(
+            cfg_frame,
+            text="Optic PART TYPE in report uses: Description > Speed > Optic",
+            foreground="gray40",
+        ).grid(row=2, column=0, columnspan=4, padx=8, pady=(0, 6), sticky="w")
+
         # ── Control bar ──────────────────────────────────────────────
         ctrl_frame = ttk.Frame(self)
         ctrl_frame.pack(fill=tk.X, **pad)
 
         self._run_btn = ttk.Button(
-            ctrl_frame, text="Process File", command=self._on_run
+            ctrl_frame, text="Process Input", command=self._on_run
         )
         self._run_btn.pack(side=tk.LEFT, padx=6)
 
-        self._status_var = tk.StringVar(value="Ready — select a file and click Process File")
+        self._status_var = tk.StringVar(value="Ready — select a file or folder and click Process Input")
         ttk.Label(ctrl_frame, textvariable=self._status_var, foreground="gray").pack(
             side=tk.LEFT, padx=12
         )
@@ -213,7 +313,7 @@ class RawFrame(ttk.Frame):
         )
         if not path:
             return
-        self._file_path = path
+        self._input_path = path
         ext = Path(path).suffix.lower()
         self._log_clear()
         self._sheet_info_var.set("")
@@ -233,27 +333,49 @@ class RawFrame(ttk.Frame):
                     else f"Single sheet: {names[0]}"
                 )
                 self._status_var.set(
-                    f"Excel file loaded — {count} device(s) detected. Click Process File."
+                    f"Excel file loaded — {count} device(s) detected. Click Process Input."
                 )
             except Exception as exc:
                 self._file_label.set(f"{Path(path).name}  [⚠ could not read sheets]")
                 self._status_var.set(f"Warning: {exc}")
         else:
             self._file_label.set(Path(path).name)
-            self._status_var.set("Text file loaded — click Process File to begin")
+            self._status_var.set("Text file loaded — click Process Input to begin")
+
+    def _browse_folder(self) -> None:
+        path = filedialog.askdirectory(title="Select folder containing device CLI output files")
+        if not path:
+            return
+
+        txt_files = [p for p in Path(path).rglob("*") if p.is_file() and p.suffix.lower() == ".txt"]
+        self._input_path = path
+        self._log_clear()
+        self._file_label.set(f"{Path(path).name}  [{len(txt_files)} txt file(s)]")
+        self._sheet_info_var.set("")
+
+        if txt_files:
+            preview = ", ".join(str(p.relative_to(path)) for p in txt_files[:6]) + ("…" if len(txt_files) > 6 else "")
+            self._sheet_info_var.set(
+                f"Folder contents ({len(txt_files)}, recursive): {preview}"
+            )
+            self._status_var.set(
+                f"Folder loaded — {len(txt_files)} device file(s) detected. Click Process Input."
+            )
+        else:
+            self._status_var.set("Selected folder has no .txt files.")
 
     def _on_run(self) -> None:
         if self._running:
             return
-        if not self._file_path or not os.path.isfile(self._file_path):
-            messagebox.showerror("No File", "Please select an input file first.")
+        if not self._input_path or not os.path.exists(self._input_path):
+            messagebox.showerror("No Input", "Please select an input file or folder first.")
             return
         script_name = self._script_var.get()
         if script_name not in SCRIPT_OPTIONS:
             messagebox.showerror("Invalid Script", f"Unknown script: {script_name!r}")
             return
 
-        device_id = self._device_id_var.get().strip() or Path(self._file_path).stem
+        device_id = self._device_id_var.get().strip() or Path(self._input_path).stem
 
         self._run_btn.configure(state="disabled")
         self._running = True
@@ -262,7 +384,7 @@ class RawFrame(ttk.Frame):
 
         threading.Thread(
             target=self._worker,
-            args=(self._file_path, device_id, script_name),
+            args=(self._input_path, device_id, script_name),
             daemon=True,
         ).start()
 
@@ -271,29 +393,43 @@ class RawFrame(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _worker(self, file_path: str, device_id: str, script_name: str) -> None:
-        """Load the file, detect format, and dispatch to single- or multi-device processing."""
+        """Load a file or folder, detect format, and dispatch processing."""
         try:
-            ext = Path(file_path).suffix.lower()
+            input_path = Path(file_path)
+
+            if input_path.is_dir():
+                devices = _read_text_folder(file_path)
+                if not devices:
+                    raise RuntimeError("Selected folder does not contain any .txt files.")
+                self._log_write(
+                    f"Folder loaded: {input_path.name}\n"
+                    f"Text files found ({len(devices)}): {', '.join(devices.keys())}\n\n"
+                )
+                self._process_multi(devices, script_name)
+                return
+
+            ext = input_path.suffix.lower()
 
             if ext in (".xlsx", ".xls"):
                 sheets = _read_excel_sheets(file_path)
                 self._log_write(
-                    f"Excel workbook loaded: {Path(file_path).name}\n"
+                    f"Excel workbook loaded: {input_path.name}\n"
                     f"Sheets found ({len(sheets)}): {', '.join(sheets.keys())}\n\n"
                 )
                 if len(sheets) == 1:
                     name, text = next(iter(sheets.items()))
-                    self._process_single(text, name, script_name)
+                    self._process_single(text, _normalize_device_id(name), script_name)
                 else:
-                    self._process_multi(sheets, script_name)
+                    normalized_sheets = _normalize_device_map(sheets)
+                    self._process_multi(normalized_sheets, script_name)
             else:
                 self._log_write(f"Reading file: {file_path}\n")
-                raw_text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+                raw_text = input_path.read_text(encoding="utf-8", errors="replace")
                 self._log_write(
                     f"File loaded — {len(raw_text):,} characters, "
                     f"{raw_text.count(chr(10)):,} lines\n\n"
                 )
-                self._process_single(raw_text, device_id, script_name)
+                self._process_single(raw_text, _normalize_device_id(device_id), script_name)
 
         except Exception as exc:
             logging.exception("Raw processing worker error")
@@ -303,13 +439,15 @@ class RawFrame(ttk.Frame):
     def _process_single(self, raw_text: str, device_id: str, script_name: str) -> None:
         """Parse one device's transcript and hand off to export."""
         outputs: Dict[str, Any] = {}
-        ok = self._parse_device(raw_text, device_id, script_name, outputs)
+        module_path = _resolve_script_module(raw_text, device_id, script_name)
+        logging.info(f"[RAW] Parsing single device {device_id!r} with parser {module_path}")
+        ok = self._parse_device(raw_text, device_id, module_path, outputs)
         if not ok:
             self.after(0, self._finish, False)
             return
         # Re-key the single device to "Manual" so the summary IP column is clean.
         rekeyed = {"Manual": outputs.pop(device_id)} if device_id in outputs else outputs
-        family = _FAMILY_BY_MODULE.get(SCRIPT_OPTIONS[script_name], "default")
+        family = _FAMILY_BY_MODULE.get(module_path, "default")
         self.after(0, self._export, rekeyed, family, device_id)
 
     def _process_multi(self, sheets: Dict[str, str], script_name: str) -> None:
@@ -320,7 +458,15 @@ class RawFrame(ttk.Frame):
         for sheet_name, raw_text in sheets.items():
             self._log_write(f"{'─'*50}\n")
             self._log_write(f"Processing sheet: {sheet_name!r}\n")
-            ok = self._parse_device(raw_text, sheet_name, script_name, raw_outputs)
+            try:
+                module_path = _resolve_script_module(raw_text, sheet_name, script_name)
+            except Exception as exc:
+                self._log_write(f"  ⚠  Skipping {sheet_name!r} — {exc}\n")
+                logging.warning(
+                    f"[RAW] Skipping {sheet_name!r}: parser resolution failed: {exc}"
+                )
+                continue
+            ok = self._parse_device(raw_text, sheet_name, module_path, raw_outputs)
             if ok:
                 success_count += 1
 
@@ -328,9 +474,14 @@ class RawFrame(ttk.Frame):
         self._log_write(
             f"Multi-sheet complete: {success_count}/{len(sheets)} device(s) parsed successfully.\n"
         )
+        logging.info(
+            f"[RAW] Multi-sheet parse complete: {success_count}/{len(sheets)} "
+            "devices parsed into export payload"
+        )
 
         if success_count == 0:
             self._log_write("⚠  No devices produced data. Aborting export.\n")
+            logging.warning("[RAW] Export aborted: no devices produced data")
             self.after(0, self._finish, False)
             return
 
@@ -344,20 +495,19 @@ class RawFrame(ttk.Frame):
             key = "Manual" if i == 1 else f"Manual_{str(i).zfill(width)}"
             merged_outputs[key] = data
 
-        family = _FAMILY_BY_MODULE.get(SCRIPT_OPTIONS[script_name], "default")
-        label = Path(self._file_path).stem if self._file_path else "MultiDevice"
+        family = _FAMILY_BY_MODULE.get(SCRIPT_OPTIONS.get(script_name, ""), "default")
+        label = Path(self._input_path).stem if self._input_path else "MultiDevice"
         self.after(0, self._export, merged_outputs, family, label)
 
     def _parse_device(
         self,
         raw_text: str,
         device_id: str,
-        script_name: str,
+        module_path: str,
         outputs: Dict[str, Any],
     ) -> bool:
         """Parse one device transcript into *outputs*.  Returns True on success."""
         try:
-            module_path = SCRIPT_OPTIONS[script_name]
             mod = importlib.import_module(module_path)
             script_inst = mod.Script(
                 ip_address=device_id,
@@ -365,6 +515,8 @@ class RawFrame(ttk.Frame):
                 db_cache=self.gui.db_cache,
                 db_path=self.gui.db_file,
             )
+
+            self._log_write(f"  Parser: {module_path}\n")
 
             commands = script_inst.get_commands()
             outputs_list = _split_raw_output_by_commands(raw_text, commands)
@@ -374,16 +526,54 @@ class RawFrame(ttk.Frame):
                 f"  {found}/{len(commands)} command sections matched"
                 f" for {device_id!r}\n"
             )
+            logging.info(
+                f"[RAW] Device {device_id!r}: parser={module_path} "
+                f"matched {found}/{len(commands)} command sections"
+            )
             for cmd, out in zip(commands, outputs_list):
                 n = len(out.strip().splitlines()) if out.strip() else 0
                 status = f"{n} lines" if n else "not found"
                 self._log_write(f"    {cmd!r}: {status}\n")
+                logging.debug(
+                    f"[RAW] Device {device_id!r}: command {cmd!r} -> {status}"
+                )
 
             if found == 0:
-                self._log_write(f"  ⚠  Skipping {device_id!r} — no sections matched.\n")
-                return False
+                self._log_write(
+                    f"  ⚠  No inventory sections matched for {device_id!r}; "
+                    "including device with placeholder row.\n"
+                )
+                logging.warning(
+                    f"[RAW] Device {device_id!r}: no inventory sections matched; "
+                    "adding placeholder row"
+                )
+                outputs[device_id] = {
+                    "unmatched_data": {
+                        "DataFrame": pd.DataFrame(
+                            [
+                                {
+                                    "System Name": device_id,
+                                    "System Type": "Unknown",
+                                    "Type": "No inventory sections matched",
+                                    "Part Number": "UNPARSED",
+                                    "Serial Number": "",
+                                    "Description": "Transcript did not contain expected inventory commands",
+                                    "Name": "No Inventory Data",
+                                    "Source": "Manual",
+                                }
+                            ]
+                        ),
+                        "System Info": {
+                            "System Name": device_id,
+                            "System Type": "Unknown",
+                            "Source": "Manual",
+                        },
+                    }
+                }
+                return True
 
             script_inst.process_outputs(outputs_list, device_id, outputs)
+            logging.info(f"[RAW] Device {device_id!r}: process_outputs completed")
 
             # Patch every DataFrame for this device so that:
             #   • System Name → device_id  (drives Device Name column + tab title)

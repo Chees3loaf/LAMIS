@@ -469,9 +469,7 @@ class WorkbookBuilder:
                         name_value = clean_str(row.get("Name", ""))
 
                         if "mda card" in info_type:
-                            match = re.search(r"\d+", name_value)
-                            mda_number = match.group() if match else "Unknown"
-                            name_value = f"MDA {mda_number}"
+                            name_value = f"MDA {name_value}" if name_value else "MDA"
 
                         type_value = clean_str(row.get("Type", ""))
                         serial_val = clean_str(row.get("Serial Number", ""))
@@ -479,10 +477,12 @@ class WorkbookBuilder:
                         if not any([name_value, type_value, part_number, serial_val]):
                             continue
 
-                        description = ""
+                        description = clean_str(row.get("Description", ""))
                         if part_number and db_exists:
-                            description = self.db_cache.lookup_part(part_number[:10])
-                            if not description or description == "Not Found":
+                            db_description = self.db_cache.lookup_part(part_number[:10])
+                            if db_description and db_description != "Not Found":
+                                description = db_description
+                            elif not description:
                                 try:
                                     with sqlite3.connect(self.db_cache.db_path) as tmpconn:
                                         tcur = tmpconn.cursor()
@@ -491,7 +491,7 @@ class WorkbookBuilder:
                                             (part_number[:10] + "%",),
                                         )
                                         res = tcur.fetchone()
-                                        if res:
+                                        if res and res[0] and res[0] != "Not Found":
                                             description = res[0]
                                 except Exception as exc:
                                     logging.debug(f"[EXCEL] Fallback DB lookup failed: {exc}")

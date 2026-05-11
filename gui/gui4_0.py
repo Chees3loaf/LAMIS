@@ -366,12 +366,16 @@ class InventoryGUI:
 
             save_folder = filedialog.askdirectory(title="Select Save Location")
             if not save_folder:
-                save_folder = os.getcwd()
+                messagebox.showinfo("Export Cancelled", "No save folder selected.")
+                return None
 
-            output_file = os.path.normpath(os.path.join(save_folder, f"{final_filename}.xlsx"))
+            # Save folder is the source of truth for where the report is written.
+            self.save_location = os.path.realpath(os.path.normpath(save_folder))
+
+            output_file = os.path.normpath(os.path.join(self.save_location, f"{final_filename}.xlsx"))
             counter = 1
             while os.path.exists(output_file):
-                output_file = os.path.join(save_folder, f"{final_filename}_{counter}.xlsx")
+                output_file = os.path.join(self.save_location, f"{final_filename}_{counter}.xlsx")
                 counter += 1
 
         if connection_mode in ("LAN", "Serial"):
