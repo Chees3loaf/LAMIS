@@ -33,7 +33,7 @@ from script_interface import (
     get_tracker,
     ssh_connect_with_credential_fallback,
 )
-from utils.helpers import get_known_hosts_path, get_host_key_policy
+from utils.helpers import get_known_hosts_path, get_host_key_policy, safe_load_host_keys, safe_save_host_keys
 
 # Standard schema all device scripts emit so WorkbookBuilder can combine them.
 _SCHEMA = [
@@ -137,7 +137,7 @@ class Script(BaseScript):
                 _kh = str(get_known_hosts_path())
                 self.ssh_client = paramiko.SSHClient()
                 self.ssh_client.load_system_host_keys()
-                self.ssh_client.load_host_keys(_kh)
+                safe_load_host_keys(self.ssh_client, _kh)
                 self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
 
                 logging.info(f"Connecting to {self.ip_address}")
@@ -163,7 +163,7 @@ class Script(BaseScript):
                         f"Authentication failed for {self.ip_address}. Skipping this device."
                     )
                 self.username, self.password = used_user, used_pass
-                self.ssh_client.save_host_keys(_kh)
+                safe_save_host_keys(self.ssh_client, _kh)
                 logging.info(f"Connected to {self.ip_address}")
                 shell = self.ssh_client.invoke_shell()
             if self.sleep_with_abort(1):

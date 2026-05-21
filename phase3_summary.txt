@@ -1,0 +1,250 @@
+Phase 3 line inventory — 45 sites, 215 terminations
+==================================================
+
+--- ALBA ---
+  terminations: 3   optics (each side): 10G=0, 100G=3, OC3=0
+  green-100G   x  1  ports: 1/2/7(1)
+  red-100G     x  2  ports: 1/1/7(1), 1/2/7(1)
+
+--- ALVF ---
+  terminations: 14   optics (each side): 10G=14, 100G=0, OC3=6
+  blue-10G     x  4  ports: 1/1/6[20G](2), 1/2/6[20G](2)
+  green-10G    x  4  ports: 1/4/2[20G](1), 1/4/1[20G](1), 1/1/5(1), 1/4/2(1)
+  green-OC3    x  3  ports: 1/4/1(2), 1/4/2(1)
+  red-OC3      x  3  ports: 1/4/1(3)
+
+--- ALVY ---
+  terminations: 7   optics (each side): 10G=5, 100G=8, OC3=0
+  green-100G   x  2  ports: 1/1/7[200G](1), 1/5/7[200G](1)
+  green-10G    x  1  ports: 1/1/3(1)
+  red-100G     x  2  ports: 1/1/7[200G](1), 1/2/7[200G](1)
+  red-10G      x  2  ports: 1/2/6[20G](1), 1/2/2[20G](1)
+
+--- BAND ---
+  terminations: 5   optics (each side): 10G=10, 100G=0, OC3=0
+  blue-10G     x  4  ports: 1/2/6[20G](2), 1/1/6[20G](2)
+  green-10G    x  1  ports: 1/1/5[20G](1)
+
+--- BENT ---
+  terminations: 1   optics (each side): 10G=0, 100G=1, OC3=0
+  green-100G   x  1  ports: 1/1/7(1)
+
+--- BKLY ---
+  terminations: 4   optics (each side): 10G=0, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/2/7(1), 1/1/7(1)
+  red-100G     x  2  ports: 1/2/7(1), 1/1/7(1)
+
+--- BUCK ---
+  terminations: 10   optics (each side): 10G=4, 100G=0, OC3=8
+  red-10G      x  2  ports: 1/2/6[20G](2)
+  red-OC3      x  8  ports: 1/2/6(6), 1/1/6(2)
+
+--- CAPP ---
+  terminations: 16   optics (each side): 10G=4, 100G=0, OC3=12
+  blue-10G     x  4  ports: 1/2/6(2), 1/1/6(2)
+  blue-OC3     x 12  ports: 1/1/6(6), 1/2/6(6)
+
+--- CHEM ---
+  terminations: 12   optics (each side): 10G=12, 100G=8, OC3=2
+  green-100G   x  2  ports: 1/1/7[200G](1), 1/2/5[200G](1)
+  green-10G    x  6  ports: 1/2/6[20G](4), 1/1/6[20G](2)
+  green-OC3    x  2  ports: 1/2/6(1), 1/1/6(1)
+  red-100G     x  2  ports: 1/1/7[200G](1), 1/2/5[200G](1)
+
+--- COWL ---
+  terminations: 10   optics (each side): 10G=18, 100G=0, OC3=0
+  blue-10G     x  4  ports: 1/1/6[20G](2), 1/2/6[20G](2)
+  green-10G    x  3  ports: 1/1/5[20G](2), 1/1/5(1)
+  red-10G      x  3  ports: 1/1/5[20G](2), 1/1/5(1)
+
+--- CPJK ---
+  terminations: 4   optics (each side): 10G=0, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/2/7(1), 1/1/5(1)
+  red-100G     x  2  ports: 1/1/5(1), 1/2/7(1)
+
+--- EUGE ---
+  terminations: 2   optics (each side): 10G=0, 100G=2, OC3=0
+  red-100G     x  2  ports: 1/2/7(1), 1/1/7(1)
+
+--- FAMT ---
+  terminations: 4   optics (each side): 10G=4, 100G=0, OC3=0
+  green-10G    x  2  ports: 1/2/5(1), 1/1/5(1)
+  red-10G      x  2  ports: 1/2/5(1), 1/1/5(1)
+
+--- FAVW ---
+  terminations: 6   optics (each side): 10G=4, 100G=8, OC3=0
+  green-100G   x  2  ports: 1/1/7[200G](1), 1/2/7[200G](1)
+  red-100G     x  2  ports: 1/1/7[200G](1), 1/2/7[200G](1)
+  red-10G      x  2  ports: 1/2/6[20G](1), 1/2/2[20G](1)
+
+--- FORT ---
+  terminations: 4   optics (each side): 10G=0, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-100G     x  2  ports: 1/1/7(1), 1/2/7(1)
+
+--- GMRS ---
+  terminations: 16   optics (each side): 10G=8, 100G=0, OC3=8
+  blue-10G     x  8  ports: 1/2/6(4), 1/1/6(4)
+  blue-OC3     x  8  ports: 1/2/6(4), 1/1/6(4)
+
+--- HAPY ---
+  terminations: 4   optics (each side): 10G=4, 100G=0, OC3=0
+  green-10G    x  2  ports: 1/2/5(1), 1/1/5(1)
+  red-10G      x  2  ports: 1/2/5(1), 1/1/5(1)
+
+--- KEEL ---
+  terminations: 6   optics (each side): 10G=0, 100G=6, OC3=0
+  green-100G   x  3  ports: 1/1/5(1), 1/2/7(1), 1/3/7(1)
+  red-100G     x  3  ports: 1/2/2(3)
+
+--- LANE ---
+  terminations: 6   optics (each side): 10G=4, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-100G     x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-10G      x  2  ports: 1/2/6[20G](1), 1/2/2[20G](1)
+
+--- LAPI ---
+  terminations: 7   optics (each side): 10G=1, 100G=8, OC3=2
+  green-100G   x  2  ports: 1/1/7[200G](1), 1/2/7[200G](1)
+  green-10G    x  1  ports: 1/4/1(1)
+  green-OC3    x  1  ports: 1/4/2(1)
+  red-100G     x  2  ports: 1/2/7[200G](1), 1/1/7[200G](1)
+  red-OC3      x  1  ports: 1/4/1(1)
+
+--- LNHR ---
+  terminations: 1   optics (each side): 10G=1, 100G=0, OC3=0
+  green-10G    x  1  ports: 1/2/5(1)
+
+--- MALN ---
+  terminations: 19   optics (each side): 10G=20, 100G=2, OC3=8
+  green-10G    x  6  ports: 1/1/6[20G](5), 1/1/1[20G](1)
+  green-OC3    x  4  ports: 1/1/6(4)
+  red-100G     x  1  ports: 1/1/7[200G](1)
+  red-10G      x  4  ports: 1/1/6[20G](4)
+  red-OC3      x  4  ports: 1/1/6(4)
+
+--- MARN ---
+  terminations: 18   optics (each side): 10G=24, 100G=0, OC3=4
+  green-10G    x  6  ports: ?[20G](2), 1/1/5[20G](2), ?(2)
+  green-OC3    x  2  ports: ?(1), 1/2/6(1)
+  red-10G      x  8  ports: 1/2/6[20G](4), 1/2/2[20G](1), 1/2/5[20G](1), ?(1), 1/2/6(1)
+  red-OC3      x  2  ports: 1/2/5(2)
+
+--- MCLO ---
+  terminations: 6   optics (each side): 10G=4, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/2/7(1), 1/1/7(1)
+  green-10G    x  2  ports: 1/1/6[20G](1), 1/1/1[20G](1)
+  red-100G     x  2  ports: 1/1/7(1), 1/2/7(1)
+
+--- MNCR ---
+  terminations: 6   optics (each side): 10G=4, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-100G     x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-10G      x  2  ports: 1/2/6[20G](1), 1/2/2[20G](1)
+
+--- MOPN ---
+  terminations: 2   optics (each side): 10G=0, 100G=2, OC3=0
+  green-100G   x  1  ports: 1/2/5(1)
+  red-100G     x  1  ports: 1/2/5(1)
+
+--- NBMO ---
+  terminations: 4   optics (each side): 10G=8, 100G=0, OC3=0
+  blue-10G     x  4  ports: 1/1/6[20G](2), 1/2/6[20G](2)
+
+--- OSTD ---
+  terminations: 4   optics (each side): 10G=0, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/2/7(1), 1/1/7(1)
+  red-100G     x  2  ports: 1/2/7(1), 1/2/2(1)
+
+--- PERL ---
+  terminations: 6   optics (each side): 10G=4, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/2/7(1), 1/1/7(1)
+  green-10G    x  2  ports: 1/1/6[20G](1), 1/1/1[20G](1)
+  red-100G     x  2  ports: 1/2/7(1), 1/1/7(1)
+
+--- POAN ---
+  terminations: 10   optics (each side): 10G=4, 100G=0, OC3=6
+  blue-10G     x  2  ports: 1/1/6(2)
+  blue-OC3     x  6  ports: 1/1/6(6)
+  green-10G    x  1  ports: 1/1/5(1)
+  red-10G      x  1  ports: 1/1/5(1)
+
+--- PROH ---
+  terminations: 18   optics (each side): 10G=16, 100G=0, OC3=2
+  blue-10G     x 10  ports: ?(6), 1/2/6(2), 1/1/6(2)
+  green-10G    x  6  ports: 1/2/6(4), ?(1), 1/1/6(1)
+  green-OC3    x  2  ports: 1/1/6(2)
+
+--- RDMD ---
+  terminations: 4   optics (each side): 10G=0, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-100G     x  2  ports: 1/1/7(1), 1/2/7(1)
+
+--- REED ---
+  terminations: 5   optics (each side): 10G=2, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-100G     x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-10G      x  1  ports: 1/1/3[20G](1)
+
+--- REST ---
+  terminations: 6   optics (each side): 10G=4, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-100G     x  2  ports: 1/1/7(1), 1/2/7(1)
+  red-10G      x  2  ports: 1/2/6[20G](1), 1/2/2[20G](1)
+
+--- SALE ---
+  terminations: 12   optics (each side): 10G=12, 100G=8, OC3=2
+  green-100G   x  2  ports: 1/1/7[200G](1), 1/2/7[200G](1)
+  red-100G     x  2  ports: 1/5/7[200G](1), 1/2/7[200G](1)
+  red-10G      x  6  ports: 1/2/6[20G](5), 1/1/6[20G](1)
+  red-OC3      x  2  ports: 1/1/6(1), 1/2/6(1)
+
+--- SANT ---
+  terminations: 5   optics (each side): 10G=10, 100G=0, OC3=0
+  blue-10G     x  4  ports: 1/1/6[20G](2), 1/2/6[20G](2)
+  green-10G    x  1  ports: 1/1/5[20G](1)
+
+--- SHEL ---
+  terminations: 2   optics (each side): 10G=2, 100G=0, OC3=0
+  green-10G    x  1  ports: 1/2/5(1)
+  red-10G      x  1  ports: 1/2/5(1)
+
+--- SOMW ---
+  terminations: 16   optics (each side): 10G=6, 100G=0, OC3=10
+  blue-10G     x  6  ports: 1/1/6(4), 1/2/6(2)
+  blue-OC3     x 10  ports: 1/2/6(6), 1/1/6(4)
+
+--- STJO ---
+  terminations: 4   optics (each side): 10G=0, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/2/5(1), 1/1/7(1)
+  red-100G     x  2  ports: 1/2/5(1), 1/1/7(1)
+
+--- SUML ---
+  terminations: 8   optics (each side): 10G=8, 100G=4, OC3=2
+  blue-10G     x  4  ports: 1/2/6[20G](2), ?[20G](2)
+  blue-OC3     x  2  ports: 1/2/6(1), ?(1)
+  green-100G   x  1  ports: 1/1/7[200G](1)
+  red-100G     x  1  ports: 1/1/7[200G](1)
+
+--- SYCN ---
+  terminations: 3   optics (each side): 10G=0, 100G=3, OC3=0
+  green-100G   x  1  ports: 1/2/5(1)
+  red-100G     x  2  ports: 1/2/5(1), 1/1/7(1)
+
+--- TAHK ---
+  terminations: 6   optics (each side): 10G=4, 100G=4, OC3=0
+  green-100G   x  2  ports: 1/2/7(1), 1/1/7(1)
+  red-100G     x  2  ports: 1/2/7(1), 1/1/7(1)
+  red-10G      x  2  ports: 1/2/6[20G](1), 1/2/2[20G](1)
+
+--- WEND ---
+  terminations: 3   optics (each side): 10G=4, 100G=1, OC3=0
+  green-100G   x  1  ports: 1/2/7(1)
+  red-10G      x  2  ports: 1/2/6[20G](1), 1/2/2[20G](1)
+
+--- WKMZ ---
+  terminations: 11   optics (each side): 10G=3, 100G=0, OC3=8
+  green-10G    x  3  ports: 1/6/1(2), 1/4/1(1)
+  green-OC3    x  7  ports: 1/6/1(5), 1/4/1(1), 1/6/2(1)
+  red-OC3      x  1  ports: 1/6/1(1)
+

@@ -1,0 +1,81 @@
+Phase 3 'Extra Materials' (per-site on-hand spares) audit
+============================================================
+
+Per-site totals (sorted by qty desc):
+  Site    Total  Parts  By category
+  MALN      106     12  Optics=83, Additional Material=17, Cards=6
+  GRIZ      101     15  Optics=69, Additional Material=20, Cards=11, Chassis/Shelf=1
+  CPJK       69      9  Optics=55, Additional Material=11, Cards=2, Chassis/Shelf=1
+  SYCN       63     11  Optics=45, Additional Material=18
+  SANT       57      8  Optics=46, Additional Material=11
+  MARN       54      7  Optics=40, Additional Material=14
+  RDMD       48      9  Optics=29, Additional Material=19
+  BENT       41      9  Optics=32, Additional Material=9
+  LNHR       41      8  Optics=24, Additional Material=9, Cards=8
+  ALVY       38      7  Additional Material=22, Optics=16
+  OSTD       37      8  Optics=30, Additional Material=7
+  FAVW       36      8  Optics=28, Additional Material=8
+  LANE       36      8  Optics=28, Additional Material=6, Cards=2
+  SHEL       35      7  Optics=24, Additional Material=11
+  SUML       34      7  Optics=28, Additional Material=6
+  BKLY       33      7  Optics=24, Additional Material=9
+  PERL       33      6  Optics=28, Additional Material=5
+  POAN       33      7  Optics=22, Additional Material=11
+  ALVF       32      6  Optics=28, Additional Material=4
+  CHEM       32      5  Optics=28, Additional Material=4
+  FAMT       31      7  Optics=24, Additional Material=7
+  HAPY       31      7  Optics=24, Additional Material=7
+  KEEL       31      6  Optics=24, Additional Material=5, Cards=2
+  LAPI       31      6  Optics=27, Additional Material=4
+  SALE       31      7  Optics=24, Additional Material=7
+  ALBA       30      6  Optics=24, Additional Material=6
+  MCLO       30      6  Optics=25, Additional Material=5
+  MNCR       30      6  Optics=26, Additional Material=4
+  WEND       30      6  Optics=24, Additional Material=6
+  FORT       29      5  Optics=24, Additional Material=5
+  STJO       29      6  Optics=24, Additional Material=5
+  MOPN       27      4  Optics=24, Additional Material=3
+  BAND       26      6  Optics=16, Additional Material=10
+  REED       19      7  Optics=8, Additional Material=7, Cards=4
+  EUGE       16      4  Optics=8, Additional Material=8
+  REST       16      6  Optics=8, Additional Material=8
+  NBMO       15      6  Optics=8, Additional Material=7
+  TAHK       15      6  Optics=8, Additional Material=7
+  WKMZ       15      4  Optics=10, Additional Material=5
+  COWL       14      6  Optics=8, Additional Material=6
+  BUCK       13      4  Optics=8, Additional Material=5
+  SOMW       11      6  Additional Material=7, Optics=4
+  CAPP        9      5  Additional Material=5, Optics=4
+  GMRS        9      3  Additional Material=5, Optics=4
+  PROH        5      3  Additional Material=5
+
+Phase 3 sites with NO Extra Materials column entries (0):
+  (none)
+
+Top 25 extras parts across all Phase 3 sites:
+  Part No.         Qty  Category   Description
+  3HE12546AA       635  Optics         SFP - C37.94 LC 2KM SR ROHS6/6 -40/85C
+  3HE00028CA       346  Optics         SAR 1-Port 1000Base-LX SFP SM 10KM 1310nm LC Connector
+  3HE10339AA        99  Additional Material  CPX DC Defender Modules
+  3CC52216AA        86  Additional Material  Fan-Alarm Evo 8 HK cord 7.5m
+  3HE12442AA        62  Additional Material  4 PORT RS232 DIST PANEL,SDIv3 ONLY
+  3HE10338AA        62  Additional Material  EXTERNAL SURGE PROTECTION KIT
+  3HE12410AA        59  Additional Material  DCE CABLE for SDI V3
+  3HE04823AA        54  Optics         SFP+  10GE LR - LC ROHS6/6 0/70C
+  3HE04824AA        39  Optics         SFP+ 10GE SR - LC ROHS6/6 0/70C
+  3HE11282AB         9  Cards          1P 100GE QSFP28 +6P 10GE SFP+ MDA-e
+  3HE06006AA         9  Cards          8 PORT VOICE AND TELEPROTECTION CARD
+  3HE11239AA         8  Optics         QSFP28 - 100GBase-ER4Lite RoHS6/6 0/70C
+  3HE12504AA         6  Cards          8-PORT C37.94 TELEPROTECTION CARD - TPC
+  3HE16558AA         4  Optics         QSFP28 - 100GE ZR4 0/70C
+  3HE07943AA         4  Cards          2P 10GE+4P GE 10G ETH CARD (-48/+24VDC)
+  3HE00035CA         4  Optics         1-port OC-3/STM-1 SONET/SDH Optics Module, IR-1 / I-1, Singl
+  3HE19775AA         3  Optics         QSFP28 - 100G ZR -8dBm 0/70C
+  3HE02781AA         2  Cards          32 PORT T1/E1 ASAP CARD (-48/+24 VDC)
+  3HE07938AA         2  Cards          4 Port OC3/STM1 - 1 Port OC12/STM4 CARD
+  1AD1519300         1  Chassis/Shelf  FIBER STORAGE TRAY (2U)
+  8DG59417AA         1  Chassis/Shelf  KIT-DCM SHELF KIT (19 INCH EIA)
+  3KC70693AB         1  Cards          ASGLP AMPLIFIER SWITCHED GAIN EDFA LP
+  8DG59427AA         1  Cards          DCM - SMF 50KM
+  1AB2151200         1  Additional Material  SHORT JUMPER LC (230MM)
+  3HE03126AA         1  Cards          6 port E/M Interface Card

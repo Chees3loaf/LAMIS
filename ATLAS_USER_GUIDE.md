@@ -1,7 +1,7 @@
 # ATLAS — User Guide
 
 > **Automated Toolkit for LightRiver Asset & Systems**
-> Version 2.0.0 · Windows Desktop Application · LightRiver Technologies
+> Version 2.0.1 · Windows Desktop Application · LightRiver Technologies
 
 ---
 
@@ -9,7 +9,7 @@
 
 1. [Getting Started](#1-getting-started)
 2. [Application Layout](#2-application-layout)
-3. [Tab: Inventory](#3-tab-inventory)
+3. [Mode: Inventory](#3-mode-inventory)
    - 3.1 [Connection Type — Network Mode](#31-connection-type--network-mode)
    - 3.2 [Connection Type — LAN Mode](#32-connection-type--lan-mode)
    - 3.3 [Connection Type — Serial Mode](#33-connection-type--serial-mode)
@@ -21,18 +21,28 @@
    - 3.9 [Credential Prompts](#39-credential-prompts)
    - 3.10 [After the Inventory — Packing Slip Prompt](#310-after-the-inventory--packing-slip-prompt)
    - 3.11 [Output File](#311-output-file)
-4. [Tab: Packing Slip (From File)](#4-tab-packing-slip-from-file)
+4. [Mode: Packing Slip Generator](#4-mode-packing-slip-generator)
    - 4.1 [Uploading a File](#41-uploading-a-file)
    - 4.2 [Filling in Project Information](#42-filling-in-project-information)
    - 4.3 [Generating Packing Slips](#43-generating-packing-slips)
-5. [Tab: TDS Diagnostics](#5-tab-tds-diagnostics)
-   - 5.1 [Configuring and Running TDS](#51-configuring-and-running-tds)
-6. [Credential Management](#6-credential-management)
-   - 6.1 [Default Credential Order](#61-default-credential-order)
-   - 6.2 [Saving New Credentials](#62-saving-new-credentials)
-7. [Output Files Reference](#7-output-files-reference)
-8. [Logs & Troubleshooting](#8-logs--troubleshooting)
-9. [Supported Devices Quick-Reference](#9-supported-devices-quick-reference)
+5. [Mode: Diagnostics](#5-mode-diagnostics)
+   - 5.1 [Sub-mode: TDS Diagnostics](#51-sub-mode-tds-diagnostics)
+   - 5.2 [Sub-mode: Network Audit](#52-sub-mode-network-audit)
+6. [Mode: Raw File Processing](#6-mode-raw-file-processing)
+   - 6.1 [Supported Input Formats](#61-supported-input-formats)
+   - 6.2 [Device Type Selection](#62-device-type-selection)
+   - 6.3 [Running Raw Processing](#63-running-raw-processing)
+7. [Mode: Provisioning](#7-mode-provisioning)
+   - 7.1 [Loading a Device List](#71-loading-a-device-list)
+   - 7.2 [Connection Type](#72-connection-type)
+   - 7.3 [Device-Specific Options](#73-device-specific-options)
+   - 7.4 [Running Provisioning](#74-running-provisioning)
+8. [Credential Management](#8-credential-management)
+   - 8.1 [Default Credential Order](#81-default-credential-order)
+   - 8.2 [Saving New Credentials](#82-saving-new-credentials)
+9. [Output Files Reference](#9-output-files-reference)
+10. [Logs & Troubleshooting](#10-logs--troubleshooting)
+11. [Supported Devices Quick-Reference](#11-supported-devices-quick-reference)
 
 ---
 
@@ -55,27 +65,29 @@ On the very first launch ATLAS will:
 - Check for any available updates (requires internet access — the check is skipped silently if offline)
 - Display a brief loading screen, then open the main window
 
-> **Tip:** If you see a Windows Defender SmartScreen warning on first run, click **More info → Run anyway**. The executable is unsigned but is built from this repository.
+> **Tip:** If you see a Windows Defender SmartScreen warning on first run, click **More info → Run anyway**. This can occur if the installer's code-signing certificate is not yet trusted by your machine's policy.
 
 ---
 
 ## 2. Application Layout
 
-When ATLAS opens you will see three tabs across the top of the window:
+When ATLAS opens you will see a row of **radio buttons** across the top of the window that switch between five operating modes:
 
-| Tab | Purpose |
-|-----|---------|
+| Mode | Purpose |
+|------|---------|
 | **Inventory** | Scan a range of network devices, collect hardware inventory, and export an Excel report. |
-| **Packing Slip** | Generate packing slips from an uploaded Excel or CSV file without scanning any devices. |
-| **TDS** | Run a targeted diagnostic script against a single Ciena 6500 or RLS node. |
+| **Diagnostics** | Run TDS diagnostics or a BFS Network Audit against Ciena TDS/RLS nodes. |
+| **Packing Slip Generator** | Generate packing slips from an uploaded Excel file without scanning any devices. |
+| **Raw File Processing** | Parse saved CLI transcript files and export an inventory workbook without connecting to any device. |
+| **Provisioning** | Push initial configuration to Nokia or Ciena devices via serial console or LAN SSH. |
 
-Below the tabs is a shared **output terminal** — a scrollable text area that displays all log messages, scan progress, and error details during any operation.
+Selecting a mode switches the center panel. Below the mode panel is a shared **output terminal** — a scrollable text area that displays all log messages, scan progress, and error details during any operation.
 
 ---
 
-## 3. Tab: Inventory
+## 3. Mode: Inventory
 
-The Inventory tab is where most day-to-day work happens. It has three connection modes — **Network**, **LAN**, and **Serial** — selected via radio buttons at the top of the tab.
+The Inventory mode is where most day-to-day work happens. It has three connection modes — **Network**, **LAN**, and **Serial** — selected via radio buttons at the top of the panel.
 
 ---
 
@@ -90,7 +102,7 @@ Network mode is the default and most common mode. It:
 3. Pulls full hardware inventory from all identified devices in parallel (up to 5 at a time).
 4. Exports the results to an Excel workbook.
 
-When **Network** is selected, the lower portion of the tab shows the **Pod Selection** and **IP Range** controls (see [Section 3.5](#35-pod--ip-range-selection)).
+When **Network** is selected, the lower portion of the panel shows the **Pod Selection** and **IP Range** controls (see [Section 3.5](#35-pod--ip-range-selection)).
 
 ---
 
@@ -167,7 +179,7 @@ The **Device Report (Optional)** section allows you to add new devices to a repo
 
 ### 3.5 Pod & IP Range Selection
 
-The Inventory tab has two side-by-side pod/IP selection columns — **Pod Selection 1** (left) and **Pod Selection 2** (right). You must fill in Pod 1 at minimum; Pod 2 is optional and used when you need to scan two different subnets in a single run.
+The Inventory panel has two side-by-side pod/IP selection columns — **Pod Selection 1** (left) and **Pod Selection 2** (right). You must fill in Pod 1 at minimum; Pod 2 is optional and used when you need to scan two different subnets in a single run.
 
 **Each column has:**
 
@@ -360,11 +372,11 @@ The inventory Excel report contains:
 
 ---
 
-## 4. Tab: Packing Slip (From File)
+## 4. Mode: Packing Slip Generator
 
-> **Use this when:** You already have an Excel or CSV file with device inventory data and want to generate packing slips without scanning any devices.
+> **Use this when:** You already have an Excel file with device inventory data and want to generate packing slips without scanning any devices.
 
-This tab is completely independent of the Inventory tab. It generates packing slips directly from data you upload.
+This mode is completely independent of the Inventory mode. It generates packing slips directly from data you upload.
 
 ---
 
@@ -382,6 +394,7 @@ Click **Browse** under the **Upload File** header. Supported formats:
 - Detect all sheets in the file.
 - Show `✓ filename.xlsx (X device(s))` in green when loaded.
 - Auto-populate Customer, Project, PO, and SO fields if those values are found in the template cells (C5, C6, C7, D7) on the first device sheet, or in the Summary sheet (B7, D7).
+- Display a **scrollable checkbox list** of all device sheets so you can select which to include. Use **Select All** / **Deselect All** as needed.
 
 **File validation:** ATLAS checks that the file has an allowed extension, is not too large, and matches its claimed format. Files that fail validation are rejected with an error message.
 
@@ -404,12 +417,14 @@ These fields are auto-populated when you upload an Excel file that contains them
 
 ### 4.3 Generating Packing Slips
 
-Click **Generate Packing Slips**.
+Select the output mode using the radio buttons in the panel:
 
-ATLAS will ask:
+| Mode | Description |
+|------|-------------|
+| **Consolidated** | One workbook containing all selected devices. |
+| **Individual** | One workbook per device. |
 
-1. **Output mode** — Individual (one file per device) or Consolidated (one file, all devices).
-2. **Save location** — A folder (Individual) or file path (Consolidated).
+Then click **Generate Packing Slips** and choose a save location — a folder (Individual) or file path (Consolidated).
 
 **What ATLAS does for each device sheet:**
 
@@ -426,15 +441,19 @@ The output terminal confirms each file as it is saved. A completion message appe
 
 ---
 
-## 5. Tab: TDS Diagnostics
+## 5. Mode: Diagnostics
+
+The Diagnostics mode contains two sub-modes selected via radio buttons: **TDS** (single-host diagnostics) and **Network Audit** (multi-hop BFS walk).
+
+---
+
+### 5.1 Sub-mode: TDS Diagnostics
 
 > **Use this when:** You need to run a targeted Ciena TDS diagnostic script against a single device.
 
 TDS (Test Diagnostic System) runs a specialized external script (`TDS_v6.2.py`) against a Ciena 6500 or RLS node. It is designed for in-lab or in-field diagnostics separate from full inventory collection.
 
----
-
-### 5.1 Configuring and Running TDS
+#### Configuring and Running TDS
 
 Fill in the **TDS Configuration** fields:
 
@@ -462,17 +481,211 @@ Click **Run Diagnostics**.
 - The status label shows **Running...** and returns to **Ready** when done.
 - The password field is cleared immediately after the credentials are passed to the subprocess.
 
-> **Timeout:** If TDS takes longer than the configured timeout (see `config.TDS_TIMEOUT`), the subprocess is terminated and an error is shown.
+> **Timeout:** If TDS takes longer than 30 minutes, the subprocess is terminated and an error is shown.
 
 ---
 
-## 6. Credential Management
+### 5.2 Sub-mode: Network Audit
+
+> **Use this when:** You need to map an entire RLS network by automatically walking LLDP neighbors hop by hop, starting from one or more seed devices.
+
+The Network Audit performs a bounded breadth-first search (BFS) across an RLS network. It runs a TDS session against each discovered host, reads the LLDP neighbor data from the results, and queues newly discovered neighbors for the next hop — repeating until the hop limit is reached or no new neighbors are found.
+
+#### Configuring and Running a Network Audit
+
+| Field | Description |
+|-------|-------------|
+| **Seed IP / Hostname** | The first device to start the walk from. Enter an IPv4 address or resolvable hostname. |
+| **Seed File** (optional) | Path to a text file containing multiple seed hosts — one per line. Lines starting with `#` are ignored. A TID may follow the hostname on the same line, separated by a space. |
+| **Username** | Device login username (used for all hosts in the walk). |
+| **Password** | Device login password (masked). |
+| **Seed TID** (optional) | File name identifier for the seed host's TDS output files. |
+| **Max Hops** | Maximum BFS depth (spinbox, 0–10, default **3**). A value of 0 runs TDS on the seed host only, with no neighbor walk. |
+
+Click **Run Network Audit**.
+
+**What happens during the run:**
+
+1. ATLAS verifies the seed host's SSH key before starting.
+2. `RLS_Network_Audit.py` is launched as a subprocess.
+3. For each hop, one TDS session runs per discovered host.
+4. Newly discovered LLDP neighbors are deduplicated and added to the queue.
+5. Progress is streamed to the ATLAS output terminal.
+
+**Output files** (written to the working directory):
+
+| File | Contents |
+|------|----------|
+| `Walk_Summary.csv` | One row per discovered host: hop number, hostname, run status, PASS/WARN/FAIL/INFO validation counts, neighbors discovered. |
+| `{HOST}_RLS_Validation.csv` | Per-host engineering validation verdicts. |
+| `{HOST}_RLS_Walk_Neighbors.csv` | LLDP neighbor table for that host. |
+
+> **Timeout:** The Network Audit timeout scales with Max Hops. Allow up to several hours for large networks.
+
+> **Tip:** Use a Seed File when you need to start the walk from multiple independent nodes simultaneously.
+
+---
+
+## 6. Mode: Raw File Processing
+
+> **Use this when:** You have saved CLI transcript files from a previous manual session and want to parse them into an inventory workbook without connecting to any device.
+
+This mode is entirely offline. It reads CLI output that was captured to text files or a multi-sheet Excel workbook and produces the same formatted Excel report that a live scan would generate.
+
+---
+
+### 6.1 Supported Input Formats
+
+| Input | Description |
+|-------|-------------|
+| **Single `.txt` file** | A single device's CLI output captured to a text file. |
+| **Multi-sheet `.xlsx` / `.xls`** | Each sheet is treated as one device's CLI output. |
+| **Folder of `.txt` files** | Each `.txt` file in the folder is treated as one device. |
+
+Click **Browse** to select a file, or **Browse Folder** to select a folder. The detected input type and device count are confirmed in the panel.
+
+---
+
+### 6.2 Device Type Selection
+
+Use the **Device Type** dropdown to tell ATLAS how to parse the transcript:
+
+| Option | Use When |
+|--------|----------|
+| **Auto Detect Nokia** | The file contains Nokia SAR or IXR output and you want ATLAS to determine which. |
+| **Nokia PSI** | Nokia 1830 PSI transcript. |
+| **Nokia 1830** | Nokia 1830 transcript. |
+| **Nokia SAR** | Nokia 7705 SAR transcript (explicit). |
+| **Nokia IXR** | Nokia 7250 IXR transcript (explicit). |
+| **Ciena 6500** | Ciena 6500 transcript. |
+| **Ciena RLS** | Ciena RLS transcript. |
+
+> **Tip:** Use **Auto Detect Nokia** when the transcript file names contain the device name (e.g., `USDEN5-SAR1-2026-05-01.txt`). ATLAS reads the filename to determine SAR vs IXR before parsing.
+
+---
+
+### 6.3 Running Raw Processing
+
+1. Select your input (file or folder).
+2. Choose the device type.
+3. Click **Process**.
+
+ATLAS parses the CLI output, matches command sections, and builds the inventory DataFrame. The output terminal shows which command sections matched and which were skipped. When complete, the standard Project Information popup appears — fill it in and choose a save location.
+
+The output Excel file has the same structure as a live scan report: Summary sheet + one tab per device.
+
+> **Note:** Devices with no matching CLI output produce a placeholder row in the report rather than being silently omitted.
+
+---
+
+## 7. Mode: Provisioning
+
+> **Use this when:** You need to push initial configuration (management IP, hostname, routing, protocols) to a factory-default Nokia or Ciena device.
+
+The Provisioning mode connects to a single device via serial console or LAN SSH and applies a templated configuration script. It supports Nokia SAR, Nokia IXR, Nokia 1830 OLS, Ciena SAOS 6, and Ciena SAOS 10.
+
+---
+
+### 7.1 Loading a Device List
+
+Click **Browse** to load an Excel file containing your device list. Required columns:
+
+| Column | Description |
+|--------|-------------|
+| **IP** | Management IP to assign to the device. |
+| **Hostname** | Hostname to set on the device. |
+
+Optional columns (auto-populated into the network parameter fields when a device is selected):
+
+| Column | Description |
+|--------|-------------|
+| **Subnet / Prefix / Prefix Len** | Subnet prefix length (e.g., `22`). |
+| **Gateway / GW / Next-Hop** | Default gateway IP. |
+| **Static Route / Static Route Dest** | Static route destination (e.g., `10.0.0.0/8`). |
+
+Once loaded, select the target device from the dropdown. Its values populate the parameter fields automatically.
+
+---
+
+### 7.2 Connection Type
+
+Select **Serial (Console)** or **LAN (SSH)**:
+
+**Serial:**
+
+| Field | Description |
+|-------|-------------|
+| **Port** | COM port (auto-detected; click **Refresh** to rescan). |
+| **Baud** | Baud rate. Defaults: Nokia = 115200, Ciena SAOS = 9600, Nokia OLS = 38400. |
+
+**LAN (SSH):**
+
+| Field | Description |
+|-------|-------------|
+| **Connect IP** | Override IP for the SSH connection (leave blank to use the IP from the device list). |
+| **Username** | SSH username (default `admin`). |
+| **Password** | SSH password (default `admin`). |
+
+---
+
+### 7.3 Device-Specific Options
+
+#### Nokia SAR / IXR
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| **Configure card type** | ✅ Enabled | Programs the card type on the chassis. |
+| **Sync redundancy** | ☐ Disabled | Configures redundancy synchronization. |
+
+#### Nokia 1830 OLS
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| **Shelf Type** | Auto-detect | Override shelf type: PSI-4L / PSI-8L (MFC) or PSS-16II (USRPNL). |
+| **Set loopback** | ☐ Disabled | Configures a loopback interface. ⚠️ Triggers a NE warm reset — only enable if expected. |
+
+#### Ciena SAOS 6
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| **Mgmt VLAN ID** | `4000` | VLAN ID for the management interface. |
+| **Interface Name** | `mgmt` | Name of the management interface to create or update. |
+| **VLAN Name** | `mgmt` | VLAN name. |
+| **Mgmt Port** | *(blank)* | Optional: physical port to assign to the management VLAN. |
+| **Update existing interface** | ☐ Disabled | If enabled, modifies an existing interface instead of creating a new one. |
+| **Protocol checkboxes** | SSH, SNMP, NTP, Syslog, RADIUS, TACACS | Enable or disable management protocols. |
+
+> **Note:** Ciena SAOS 6 always assigns a `/32` prefix to the management IP regardless of the Prefix Len field.
+
+#### Ciena SAOS 10
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| **Update existing mgmtbr0** | ☐ Disabled | Modifies the existing `mgmtbr0` bridge address instead of creating it. |
+| **Global Source IP Interface** | *(blank)* | Optional: sets the management-plane default source IP interface. |
+
+---
+
+### 7.4 Running Provisioning
+
+1. Load a device list and select the target device.
+2. Choose your connection type and fill in connection parameters.
+3. Set any device-specific options.
+4. Click **▶ Run Provisioning**.
+
+Progress is streamed to the output terminal in the panel. Click **■ Stop** to abort the run at any time.
+
+> **Warning:** Provisioning sends configuration commands to the device. Verify all parameters before clicking Run — some operations (e.g., Nokia 1830 loopback) trigger a device reset.
+
+---
+
+## 8. Credential Management
 
 ATLAS stores device credentials in an encrypted file at `%APPDATA%\ATLAS\credentials_config.json`. Credentials are encrypted with Fernet symmetric encryption. The key is unique to your machine and user account.
 
 ---
 
-### 6.1 Default Credential Order
+### 8.1 Default Credential Order
 
 When ATLAS attempts to log into a device it tries credentials in this order:
 
@@ -487,7 +700,7 @@ This order is automatically set on first launch and re-applied on upgrade.
 
 ---
 
-### 6.2 Saving New Credentials
+### 8.2 Saving New Credentials
 
 There are three ways to add or update credentials:
 
@@ -504,14 +717,16 @@ For advanced users: the file at `%APPDATA%\ATLAS\credentials_config.json` is Fer
 
 ---
 
-## 7. Output Files Reference
+## 9. Output Files Reference
 
 | File | Location | Created By |
 |------|----------|------------|
-| Inventory report | Location you chose at run-time | Inventory tab → Run (Network/LAN/Serial) |
-| Individual packing slips | Folder you chose | Packing slip prompt after inventory, or Packing Slip tab |
+| Inventory report | Location you chose at run-time | Inventory mode → Run (Network/LAN/Serial) |
+| Individual packing slips | Folder you chose | Packing slip prompt after inventory, or Packing Slip Generator mode |
 | Consolidated packing slip | File path you chose | Same as above |
-| TDS output files | Location set inside TDS script | TDS tab → Run Diagnostics |
+| TDS output files | Working directory or path set in TDS script | Diagnostics → TDS → Run Diagnostics |
+| Network Audit summary | Working directory | Diagnostics → Network Audit → Run Network Audit |
+| Raw processing report | Location you chose at run-time | Raw File Processing mode → Process |
 | Run log | `%APPDATA%\ATLAS\logs\ATLAS_YYYY-MM-DD_HH-MM-SS.log` | Automatically on every launch |
 
 ### Inventory Report Structure
@@ -535,7 +750,7 @@ Device Sheet (one per IP)
 
 ---
 
-## 8. Logs & Troubleshooting
+## 10. Logs & Troubleshooting
 
 ### Log Files
 
@@ -586,9 +801,20 @@ To open the logs folder: press `Win + R`, type `%APPDATA%\ATLAS\logs`, press Ent
 - Check that all four fields (IP, platform, username, password) are filled.
 - If the host-key dialog appeared and you clicked Cancel, re-run and accept the key.
 
+**Network Audit stops after the seed host**
+
+- Verify that Max Hops is set to at least 1.
+- Check `Walk_Summary.csv` for per-host error details.
+- Ensure the seed host can reach its LLDP neighbors over the management network.
+
+**Raw processing produces empty or incomplete output**
+
+- Confirm the correct Device Type is selected — a mismatch causes all command sections to be skipped.
+- Check the output terminal for "[RAW] No match" messages which identify unrecognized command sections.
+
 ---
 
-## 9. Supported Devices Quick-Reference
+## 11. Supported Devices Quick-Reference
 
 | Device | Auto-ID? | Connection | Script Used |
 |--------|----------|------------|-------------|
@@ -597,12 +823,17 @@ To open the logs folder: press `Win + R`, type `%APPDATA%\ATLAS\logs`, press Ent
 | Nokia 7250 IXR-R6d | ✅ Yes | SSH | Nokia_IXR.py |
 | Nokia 1830 | ✅ Yes | SSH → Telnet | Nokia_1830.py |
 | Nokia 1830 PSI | ⚠️ Partial | SSH → Telnet | Nokia_PSI.py |
+| Nokia 1830 OLS | ➡️ Provision only | Serial / SSH | scripts/Network/Nokia_OLS.py |
 | Ciena 6500 | ✅ Yes | SSH → Telnet | Ciena_6500.py |
 | Ciena RLS | ⚠️ Partial | SSH → Telnet | Ciena_RLS.py |
+| Ciena SAOS 6 | ➡️ Provision only | Serial / SSH | scripts/Network/Ciena_SAOS.py |
+| Ciena SAOS 10 | ➡️ Provision only | Serial / SSH | scripts/Network/Ciena_SAOS10.py |
 | Smartoptics DCP-R | ✅ Yes | SSH | Smartoptics_DCP.py |
 | Smartoptics DCP-2 | ✅ Yes | SSH | Smartoptics_DCP.py |
 
 **⚠️ Partial** = The device can be connected to and identified, but some data fields may be incomplete pending full pipeline integration in a future release.
+
+**➡️ Provision only** = This device is supported in the Provisioning mode only; it does not participate in the Inventory auto-scan pipeline.
 
 ---
 

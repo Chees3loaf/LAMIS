@@ -53,10 +53,12 @@ def _process_iac(data: bytes, sock: socket.socket) -> bytes:
             i += 2
 
         elif cmd == _SB:
-            # Subnegotiation: skip until IAC SE
+            # Subnegotiation: skip until IAC SE.
+            # Use i < len(data) so the final byte is consumed even when
+            # the block is unterminated (no IAC SE before end of buffer).
             i += 2
-            while i + 1 < len(data):
-                if data[i] == _IAC and data[i + 1] == _SE:
+            while i < len(data):
+                if i + 1 < len(data) and data[i] == _IAC and data[i + 1] == _SE:
                     i += 2
                     break
                 i += 1

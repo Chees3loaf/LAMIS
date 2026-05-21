@@ -1,5 +1,7 @@
 """Unit tests for gui/workbook_builder.py — sheet utilities and data combination."""
 
+import inspect
+import re
 import unittest
 from unittest.mock import MagicMock, patch
 import pandas as pd
@@ -13,6 +15,24 @@ def _make_builder() -> WorkbookBuilder:
     db_cache = MagicMock()
     db_cache.db_path = ":memory:"
     return WorkbookBuilder(db_cache=db_cache, template_path="", packing_slip_template="")
+
+
+class TestDeviceReportFreezePanes(unittest.TestCase):
+    """Regression: rows 1-14 of every Device Report sheet must stay static
+    while the equipment list (row 15+) scrolls. Confirmed by inspecting the
+    WorkbookBuilder source to ensure both report-build paths set
+    ``freeze_panes = "A15"`` after writing equipment rows."""
+
+    def test_both_device_report_builders_set_freeze_panes(self):
+        src = inspect.getsource(WorkbookBuilder)
+        # Both the standard report builder and the PSI builder must set the
+        # same freeze cell.  Allow either single or double quotes.
+        matches = re.findall(r"freeze_panes\s*=\s*['\"]A15['\"]", src)
+        self.assertGreaterEqual(
+            len(matches), 2,
+            f"Expected both device-report builders to set freeze_panes='A15'; "
+            f"found {len(matches)} occurrence(s)."
+        )
 
 
 class TestAutosizeSheetColumns(unittest.TestCase):

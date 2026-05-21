@@ -8,7 +8,11 @@ import sys as _sys
 import os as _os
 _sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), '..', '..'))
 from utils.telnet import Telnet as _Telnet
-from utils.helpers import get_known_hosts_path as _get_known_hosts_path
+from utils.helpers import (
+    get_known_hosts_path as _get_known_hosts_path,
+    safe_load_host_keys as _safe_load_host_keys,
+    safe_save_host_keys as _safe_save_host_keys,
+)
 import re
 import glob
 import ipaddress
@@ -257,10 +261,10 @@ def LOGIN_SSH():
             try:
                 _kh = str(_get_known_hosts_path())
                 ssh = paramiko.SSHClient()
-                ssh.load_host_keys(_kh)
+                _safe_load_host_keys(ssh, _kh)
                 ssh.set_missing_host_key_policy(paramiko.RejectPolicy())
                 ssh.connect(HOST, port=int(PORT), username=USER, password=PASS, timeout=TIMEOUT)
-                ssh.save_host_keys(_kh)
+                _safe_save_host_keys(ssh, _kh)
                 chan_6500 = ssh.invoke_shell()
                 return 'YES'
             except Exception as err:
@@ -309,10 +313,10 @@ def RLS_LOGIN_SSH():
     try:
         _kh = str(_get_known_hosts_path())
         rls_ssh_client = paramiko.SSHClient()
-        rls_ssh_client.load_host_keys(_kh)
+        _safe_load_host_keys(rls_ssh_client, _kh)
         rls_ssh_client.set_missing_host_key_policy(paramiko.RejectPolicy())
         rls_ssh_client.connect(HOST, port=int(PORT), username=USER, password=PASS, timeout=TIMEOUT, look_for_keys=False, allow_agent=False)
-        rls_ssh_client.save_host_keys(_kh)
+        _safe_save_host_keys(rls_ssh_client, _kh)
         rls_chan = rls_ssh_client.invoke_shell()
         time.sleep(2)
         banner = ''
@@ -1372,6 +1376,11 @@ def _consolidate_rls_csv_to_xlsx(WindowsHost, tid_label='', cleanup_csvs=True):
     all_csv_paths = glob.glob(WindowsHost + '_RLS_*.csv')
     priority = {
         WindowsHost + '_RLS_Issues.csv': 0,
+        # Engineering-level verdicts produced by the validation step (when
+        # the run was invoked with --validate). Slotted right after Issues
+        # so the operator sees PASS/WARN/FAIL/INFO judgements before
+        # diving into raw command output.
+        WindowsHost + '_RLS_Validation.csv': 1,
         WindowsHost + '_RLS_Adjacencies.csv': 2,
         WindowsHost + '_RLS_Alarms.csv': 3,
         WindowsHost + '_RLS_Amplifiers.csv': 4,
@@ -1403,9 +1412,14 @@ def _consolidate_rls_csv_to_xlsx(WindowsHost, tid_label='', cleanup_csvs=True):
         WindowsHost + '_RLS_Tx_Adjacency.csv': 32,
         WindowsHost + '_RLS_Software.csv': 33,
         WindowsHost + '_RLS_LLDP.csv': 35,
+        # LLDP neighbor topology snapshot produced by the audit's walk
+        # mode (--walk-mode). Placed at the end so the workbook reads
+        # device-detail first, network-level info last.
+        WindowsHost + '_RLS_Walk_Neighbors.csv': 36,
     }
     display_names = {
         WindowsHost + '_RLS_Issues.csv': 'Issues',
+        WindowsHost + '_RLS_Validation.csv': 'Validation',
         WindowsHost + '_RLS_Adjacencies.csv': 'Adjacencies',
         WindowsHost + '_RLS_Alarms.csv': 'Alarms',
         WindowsHost + '_RLS_Amplifiers.csv': 'Amplifiers',
@@ -1437,9 +1451,11 @@ def _consolidate_rls_csv_to_xlsx(WindowsHost, tid_label='', cleanup_csvs=True):
         WindowsHost + '_RLS_Tx_Adjacency.csv': 'Tx_Adjacency',
         WindowsHost + '_RLS_Software.csv': 'Software',
         WindowsHost + '_RLS_LLDP.csv': 'LLDP',
+        WindowsHost + '_RLS_Walk_Neighbors.csv': 'Walk_Neighbors',
     }
     index_descriptions = {
         'Issues': 'Photonic Issues',
+        'Validation': 'Engineering validation verdicts (PASS / WARN / FAIL / INFO)',
         'Adjacencies': 'Adjacency and discovered neighbor summary',
         'Alarms': 'Active and disabled alarm conditions',
         'Amplifiers': 'Amplifier and line-card power summary',
@@ -1471,6 +1487,7 @@ def _consolidate_rls_csv_to_xlsx(WindowsHost, tid_label='', cleanup_csvs=True):
         'Tx_Adjacency': 'Transmit adjacencies',
         'Software': 'Software versions and upgrade state',
         'LLDP': 'LLDP neighbors and management addresses',
+        'Walk_Neighbors': 'Network-walk neighbor topology (interface / system / mgmt-address / port)',
     }
     csv_paths = sorted(all_csv_paths, key=lambda p: (priority.get(p, 100), os.path.basename(p).lower()))
     keep_raw_tabs = set()
@@ -2364,7 +2381,12 @@ def PARSE_COLLECTED_DATA_RLS(WindowsHost):
 
     xlsx_path = _consolidate_rls_csv_to_xlsx(WindowsHost, display_tid, cleanup_csvs=False)
     debug_xlsx_path = _consolidate_rls_csv_to_debug_xlsx(WindowsHost, display_tid)
-    _cleanup_rls_csv_artifacts(glob.glob(WindowsHost + '_RLS_*.csv'))
+    # In walk mode the per-host CSVs are consumed by RLS_Network_Audit.py
+    # to build a span-wide workbook, so suppress the cleanup here. The
+    # audit orchestrator removes them after the network workbook is
+    # written.
+    if not WALK_MODE:
+        _cleanup_rls_csv_artifacts(glob.glob(WindowsHost + '_RLS_*.csv'))
 
     if xlsx_path:
         print('6500 RLS workbook generated: ' + xlsx_path)

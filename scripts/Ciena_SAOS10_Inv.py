@@ -30,7 +30,7 @@ from script_interface import (
     CredentialPromptRequired,
     NEEDS_CREDENTIALS_SENTINEL,
 )
-from utils.helpers import get_known_hosts_path, get_host_key_policy
+from utils.helpers import get_known_hosts_path, get_host_key_policy, safe_load_host_keys, safe_save_host_keys
 
 
 class Script(BaseScript):
@@ -138,7 +138,7 @@ class Script(BaseScript):
             _kh = str(get_known_hosts_path())
             self.ssh_client = paramiko.SSHClient()
             self.ssh_client.load_system_host_keys()
-            self.ssh_client.load_host_keys(_kh)
+            safe_load_host_keys(self.ssh_client, _kh)
             self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
             logging.info(f"SAOS10-Inv: connecting to {self.ip_address}")
             try:
@@ -154,7 +154,7 @@ class Script(BaseScript):
                 return [], NEEDS_CREDENTIALS_SENTINEL
             except paramiko.AuthenticationException as exc:
                 return [], f"Authentication failed for {self.ip_address}: {exc}"
-            self.ssh_client.save_host_keys(_kh)
+            safe_save_host_keys(self.ssh_client, _kh)
             logging.info(f"SAOS10-Inv: connected to {self.ip_address}")
 
             shell = self.ssh_client.invoke_shell()

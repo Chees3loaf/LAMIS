@@ -6,6 +6,26 @@ and easier to customize across different environments.
 """
 
 # ============================================================================
+# APPLICATION / UPDATE
+# ============================================================================
+
+# Keep this in lockstep with ATLAS.nsi `ProductVersion` so the installer and
+# the running app agree on what's currently installed. The updater compares
+# this against the latest GitHub release tag.
+APP_VERSION = "2.0.4"
+
+# GitHub release feed used by utils.update.Updater when running as an
+# installed (frozen) build. Overridable via the LAMIS_UPDATE_REPO env var.
+GITHUB_OWNER = "Chees3loaf"
+GITHUB_REPO = "LAMIS"
+
+# Filename of the installer asset attached to each release.
+INSTALLER_ASSET_NAME = "ATLAS_Setup.exe"
+
+# How long to wait on the GitHub API / asset download before giving up.
+UPDATE_HTTP_TIMEOUT_S = 15
+
+# ============================================================================
 # NETWORK CONFIGURATION
 # ============================================================================
 
@@ -23,9 +43,10 @@ TELNET_PORT = 23
 # AUTHENTICATION
 # ============================================================================
 
-# Credentials are now stored securely in Windows Credential Manager.
-# Service name for credential storage: "ATLAS"
-# See utils/helpers.py for get_credentials() / save_credentials()
+# Credentials: ATLAS no longer persists user-entered credentials. The
+# only stored creds are the Fernet-encrypted seed list (see
+# _BUILTIN_DEFAULT_SEED in utils/credentials.py) which the auth-failure
+# rotation cycles through on each device.
 
 # SSH host-key trust policy.
 # ATLAS is intended for unattended bulk operations across 100+ devices,

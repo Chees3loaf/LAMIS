@@ -1,0 +1,78 @@
+Phase 3 BOM tally — final (45 sites)
+==================================================
+
+Phase 3 site list (45):
+  ALBA, ALVF, ALVY, BAND, BENT, BKLY, BUCK, CAPP, CHEM, COWL, CPJK, EUGE, FAMT, FAVW, FORT, GMRS, GRIZ, HAPY, KEEL, LANE, LAPI, LNHR, MALN, MARN, MCLO, MNCR, MOPN, NBMO, OSTD, PERL, POAN, PROH, RDMD, REED, REST, SALE, SANT, SHEL, SOMW, STJO, SUML, SYCN, TAHK, WEND, WKMZ
+
+Chassis totals across Phase 3:
+  7250 IXR-R6: 58
+  7705 SAR-8 v2: 113
+  1830 PSS-8: 6
+
+--- Additional Material ---  (P3 total: 740, spares: 24)
+  Part No.         P3 qty   Extras   Spare  Description
+  3HE10339AA           99       99      11  CPX DC Defender Modules
+  3CC52216AA           86       86       1  Fan-Alarm Evo 8 HK cord 7.5m
+  3HE12442AA           62       62       6  4 PORT RS232 DIST PANEL,SDIv3 ONLY
+  3HE10338AA           62       62       3  EXTERNAL SURGE PROTECTION KIT
+  3HE12410AA           59       59       1  DCE CABLE for SDI V3
+  1AB2151200            1        1       1  SHORT JUMPER LC (230MM)
+  3HE03399AB            1        1       1  T1/E1 CABLE 26 AWG OPEN-ENDED 30M
+
+--- Cards ---  (P3 total: 1160, spares: 64)
+  Part No.         P3 qty   Extras   Spare  Description
+  3HE07943AA          230        4      15  2P 10GE+4P GE 10G ETH CARD (-48/+24VDC)
+  3HE02774AB          226        0      17  CONTROL SWITCH MODULE V2 (CSMV2)
+  3HE11282AB          167        9      10  1P 100GE QSFP28 +6P 10GE SFP+ MDA-e
+  3HE11283AA          114        0       2  7250 IXR-R6 CPIOM
+  3HE12504AA           72        6       0  8-PORT C37.94 TELEPROTECTION CARD - TPC
+  3HE03391AC           62        0       0  12P SERIAL DATA CARD V3 -48/+24VDC
+  3HE02781AA           58        2       9  32 PORT T1/E1 ASAP CARD (-48/+24 VDC)
+  3HE03126AA           49        1       0  6 port E/M Interface Card
+  3HE02780AA           48        0       2  6 port FXS line card (-48/+24 VDC) _x000D_
+  3HE06006AA           13        9       2  8 PORT VOICE AND TELEPROTECTION CARD
+  3HE03127AA           19        0       0  2P OC3/STM1 CHANNELIZED ADAPTER CARD
+  3KC48820AA           12        0       1  8EC2 -EQUIPT CONTROLLER-PSS8,TEMP-HARDEN
+  3KC48870AB           12        0       1  POWER FILTER-30A-PSS8 (8DC30)
+  3HE07938AA           10        2       1  4 Port OC3/STM1 - 1 Port OC12/STM4 CARD
+  3KC70693AB            7        1       0  ASGLP AMPLIFIER SWITCHED GAIN EDFA LP
+  3KC49230AB            6        0       1  SFDC8B - STATIC FLTR DWDM CMPCT 8CH (B)
+  8DG62504AA            6        0       1  OTDR
+  3KC70693AA            6        0       0  ASG AMPLIFIER SWITCHED GAIN EDFA
+  8DG61330AA            5        0       0  WTOCM-F
+  3HE06794AA            2        0       1  8 port FXO line card (-48/+24 VDC)
+  8DG59427AA            1        1       1  DCM - SMF 50KM
+
+--- Chassis/Shelf ---  (P3 total: 361, spares: 16)
+  Part No.         P3 qty   Extras   Spare  Description
+  3HE06792EA          113        0       8  Fan Module (SAR-8 Shelf V2) Ext Temp
+  3HE06791AA          113        0       3  SAR-8 SHELF V2
+  3HE11278AA           57        0       2  7250 IXR-R6 CHASSIS
+  3HE11279AA           56        0       3  7250 IXR-R6 FAN TRAY
+  3KC48830AA            6        0       0  PSS8-8SP- SHELF PNL,TEMP-HARDEN
+  3KC48850AA            6        0       0  PSS8-8FAN-FAN UNIT,TEMP-HARDENED
+  3KC48901AA            6        0       0  PSS8 SHELF-(INCLUDING PSS8SHF,SHELF PNL)
+  1AD1519300            1        1       0  FIBER STORAGE TRAY (2U)
+  8DG59417AA            1        1       0  KIT-DCM SHELF KIT (19 INCH EIA)
+
+--- Optics ---  (P3 total: 2864, spares: 139)
+  Part No.         P3 qty   Extras   Spare  Description
+  3HE12546AA          635      635      49  SFP - C37.94 LC 2KM SR ROHS6/6 -40/85C
+  3HE00028CA          362      346      45  SAR 1-Port 1000Base-LX SFP SM 10KM 1310nm LC Connector
+  3HE04823AA          505       54      28  SFP+  10GE LR - LC ROHS6/6 0/70C
+  3HE04824AA           64       39       0  SFP+ 10GE SR - LC ROHS6/6 0/70C
+  3HE11239AA           63        8       3  QSFP28 - 100GBase-ER4Lite RoHS6/6 0/70C
+  3HE15276AA           40        0       4  QSFP28 100G DR 500m - SINGLE LAMBDA
+  3HE16558AA           36        4       0  QSFP28 - 100GE ZR4 0/70C
+  3HE00035CA           27        4       2  1-port OC-3/STM-1 SONET/SDH Optics Module, IR-1 / I-1, Singl
+  3HE05036AA           14        0       0  SFP+  10GE ER - LC ROHS6/6 0/70C
+  3HE19775AA            7        3       6  QSFP28 - 100G ZR -8dBm 0/70C
+  3AL82081AA            4        1       0  SFP EULH-II OSC 1511NM
+  3HE14649AA            4        1       0  SFP+ 10GE eZR - LC ROHS6/6 0/70C
+  CLEI code             3        0       0  Not Found
+  3HE10550AA            2        0       2  QSFP28- 100G LR4 10KM LC ROHS6/6 0/70C
+  3HE09329AA            2        0       0  SFP+10GE ZR - LC ROHS6/6 -40/85C
+  1AB3731200            1        0       0  OC3/STM1 APD ULH SFP 1510NM
+
+
+GRAND TOTALS (Phase 3): 5125 items + 243 spares

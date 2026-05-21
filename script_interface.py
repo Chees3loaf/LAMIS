@@ -33,8 +33,10 @@ from utils.helpers import (
     get_host_key_policy,
     get_known_hosts_path,
     get_credentials,
+    safe_load_host_keys,
+    safe_save_host_keys,
 )
-from utils.credentials import prompt_for_credentials_gui, save_credentials_to_config, get_default_credentials_to_try
+from utils.credentials import prompt_for_credentials_gui, get_default_credentials_to_try
 from utils.telnet_policy import add_telnet_allowlist, is_telnet_allowed
 
 # At the bottom or top-level
@@ -348,14 +350,33 @@ class DatabaseCache:
         if key in self.cache:
             return self.cache[key]
         
-        # Lookup in database and cache result
+        # Lookup in database and cache result. The parts catalog occasionally
+        # holds multiple rows that share the same 10-char part number (e.g.
+        # an original entry plus a vendor-qualified variant carrying extra
+        # text like "IEEE 1613 Class 2 enabled ..."). To make results
+        # deterministic and prefer the canonical catalog row over qualified
+        # variants, we first try an exact match on the 10-char key and fall
+        # back to LIKE prefix only when no exact row exists. On ties we
+        # pick the shortest description, which reliably picks the plain
+        # catalog row over a qualified one.
         try:
             with sqlite3.connect(self.db_path) as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT description FROM parts WHERE part_number LIKE ?", (key + "%",))
+                cursor.execute(
+                    "SELECT description FROM parts WHERE part_number = ? "
+                    "ORDER BY LENGTH(description) ASC LIMIT 1",
+                    (key,),
+                )
                 result = cursor.fetchone()
+                if not result:
+                    cursor.execute(
+                        "SELECT description FROM parts WHERE part_number LIKE ? "
+                        "ORDER BY LENGTH(description) ASC LIMIT 1",
+                        (key + "%",),
+                    )
+                    result = cursor.fetchone()
                 description = result[0] if result else "Not Found"
-        except Exception as e:
+        except sqlite3.Error:
             logging.exception(f"[CACHE] DB error on '{key}'")
             description = "Not Found"
         
@@ -389,6 +410,13 @@ class DeviceIdentifier:
         # concurrent device uses its own DeviceIdentifier instance (which the
         # pipeline guarantees).
         self._identified_client: Optional["paramiko.SSHClient"] = None
+        # Credentials that actually authenticated during identification.
+        # ``select_script`` consumes these (preferring them over the user's
+        # primary saved credentials) so the inventory script doesn't have
+        # to re-rotate through admin/admin → cli → su to find what works.
+        # Cleared by ``take_identified_credentials`` once consumed; reset
+        # at the top of each ``identify_device`` call.
+        self._identified_credentials: Optional[Tuple[str, str]] = None
 
     def take_identified_client(self) -> Optional["paramiko.SSHClient"]:
         """Return and clear the SSH client preserved after successful identification.
@@ -403,6 +431,16 @@ class DeviceIdentifier:
         self._identified_client = None
         return client
 
+    def take_identified_credentials(self) -> Optional[Tuple[str, str]]:
+        """Return and clear the (username, password) pair that authenticated
+        during identification. ``select_script`` consumes these so the
+        inventory script starts with the credential we already know
+        works. Returns ``None`` when identification did not succeed via
+        SSH (e.g. Telnet-only Nokia 1830 path)."""
+        creds = self._identified_credentials
+        self._identified_credentials = None
+        return creds
+
     # SSH-level credentials used for the first stage of the Nokia 1830 two-stage
     # login. The 1830 SSH server only accepts the "cli" account; once SSH is
     # authenticated, the device drops into its own CLI login that prompts for
@@ -414,6 +452,7 @@ class DeviceIdentifier:
     # parser keys on; other Nokia gear uses `show chassis | match ...`.
     _IDENT_COMMANDS = (
         "show chassis | match (Type) pre-lines 1 expression",
+        "show general system-identification",
         "show general detail",
         "show shelf product",
     )
@@ -459,6 +498,28 @@ class DeviceIdentifier:
             "device_type": "6500",
             "name_default": "Ciena 6500 OPTICAL",
         },
+        # Nokia PSIM (1830 PSI-M shelf) — must precede the generic PSI / 1830
+        # fingerprints. PSIM identifies via the "Nokia 1830 PSIM" platform
+        # string in `show general detail`'s System Description, OR via the
+        # "PSI-M" shelf type from `show shelf inventory`.
+        {
+            "regex": re.compile(
+                r"\bNokia\s+1830\s+PSIM\b|Shelf\s+type\s*:\s*PSI-M\b|^\s*\d+\s+PSI-M\b",
+                re.IGNORECASE | re.MULTILINE,
+            ),
+            "device_type": "psim",
+            "name_from_prompt": re.compile(r"([A-Za-z0-9._-]+)\s*[#>]\s*$"),
+            "name_default": "Nokia 1830 PSIM",
+        },
+        # Nokia PSI (1830 with PSI shelf) — MUST precede generic 1830 fingerprint
+        # so PSI devices (which report "Product: 1830" but have "Shelf type: PSI-4L/PSI-8L")
+        # are identified as PSI and use the PSI script, not the 1830 script.
+        {
+            "regex": re.compile(r"Shelf\s+type\s*:\s*PSI-(4L|8L)", re.IGNORECASE),
+            "device_type": "psi",
+            "name_from_prompt": re.compile(r"([A-Za-z0-9._-]+)\s*[#>]\s*$"),
+            "name_default": "Nokia PSI",
+        },
         # Generic 1830 fingerprint — matches platform string anywhere
         # (used when SSH banner sniffing happens before we ever get a
         # chance to log in via the dedicated 1830 telnet/cli paths).
@@ -483,6 +544,78 @@ class DeviceIdentifier:
             "name_default": "Nokia 7705 SAR-8",
         },
     )
+
+    # When the pre-auth SSH banner identifies the device, jump straight to
+    # the credential most likely to succeed. Values come from the encrypted
+    # defaults store via ``utils.credentials.get_default_credential_for_vendor``
+    # so the password is never duplicated in code — only the vendor key is.
+    # Devices defaulting to admin/admin aren't listed here because
+    # admin/admin is already the seed's first entry.
+    _BANNER_PREFERRED_VENDOR: Dict[str, str] = {
+        "rls":  "ciena",
+        "6500": "ciena",
+        "1830": "nokia-1830",
+    }
+
+    @classmethod
+    def _banner_preferred_creds(cls, device_type: str) -> Optional[Tuple[str, str]]:
+        """Return the encrypted-store credentials for a banner-identified
+        device, or ``None`` if defaults are disabled / the entry is missing."""
+        vendor = cls._BANNER_PREFERRED_VENDOR.get(device_type)
+        if not vendor:
+            return None
+        from utils.credentials import get_default_credential_for_vendor
+        return get_default_credential_for_vendor(vendor)
+
+    @staticmethod
+    def _peek_ssh_banner(ip: str, port: int = 22, timeout: float = 8.0) -> str:
+        """Open an SSH transport and read the pre-auth banner without
+        supplying real credentials.
+
+        SSH servers may send ``SSH_MSG_USERAUTH_BANNER`` (RFC 4252 §5.4)
+        during the auth phase but before any password is accepted. Many
+        Ciena / Nokia devices include the platform name in that banner
+        (e.g. ``Ciena 6500 Reconfigurable Line System``), which lets us
+        pick the right credentials on the first try instead of burning
+        rotation attempts on wrong ones.
+
+        Uses ``auth_none`` against a junk username — almost every device
+        rejects it with ``BadAuthenticationType``, but the banner is
+        delivered before that rejection. Failures are swallowed and
+        return an empty string so the regular rotation can proceed.
+        """
+        sock = None
+        transport = None
+        try:
+            sock = socket.create_connection((ip, port), timeout=timeout)
+            transport = paramiko.Transport(sock)
+            transport.banner_timeout = timeout
+            transport.start_client(timeout=timeout)
+            try:
+                transport.auth_none("probe")
+            except (paramiko.BadAuthenticationType, AuthenticationException):
+                # Expected — server rejected the probe but the banner
+                # was sent in the same exchange and is now cached on the
+                # transport.
+                pass
+            banner = transport.get_banner() or ""
+            if isinstance(banner, bytes):
+                banner = banner.decode("utf-8", errors="replace")
+            return banner.strip()
+        except Exception as e:
+            logging.debug(f"[BANNER] Peek failed for {ip}: {e}")
+            return ""
+        finally:
+            try:
+                if transport is not None:
+                    transport.close()
+            except Exception:
+                pass
+            try:
+                if sock is not None:
+                    sock.close()
+            except Exception:
+                pass
 
     @classmethod
     def _match_fingerprints(cls, text: str) -> Tuple[Optional[str], Optional[str]]:
@@ -624,7 +757,7 @@ class DeviceIdentifier:
         transport = paramiko.Transport(sock)
         try:
             transport.start_client(timeout=config.SSH_CONNECT_TIMEOUT)
-        except Exception:
+        except (paramiko.SSHException, OSError):
             sock.close()
             raise
 
@@ -647,24 +780,18 @@ class DeviceIdentifier:
             # already-handshaken Transport we built above; we never call
             # .connect() on host_key_client, so this is safe.
             host_key_client._transport = transport
-            try:
-                host_key_client.load_host_keys(str(get_known_hosts_path()))
-            except Exception:
-                pass
+            safe_load_host_keys(host_key_client, str(get_known_hosts_path()))
             try:
                 policy.missing_host_key(host_key_client, ip, remote_key)
                 # AutoAddPolicy mutates host_key_client.get_host_keys() in
                 # memory but only persists if .save_host_keys() is called.
-                try:
-                    host_key_client.save_host_keys(str(get_known_hosts_path()))
-                except Exception as save_err:
-                    logging.debug(f"[1830] Could not persist known_hosts: {save_err}")
+                safe_save_host_keys(host_key_client, str(get_known_hosts_path()))
             except Exception as he:
                 transport.close()
                 raise paramiko.SSHException(f"Host key check failed for {ip}: {he}")
         except paramiko.SSHException:
             raise
-        except Exception as e:
+        except (OSError, ValueError, KeyError) as e:
             logging.debug(f"[1830] Host-key verification skipped: {e}")
 
         last_err: Optional[Exception] = None
@@ -748,10 +875,7 @@ class DeviceIdentifier:
         # code can treat it the same as a normally-connected client.
         client = paramiko.SSHClient()
         client.load_system_host_keys()
-        try:
-            client.load_host_keys(str(get_known_hosts_path()))
-        except Exception:
-            pass
+        safe_load_host_keys(client, str(get_known_hosts_path()))
         client._transport = transport
         return client
 
@@ -789,7 +913,7 @@ class DeviceIdentifier:
                 try:
                     ssh_client = paramiko.SSHClient()
                     ssh_client.load_system_host_keys()
-                    ssh_client.load_host_keys(_kh)
+                    safe_load_host_keys(ssh_client, _kh)
                     ssh_client.set_missing_host_key_policy(get_host_key_policy())
                     ssh_client.connect(
                         ip, username=username, password=ssh_pw,
@@ -802,7 +926,7 @@ class DeviceIdentifier:
                     last_auth_err = ae
                     try:
                         ssh_client.close()
-                    except Exception:
+                    except (OSError, paramiko.SSHException):
                         pass
                     ssh_client = None
                     continue
@@ -819,10 +943,7 @@ class DeviceIdentifier:
 
         try:
             AuthLockout.register_success(ip)
-            try:
-                ssh_client.save_host_keys(_kh)
-            except Exception:
-                pass
+            safe_save_host_keys(ssh_client, _kh)
 
             queue.put(f"Connected to {ip} via SSH ({username})\n")
             session = ssh_client.invoke_shell()
@@ -903,6 +1024,7 @@ class DeviceIdentifier:
                     # Keep the SSH transport alive for paramiko-based scripts
                     # (SAR, IXR, Smartoptics DCP) so they can skip re-login.
                     # 1830 scripts use Telnet/spawn so they cannot reuse it.
+                    self._identified_credentials = (username, password)
                     if dt_fp.lower() != "1830":
                         _keep_client = True
                         self._identified_client = ssh_client
@@ -933,6 +1055,7 @@ class DeviceIdentifier:
                         f"type={dt_fp!r} name={dn_fp!r}"
                     )
                     queue.put(f"[IDENTIFY] {dn_fp} ({dt_fp}) at {ip}\n")
+                    self._identified_credentials = (username, password)
                     if dt_fp.lower() != "1830":
                         _keep_client = True
                         self._identified_client = ssh_client
@@ -940,6 +1063,7 @@ class DeviceIdentifier:
 
                 device_type, device_name = self.parse_device_info(output, queue)
                 if device_type:
+                    self._identified_credentials = (username, password)
                     if device_type.lower() != "1830":
                         _keep_client = True
                         self._identified_client = ssh_client
@@ -956,7 +1080,7 @@ class DeviceIdentifier:
             if session is not None:
                 try:
                     session.close()
-                except Exception:
+                except (OSError, paramiko.SSHException):
                     pass
             # Close the SSH transport only when identification failed or the device
             # is a Nokia 1830 (whose scripts use Telnet/spawn, not paramiko).
@@ -965,7 +1089,7 @@ class DeviceIdentifier:
             if not _keep_client:
                 try:
                     ssh_client.close()
-                except Exception:
+                except (OSError, paramiko.SSHException):
                     pass
 
     def _identify_via_telnet_1830(self, ip: str, queue: Queue,
@@ -1072,10 +1196,21 @@ class DeviceIdentifier:
                 hostname = name_m.group(1) if name_m else "Nokia 1830"
                 system_desc = desc_m.group(1) if desc_m else ""
 
+                # Refine the device type based on the platform string in the
+                # system description so PSIM and PSI route to their dedicated
+                # scripts instead of the generic 1830 path.
+                if re.search(r"\bPSIM\b", system_desc, re.IGNORECASE):
+                    refined_type = "psim"
+                elif re.search(r"\bPSI\b", system_desc, re.IGNORECASE):
+                    refined_type = "psi"
+                else:
+                    refined_type = "1830"
+
                 logging.info(
-                    f"[1830-TELNET] Identified {ip}: name={hostname!r} desc={system_desc!r}"
+                    f"[1830-TELNET] Identified {ip}: name={hostname!r} "
+                    f"desc={system_desc!r} -> type={refined_type}"
                 )
-                queue.put(f"[1830-TELNET] {hostname} — {system_desc}\n")
+                queue.put(f"[1830-TELNET] {hostname} — {system_desc} ({refined_type})\n")
 
                 # Auto-allowlist for the script run that will follow.
                 if not is_telnet_allowed(ip):
@@ -1089,13 +1224,13 @@ class DeviceIdentifier:
                             f"[1830-TELNET] Could not auto-allowlist {ip}: {ae}"
                         )
 
-                return "1830", hostname
+                return refined_type, hostname
 
             except TelnetPolicyError as pe:
                 # bypass_policy=True should prevent this, but be defensive
                 logging.debug(f"[1830-TELNET] Policy refused probe for {ip}: {pe}")
                 return None, None
-            except Exception as e:
+            except (OSError, EOFError, socket.timeout) as e:
                 logging.info(
                     f"[1830-TELNET] Probe failed for {ip} ({u}): {friendly_error(e)}"
                 )
@@ -1105,7 +1240,7 @@ class DeviceIdentifier:
             finally:
                 if tn is not None:
                     try: tn.close()
-                    except Exception: pass
+                    except OSError: pass
 
         return None, None
 
@@ -1136,8 +1271,9 @@ class DeviceIdentifier:
                 worker) is expected to park this IP for a main-thread
                 credential prompt and retry.
         """
-        # Clear any client kept from a previous call on this instance.
+        # Clear any client / credentials kept from a previous call.
         self._identified_client = None
+        self._identified_credentials = None
 
         if explicit_credentials and explicit_credentials[0]:
             username, password = explicit_credentials
@@ -1211,7 +1347,7 @@ class DeviceIdentifier:
                 return dt_fp, dn_fp
 
             transport.close()
-        except Exception as e:
+        except (OSError, paramiko.SSHException) as e:
             logging.warning(f"[IDENTIFY] SSH banner scan failed for {ip}: {e}")
             queue.put(f"[WARNING] SSH banner scan failed for {ip}: {friendly_error(e)}. Proceeding with login...\n")
 
@@ -1228,7 +1364,41 @@ class DeviceIdentifier:
                 return None, None
 
             current_user, current_pass = username, password
-            tried_defaults = False
+
+            # Banner-driven credential preference. Peek the SSH pre-auth
+            # banner; if it self-identifies the device family, override
+            # the first credential we try so we don't waste rotation
+            # attempts (and lockout budget) on the wrong account. Falls
+            # back silently when no banner is sent or no fingerprint
+            # matches — the regular rotation handles that case.
+            banner_identified = False
+            banner_label = ""
+            banner = self._peek_ssh_banner(ip)
+            if banner:
+                logging.debug(f"[BANNER] {ip}: {banner[:300]!r}")
+                bdev_type, bdev_name = self._match_fingerprints(banner)
+                if bdev_type:
+                    banner_identified = True
+                    banner_label = bdev_name or bdev_type
+                    preferred = self._banner_preferred_creds(bdev_type)
+                    if preferred and preferred != (current_user, current_pass):
+                        logging.info(
+                            f"[BANNER] {ip} self-identifies as {banner_label} — "
+                            f"trying {preferred[0]} first"
+                        )
+                        queue.put(
+                            f"[BANNER] {ip} looks like {banner_label}; "
+                            f"trying {preferred[0]} credentials first\n"
+                        )
+                        current_user, current_pass = preferred
+
+            # When the banner authoritatively identifies the device, skip
+            # the generic default-credential rotation on auth failure: the
+            # other defaults (admin/admin against an RLS, cli/admin against
+            # a 6500, etc.) cannot succeed and only burn lockout budget on
+            # the device. Jump straight to the user prompt instead.
+            tried_defaults = bool(banner_identified)
+            tried_defaults_logged_banner = False
             ssh_failures_logged = 0  # so we can refund them if Telnet is going to be tried
             # Hard cap: primary + N defaults + 1 user prompt. Bound the loop
             # so a misconfigured device can't spin forever.
@@ -1276,13 +1446,24 @@ class DeviceIdentifier:
                         f"[IDENTIFY] SSH transport error for {ip} (attempt {attempt + 1}): {se}"
                     )
                     queue.put(f"SSH error for {ip}: {friendly_error(se)} — trying next credential\n")
-                except Exception as conn_err:
+                except (OSError, socket.timeout) as conn_err:
                     # Genuine network error (DNS, refused, timeout). No point
                     # cycling credentials — re-raise to the outer handler.
                     logging.warning(f"[IDENTIFY] SSH connect error for {ip}: {conn_err}")
                     queue.put(f"SSH connect error for {ip}: {friendly_error(conn_err)}\n")
                     raise
 
+                if banner_identified and not tried_defaults_logged_banner:
+                    queue.put(
+                        f"[BANNER] {ip} was identified as {banner_label}; "
+                        f"skipping generic default-credential rotation and "
+                        f"requesting credentials directly.\n"
+                    )
+                    logging.info(
+                        f"[BANNER] {ip}: banner-identified as {banner_label}; "
+                        f"bypassing default-credential rotation"
+                    )
+                    tried_defaults_logged_banner = True
                 next_user, next_pass = handle_credential_failure(
                     ip, queue, tried_defaults=tried_defaults
                 )
@@ -1311,7 +1492,7 @@ class DeviceIdentifier:
             raise
         except AuthenticationException:
             queue.put(f"SSH authentication failed for {ip}; identification could not complete.\n")
-        except Exception as e:
+        except (OSError, socket.timeout, paramiko.SSHException) as e:
             logging.warning(f"[IDENTIFY] SSH error for {ip}: {e}")
             queue.put(f"SSH connection failed for {ip}: {friendly_error(e)}\n")
 
@@ -1328,7 +1509,7 @@ class DeviceIdentifier:
             )
             if dt:
                 return dt, dn
-        except Exception as e:
+        except (OSError, EOFError) as e:
             logging.debug(f"[IDENTIFY] 1830 Telnet probe raised for {ip}: {e}")
 
         return None, None
@@ -1348,11 +1529,50 @@ class DeviceIdentifier:
         try:
             type_match = re.search(r"Type\s+:\s+(.+)", output)
             name_match = re.search(r"Name\s+:\s+(.+)", output)
-            product_match = re.search(r"Product\s+:\s+(\d+)", output)
+            product_match = re.search(r"Product\s+:\s+(\S+)", output)
             product_name_match = re.search(r"Name:\s+(.+)", output)
+            shelf_type_match = re.search(r"Shelf\s+type\s*:\s*(.+)", output, re.IGNORECASE)
+            prompt_name_match = re.search(
+                r"^\s*([A-Za-z0-9._-]+)#\s*show\s+general\s+system-identification",
+                output,
+                re.IGNORECASE | re.MULTILINE,
+            )
 
-            device_type = type_match.group(1).strip() if type_match else (product_match.group(1).strip() if product_match else None)
-            device_name = name_match.group(1).strip() if name_match else (product_name_match.group(1).strip() if product_name_match else None)
+            shelf_type = shelf_type_match.group(1).strip() if shelf_type_match else ""
+            product = product_match.group(1).strip() if product_match else None
+            # PSIM detection: System Description, shelf type "PSI-M", or an
+            # inventory row leading with "<n> PSI-M".
+            psim_hit = (
+                re.search(r"\bNokia\s+1830\s+PSIM\b", output, re.IGNORECASE)
+                or re.search(r"\bPSI-M\b", shelf_type, re.IGNORECASE)
+                or re.search(r"^\s*\d+\s+PSI-M\b", output, re.MULTILINE | re.IGNORECASE)
+            )
+
+            if psim_hit:
+                device_type = "psim"
+                queue.put(f"[IDENTIFY] PSIM shelf detected\n")
+                logging.info("[IDENTIFY] PSIM shelf detected")
+            elif re.search(r"\bPSI-(4L|8L)\b", shelf_type, re.IGNORECASE):
+                device_type = "psi"
+                queue.put(f"[IDENTIFY] PSI shelf type detected: {shelf_type}\n")
+                logging.info(f"[IDENTIFY] PSI shelf type detected: {shelf_type}")
+            elif type_match:
+                device_type = type_match.group(1).strip()
+            else:
+                device_type = product
+
+            if name_match:
+                device_name = name_match.group(1).strip()
+            elif product_name_match:
+                device_name = product_name_match.group(1).strip()
+            elif prompt_name_match:
+                device_name = prompt_name_match.group(1).strip()
+            elif device_type == "psim":
+                device_name = "Nokia 1830 PSIM"
+            elif device_type == "psi":
+                device_name = "Nokia PSI"
+            else:
+                device_name = None
 
             if device_type:
                 queue.put(f"Parsed Device Info:\n - Type: {device_type}\n - Name: {device_name}\n")
@@ -1362,7 +1582,7 @@ class DeviceIdentifier:
                 queue.put(f"[WARNING] Could not identify device type from response. Device may be unsupported, or CLI output format is unexpected.\n")
             return device_type, device_name
 
-        except Exception as e:
+        except (TypeError, re.error) as e:
             logging.exception("[PARSE] Error parsing device info")
             queue.put(f"Error parsing device info: {friendly_error(e)}\n")
             return None, None
@@ -1379,6 +1599,8 @@ class ScriptSelector:
         '1830': 'scripts.Nokia_1830',
         '1830 psi': 'scripts.Nokia_PSI',
         'psi': 'scripts.Nokia_PSI',
+        '1830 psim': 'scripts.Nokia_PSIM',
+        'psim': 'scripts.Nokia_PSIM',
         '6500': 'scripts.Ciena_6500',
         'ciena 6500 optical': 'scripts.Ciena_6500',
         'ciena 6500 rls': 'scripts.Ciena_RLS',
@@ -1396,7 +1618,7 @@ class ScriptSelector:
         """Return True if the device type is supported by an available script."""
         return normalized_type in self._device_type_to_script
 
-    def select_script(self, device_type: Optional[str], ip_address: str, connection_type: str = 'ssh', stop_callback: Optional[Callable[[], bool]] = None) -> Optional[BaseScript]:
+    def select_script(self, device_type: Optional[str], ip_address: str, connection_type: str = 'ssh', stop_callback: Optional[Callable[[], bool]] = None, credentials: Optional[Tuple[str, str]] = None) -> Optional[BaseScript]:
         """Return an instantiated script for *device_type* at *ip_address*, or None if unknown."""
         logging.debug(f"[SCRIPT SELECTOR] Selecting script for IP: {ip_address}, Device Type: {device_type}, Connection: {connection_type}")
 
@@ -1426,7 +1648,19 @@ class ScriptSelector:
             script_class = module.Script
 
             logging.info(f"[SCRIPT SELECTOR] Matched '{normalized_type}' to script: {script_class.__name__}")
-            _username, _password = get_credentials()
+            # Prefer credentials passed in by the caller (the ones that
+            # actually authenticated during identification). Falls back
+            # to the user's saved primary credentials when none were
+            # provided (e.g. parked-IP retry after manual entry, or a
+            # Telnet identification path that didn't capture creds).
+            if credentials and credentials[0] and credentials[1]:
+                _username, _password = credentials
+                logging.info(
+                    f"[SCRIPT SELECTOR] Reusing identification credentials "
+                    f"({_username}) for {ip_address}"
+                )
+            else:
+                _username, _password = get_credentials()
             return script_class(
                 connection_type=connection_type,
                 ip_address=ip_address,
@@ -1440,6 +1674,6 @@ class ScriptSelector:
         except ImportError as e:
             logging.exception(f"[SCRIPT SELECTOR] Missing optional dependency for device '{device_type}' at IP {ip_address}")
             return None
-        except Exception as e:
+        except (AttributeError, TypeError, ValueError) as e:
             logging.exception(f"[SCRIPT SELECTOR] Failed to select script for device '{device_type}' at IP {ip_address}")
             return None

@@ -45,7 +45,27 @@ def extract_workbook_metadata(file_path: str) -> Dict[str, str]:
         return s
 
     try:
-        device_sheets = [n for n in wb.sheetnames if "summary" not in n.lower()]
+        # A "device sheet" is any sheet that isn't Summary/BOM and that has a
+        # plausible source value at F5 (IP or COM port). Picking the first
+        # arbitrary sheet would otherwise grab BOM (whose C5-D7 cells hold
+        # column headers like "Equipment Description") and pollute the
+        # pre-fill values.
+        def _looks_like_device_sheet(sheet) -> bool:
+            try:
+                src = _clean(sheet["F5"].value)
+            except Exception:
+                return False
+            if not src:
+                return False
+            return True
+
+        ignored = {"summary", "bom"}
+        candidate_sheets = [
+            n for n in wb.sheetnames if n.strip().lower() not in ignored
+        ]
+        device_sheets = [
+            n for n in candidate_sheets if _looks_like_device_sheet(wb[n])
+        ]
         summary_sheets = [n for n in wb.sheetnames if "summary" in n.lower()]
 
         # Strategy 1: per-device sheet headers (C5/C6/C7/D7).

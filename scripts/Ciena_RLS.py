@@ -9,7 +9,7 @@ import paramiko
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache, NEEDS_CREDENTIALS_SENTINEL
-from utils.helpers import ensure_host_key_known, get_known_hosts_path
+from utils.helpers import ensure_host_key_known, get_known_hosts_path, safe_load_host_keys, safe_save_host_keys
 from utils.telnet import Telnet
 
 try:
@@ -186,10 +186,7 @@ class Script(BaseScript):
                 )
 
             client = paramiko.SSHClient()
-            try:
-                client.load_host_keys(kh_path)
-            except (FileNotFoundError, IOError):
-                pass
+            safe_load_host_keys(client, kh_path)
             client.set_missing_host_key_policy(paramiko.RejectPolicy())
 
             logging.info(

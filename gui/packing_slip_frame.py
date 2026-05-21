@@ -53,24 +53,27 @@ class PackingSlipFrame(ttk.Frame):
 
         tk.Button(file_frame, text="Browse", command=self.upload_file).pack(side=tk.LEFT, padx=5)
 
-        info_frame = ttk.LabelFrame(self, text="Project Information")
+        # Project Information is pulled from the uploaded workbook rather
+        # than entered by hand. Customer / Project come from the Summary
+        # B7 / D7 (inventory layout) or the first device tab's C5 / C6
+        # (packing-slip layout); PO / SO come from device tab C7 / D7 and
+        # fall back to "TBD" when absent.
+        info_frame = ttk.LabelFrame(self, text="Project Information (read from file)")
         info_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        tk.Label(info_frame, text="Customer:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
-        self.ps_customer_entry = tk.Entry(info_frame, width=40)
-        self.ps_customer_entry.grid(row=0, column=1, padx=5, pady=5)
-
-        tk.Label(info_frame, text="Project:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
-        self.ps_project_entry = tk.Entry(info_frame, width=40)
-        self.ps_project_entry.grid(row=1, column=1, padx=5, pady=5)
-
-        tk.Label(info_frame, text="Purchase Order:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
-        self.ps_po_entry = tk.Entry(info_frame, width=40)
-        self.ps_po_entry.grid(row=2, column=1, padx=5, pady=5)
-
-        tk.Label(info_frame, text="Sales Order:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
-        self.ps_so_entry = tk.Entry(info_frame, width=40)
-        self.ps_so_entry.grid(row=3, column=1, padx=5, pady=5)
+        self._info_value_labels: Dict[str, tk.Label] = {}
+        for row, label_text in enumerate((
+            "Customer:", "Project:", "Purchase Order:", "Sales Order:",
+        )):
+            tk.Label(info_frame, text=label_text).grid(
+                row=row, column=0, sticky="w", padx=5, pady=3
+            )
+            val_label = tk.Label(
+                info_frame, text="—", foreground="gray", anchor="w", width=40,
+            )
+            val_label.grid(row=row, column=1, sticky="w", padx=5, pady=3)
+            key = label_text.rstrip(":").lower().split()[-1]  # customer / project / order
+            self._info_value_labels[label_text] = val_label
 
         ps_control_frame = ttk.Frame(self)
         ps_control_frame.pack(fill=tk.X, pady=10)
@@ -114,6 +117,14 @@ class PackingSlipFrame(ttk.Frame):
             return
         file_path = str(resolved)
 
+        # Reset any stale project info from a prior upload — generate
+        # will only run if the new upload supplies Customer + Project.
+        self._last_customer = ""
+        self._last_project = ""
+        self._last_customer_po = ""
+        self._last_sales_order = ""
+        self._refresh_info_display()
+
         try:
             self.uploaded_file_path = file_path
             if file_path.lower().endswith(".csv"):
@@ -124,8 +135,8 @@ class PackingSlipFrame(ttk.Frame):
             elif file_path.lower().endswith((".xlsx", ".xls")):
                 xl = pd.ExcelFile(file_path)
                 sheet_names = xl.sheet_names
-                has_summary = any("summary" in s.lower() for s in sheet_names)
-                device_sheets = [s for s in sheet_names if "summary" not in s.lower()]
+                has_summary = any("summary" in str(s).lower() for s in sheet_names)
+                device_sheets = [s for s in sheet_names if "summary" not in str(s).lower()]
                 if len(sheet_names) > 1 and device_sheets:
                     # Multi-sheet file: each non-summary sheet is one device.
                     # This handles both plain device-report files (no summary)
@@ -166,18 +177,27 @@ class PackingSlipFrame(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _try_populate_fields_from_file(self, file_path: str) -> None:
-        """Read Customer, Project, PO, and SO from a previously-generated
-        packing slip (or inventory report) workbook and pre-fill the form
-        fields so the user can review and edit before generating."""
+        """Extract Customer, Project, PO, and SO from the uploaded workbook
+        and store them on ``self._last_*`` so generation has values to pass
+        through. Also refreshes the read-only display labels.
+
+        Two source layouts are supported:
+
+        * **Inventory / BoM workbook** — Summary sheet at B7 / D7
+          (Customer / Project). PO / SO are not present on inventory
+          summaries; they fall back to "TBD".
+        * **Existing packing slip workbook** — first device sheet at
+          C5 / C6 (Customer / Project) plus C7 / D7 (PO / SO).
+        """
+        customer, project, po, so = "", "", "", ""
         try:
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-            customer, project, po, so = "", "", "", ""
 
             device_sheets = [n for n in wb.sheetnames if "summary" not in n.lower()]
             summary_sheets = [n for n in wb.sheetnames if "summary" in n.lower()]
 
             # Strategy 1: packing slip / device report format
-            # Header cells: C5 = Customer, C6 = Project, C7 = PO, C8 = SO
+            # Header cells: C5 = Customer, C6 = Project, C7 = PO, D7 = SO
             if device_sheets:
                 ws = wb[device_sheets[0]]
                 for coord, target in (
@@ -207,48 +227,80 @@ class PackingSlipFrame(ttk.Frame):
                     project = str(d7).strip()
 
             wb.close()
-
-            # Pre-fill each field; always overwrite so the latest file drives the values
-            for entry, value in (
-                (self.ps_customer_entry, customer),
-                (self.ps_project_entry, project),
-                (self.ps_po_entry, po or "TBD"),
-                (self.ps_so_entry, so or "TBD"),
-            ):
-                entry.delete(0, tk.END)
-                entry.insert(0, value)
-
         except Exception as e:
             logging.debug(f"Could not extract metadata from uploaded file: {e}")
+
+        # Stash extracted values for the generate / print steps.
+        self._last_customer = customer
+        self._last_project = project
+        self._last_customer_po = po or "TBD"
+        self._last_sales_order = so or "TBD"
+
+        # Refresh the read-only display.
+        self._refresh_info_display()
+
+    def _refresh_info_display(self) -> None:
+        """Update the read-only project-info labels to reflect what was
+        extracted from the upload. Missing values render in red so the
+        operator notices before clicking Generate."""
+        missing_fg = "#b00020"
+        present_fg = "black"
+        pairs = (
+            ("Customer:",       self._last_customer,    True),
+            ("Project:",        self._last_project,     True),
+            ("Purchase Order:", self._last_customer_po, False),
+            ("Sales Order:",    self._last_sales_order, False),
+        )
+        for label_text, value, is_required in pairs:
+            lbl = self._info_value_labels.get(label_text)
+            if lbl is None:
+                continue
+            if value and value != "TBD":
+                lbl.config(text=value, foreground=present_fg)
+            elif value == "TBD":
+                lbl.config(text="TBD", foreground="gray")
+            else:
+                lbl.config(
+                    text="[not found in file]",
+                    foreground=missing_fg if is_required else "gray",
+                )
 
     # ------------------------------------------------------------------
     # Packing slip generation
     # ------------------------------------------------------------------
 
     def generate_packing_slips_from_file(self) -> None:
-        """Validate inputs and generate packing slips from the uploaded file."""
+        """Validate inputs and generate packing slips from the uploaded file.
+
+        Customer / Project / PO / SO are no longer typed in — they're
+        extracted from the uploaded workbook at upload time and stashed on
+        ``self._last_*``. If Customer or Project couldn't be found, we
+        refuse to generate and tell the operator where to put them.
+        """
         if self.uploaded_file_data is None:
             messagebox.showwarning("No File", "Please upload a file first.")
             return
 
-        customer = self.ps_customer_entry.get().strip()
-        project = self.ps_project_entry.get().strip()
-        customer_po = self.ps_po_entry.get().strip() or "TBD"
-        sales_order = self.ps_so_entry.get().strip() or "TBD"
+        customer = self._last_customer
+        project = self._last_project
+        customer_po = self._last_customer_po or "TBD"
+        sales_order = self._last_sales_order or "TBD"
 
         if not all([customer, project]):
-            messagebox.showerror("Missing Info", "Please fill in Customer and Project fields.")
+            messagebox.showerror(
+                "Missing Info",
+                "Customer and Project could not be read from the uploaded "
+                "file.\n\n"
+                "Expected one of:\n"
+                "  • Inventory workbook → Summary sheet B7 / D7\n"
+                "  • Packing slip workbook → first device sheet C5 / C6\n\n"
+                "Fill those cells in and re-upload.",
+            )
             return
 
         self.ps_run_button.config(state=tk.DISABLED)
         self.ps_status_label.config(text="Status: Processing...")
         self.controller.root.update_idletasks()
-
-        # Store form values so the selection dialog can access them
-        self._last_customer = customer
-        self._last_project = project
-        self._last_customer_po = customer_po
-        self._last_sales_order = sales_order
 
         # Create temp directory with restricted permissions (owner only, no group/other access)
         # Use secure creation pattern: mkdir first, then restrict via chmod BEFORE any file ops
@@ -382,6 +434,82 @@ class PackingSlipFrame(ttk.Frame):
 
         dialog.wait_window()
 
+    @staticmethod
+    def _prune_summary_to_selected(wb, summary_sheet_names: List[str], selected_sheets: set) -> None:
+        """Rewrite each Summary sheet so its data rows only reference the
+        device sheets the user kept.
+
+        Summary layout (uniform with inventory Summary, set by
+        ``_format_summary_sheet`` with ``title='Packing Slip Summary'``):
+            row 7   B7 Customer value | D7 Project value | F7 Device Count
+            row 9   header — B # | C IP Address | D Device Name | E Asset Tag
+            row 10+ data rows — B/C/D/E
+
+        Device Name in column D equals the device sheet's title in the
+        current workbook builder; the cell's hyperlink also points at that
+        sheet. We use either signal to decide whether to keep the row.
+        Asset Tag values in column E are preserved on prune.
+        """
+        for name in summary_sheet_names:
+            if name not in wb.sheetnames:
+                continue
+            ws = wb[name]
+            max_row = ws.max_row or 10
+
+            kept_rows = []
+            for r in range(10, max_row + 1):
+                d_cell = ws.cell(r, 4)
+                d_value = d_cell.value
+                if d_value is None or str(d_value).strip() == "":
+                    continue
+                link_target = None
+                if d_cell.hyperlink is not None:
+                    # Internal links live in `.location` (e.g. "'Sheet'!A1");
+                    # external links use `.target`. Either is fine for matching.
+                    link_target = d_cell.hyperlink.location or d_cell.hyperlink.target
+                target_sheet = PackingSlipFrame._extract_sheet_from_link(link_target) if link_target else None
+                candidate = target_sheet or str(d_value)
+                if candidate in selected_sheets:
+                    kept_rows.append((
+                        ws.cell(r, 3).value,  # IP
+                        d_value,              # Device Name
+                        link_target,
+                        ws.cell(r, 5).value,  # Asset Tag (preserve)
+                    ))
+
+            # Clear old data rows in B/C/D/E.
+            for r in range(10, max_row + 1):
+                for c in (2, 3, 4, 5):
+                    cell = ws.cell(r, c)
+                    cell.value = None
+                    cell.hyperlink = None
+
+            for offset, (ip, dev_name, link, tag) in enumerate(kept_rows):
+                r = 10 + offset
+                ws.cell(r, 2).value = offset + 1   # # (sequence)
+                ws.cell(r, 3).value = ip
+                cell = ws.cell(r, 4)
+                cell.value = dev_name
+                if link:
+                    cell.hyperlink = "#" + link if not link.startswith("#") else link
+                    cell.style = "Hyperlink"
+                if tag is not None:
+                    ws.cell(r, 5).value = tag
+
+            ws["F7"] = len(kept_rows)
+
+    @staticmethod
+    def _extract_sheet_from_link(link: str) -> str | None:
+        """Parse a sheet name out of an internal hyperlink like ``'Sheet'!A1``."""
+        if not link:
+            return None
+        s = link[1:] if link.startswith("#") else link
+        if "!" in s:
+            s = s.split("!", 1)[0]
+        if s.startswith("'") and s.endswith("'"):
+            s = s[1:-1]
+        return s or None
+
     def _print_selected_sheets(self, source_path: str, selected_sheets: List[str], summary_sheets: List[str], mode: str = "consolidated") -> None:
         """Save selected sheets to a workbook and open it.
 
@@ -410,6 +538,11 @@ class PackingSlipFrame(ttk.Frame):
                 for name in list(wb_src.sheetnames):
                     if name not in sheets_to_keep:
                         del wb_src[name]
+
+                # Prune the Summary sheet to only list devices whose sheets
+                # survived the deletion above; otherwise it still lists every
+                # device from the source workbook.
+                PackingSlipFrame._prune_summary_to_selected(wb_src, summary_sheets, set(selected_sheets))
 
                 autosize_wb = self.controller.workbook_builder.autosize_workbook_columns
                 autosize_wb(wb_src)

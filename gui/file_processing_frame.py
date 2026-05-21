@@ -1,0 +1,63 @@
+"""
+gui/file_processing_frame.py - "File Processing" mode container.
+
+Hosts two sub-modes toggled by radio buttons (matching the rest of the
+app's mode selector pattern):
+* Raw Inventory — process manually captured CLI output files (RawFrame).
+* BoM          — add or refresh a Bill of Materials sheet on an inventory
+                 workbook (BomFrame).
+"""
+from typing import Any
+
+import tkinter as tk
+from tkinter import ttk
+
+from gui.raw_frame import RawFrame
+from gui.bom_frame import BomFrame
+from gui.bom_compare_frame import BomCompareFrame
+
+
+class FileProcessingFrame(ttk.Frame):
+    """Container for file-processing sub-modes (radio-button toggle)."""
+
+    def __init__(self, parent: tk.Widget, gui: Any) -> None:
+        super().__init__(parent)
+        self.gui = gui
+
+        self._sub_mode = tk.StringVar(value="raw_inventory")
+
+        sub_frame = ttk.LabelFrame(self, text="File Processing Mode")
+        sub_frame.pack(fill=tk.X, padx=5, pady=5)
+        tk.Radiobutton(
+            sub_frame, text="Raw Inventory", variable=self._sub_mode,
+            value="raw_inventory", command=self._switch,
+        ).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(
+            sub_frame, text="BoM", variable=self._sub_mode,
+            value="bom", command=self._switch,
+        ).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(
+            sub_frame, text="BoM Comparison", variable=self._sub_mode,
+            value="bom_compare", command=self._switch,
+        ).pack(side=tk.LEFT, padx=10)
+
+        self._content = ttk.Frame(self)
+        self._content.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+
+        self.raw_frame = RawFrame(self._content, gui)
+        self.bom_frame = BomFrame(self._content, gui)
+        self.bom_compare_frame = BomCompareFrame(self._content, gui)
+
+        self._switch()
+
+    def _switch(self) -> None:
+        self.raw_frame.pack_forget()
+        self.bom_frame.pack_forget()
+        self.bom_compare_frame.pack_forget()
+        mode = self._sub_mode.get()
+        if mode == "raw_inventory":
+            self.raw_frame.pack(fill=tk.BOTH, expand=True)
+        elif mode == "bom":
+            self.bom_frame.pack(fill=tk.BOTH, expand=True)
+        else:
+            self.bom_compare_frame.pack(fill=tk.BOTH, expand=True)

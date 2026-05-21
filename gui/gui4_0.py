@@ -30,15 +30,16 @@ from utils.helpers import (
     get_database_path,
     get_project_root,
     sanitize_filename_component,
-    scrub_password_widget,
 )
 import config
+from utils.update import Updater
 from gui.workbook_builder import WorkbookBuilder
 from gui.inventory_frame import InventoryFrame
 from gui.diagnostics_frame import DiagnosticsFrame
 from gui.packing_slip_frame import PackingSlipFrame
-from gui.raw_frame import RawFrame
+from gui.file_processing_frame import FileProcessingFrame
 from gui.provision_frame import ProvisionFrame
+from gui.software_upgrade_frame import SoftwareUpgradeFrame
 
 command_tracker = script_interface.CommandTracker()
 db_cache = script_interface.get_cache()
@@ -94,7 +95,8 @@ class InventoryGUI:
         self.current_script_instance = None
         self.current_mode = tk.StringVar(value="inventory")
         self.output_screen = None
-        self.raw_frame = None  # initialized in setup_gui
+        self.file_processing_frame = None  # initialized in setup_gui
+        self.raw_frame = None  # set when file_processing_frame is built; kept for back-compat
         self.failed_ips: Dict[str, str] = {}
         # Devices whose default credentials all failed are parked here so the
         # main run keeps going. After the regular task queue drains, the
@@ -141,18 +143,28 @@ class InventoryGUI:
         self.output_screen.insert(tk.END, "Select mode above to begin\n")
 
     def setup_gui(self):
-        self.root.title("Automatied Toolkit for Lightriver Asset & Systems (ATLAS)")
+        app_version = getattr(config, "APP_VERSION", "")
+        title = "Automatied Toolkit for Lightriver Asset & Systems (ATLAS)"
+        if app_version:
+            title += f"  v{app_version}"
+        self.root.title(title)
         self.root.geometry('900x750')
-        
-        # Top frame: Mode selector
+
+        # Top frame: Mode selector with a Help menubutton anchored to the right.
         mode_frame = ttk.LabelFrame(self.root, text="Select Mode")
         mode_frame.pack(fill=tk.X, padx=10, pady=5)
-        
+
+        # Help button (right-aligned). Built first so pack(side=tk.RIGHT)
+        # lands flush to the right edge; the mode radio buttons fill in
+        # from the left afterward.
+        self._build_help_button(mode_frame)
+
         tk.Radiobutton(mode_frame, text="Inventory", variable=self.current_mode, value="inventory", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(mode_frame, text="Diagnostics", variable=self.current_mode, value="tds", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(mode_frame, text="Packing Slip Generator", variable=self.current_mode, value="packing_slip", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
-        tk.Radiobutton(mode_frame, text="Raw File Processing", variable=self.current_mode, value="raw", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="File Processing", variable=self.current_mode, value="raw", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(mode_frame, text="Provisioning", variable=self.current_mode, value="provision", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Software Upgrades", variable=self.current_mode, value="software_upgrade", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         
         # Container frame for all mode frames
         self.content_frame = ttk.Frame(self.root)
@@ -162,11 +174,272 @@ class InventoryGUI:
         self.inventory_frame = InventoryFrame(self.content_frame, self)
         self.tds_frame = DiagnosticsFrame(self.content_frame, self)
         self.packing_slip_frame = PackingSlipFrame(self.content_frame, self)
-        self.raw_frame = RawFrame(self.content_frame, self)
+        self.file_processing_frame = FileProcessingFrame(self.content_frame, self)
+        self.raw_frame = self.file_processing_frame.raw_frame
         self.provision_frame = ProvisionFrame(self.content_frame, self)
-        
+        self.software_upgrade_frame = SoftwareUpgradeFrame(self.content_frame, self)
+
         # Show the initial frame
         self.switch_mode()
+
+        # If the boot probe (main.py.check_updates) flagged an update,
+        # surface the same confirmation dialog the Help menu uses — but
+        # only after Tk has rendered the main window, so the operator
+        # sees ATLAS load before being interrupted.
+        if self.update_available:
+            self.root.after(750, self._on_check_for_updates_clicked)
+
+    # ------------------------------------------------------------------
+    # Menu bar / Help
+    # ------------------------------------------------------------------
+
+    # Visual markers used on the Help menubutton when an update is pending.
+    _UPDATE_AVAILABLE_CASCADE_LABEL = "● Help"
+    _UPDATE_AVAILABLE_ITEM_LABEL = "● Update Available — Install Now..."
+    _DEFAULT_CASCADE_LABEL = "Help"
+    _DEFAULT_ITEM_LABEL = "Check for Updates..."
+
+    def _build_help_button(self, parent) -> None:
+        """Help dropdown anchored to the right of the *parent* (mode-selector
+        row). Replaces the older top-of-window menubar so Help can sit on
+        the right side instead of forcing flush-left placement.
+
+        If ``self.update_available`` is True (set by main.py's boot probe),
+        the button label is prefixed with a bullet and the first dropdown
+        item is relabeled so the operator can see at a glance that an
+        update is pending without having to open the dropdown first.
+        """
+        initial_label = (
+            self._UPDATE_AVAILABLE_CASCADE_LABEL
+            if self.update_available else self._DEFAULT_CASCADE_LABEL
+        )
+        self._help_button_text = tk.StringVar(value=initial_label)
+        self._help_button = ttk.Menubutton(
+            parent, textvariable=self._help_button_text, direction="below",
+        )
+
+        help_menu = tk.Menu(self._help_button, tearoff=0)
+        self._help_menu = help_menu
+        self._update_menu_index = 0
+
+        item_label = (
+            self._UPDATE_AVAILABLE_ITEM_LABEL
+            if self.update_available else self._DEFAULT_ITEM_LABEL
+        )
+        help_menu.add_command(
+            label=item_label,
+            command=self._on_check_for_updates_clicked,
+        )
+        help_menu.add_separator()
+        help_menu.add_command(label="About ATLAS", command=self._show_about)
+
+        self._help_button["menu"] = help_menu
+        # Pack to the right edge of the row; mode radio buttons fill in
+        # from the left after this returns.
+        self._help_button.pack(side=tk.RIGHT, padx=10)
+
+    def _set_update_indicator(self, available: bool) -> None:
+        """Toggle the bullet markers on the Help button label and dropdown
+        first item to match whether an update is pending. Safe to call
+        from the main thread at any time after ``_build_help_button``."""
+        try:
+            self._help_button_text.set(
+                self._UPDATE_AVAILABLE_CASCADE_LABEL if available
+                else self._DEFAULT_CASCADE_LABEL
+            )
+            item_label = (
+                self._UPDATE_AVAILABLE_ITEM_LABEL
+                if available else self._DEFAULT_ITEM_LABEL
+            )
+            self._help_menu.entryconfig(self._update_menu_index, label=item_label)
+        except (tk.TclError, AttributeError):
+            logging.debug("Could not toggle update indicator", exc_info=True)
+
+    def _set_update_menu_state(self, enabled: bool) -> None:
+        try:
+            state = tk.NORMAL if enabled else tk.DISABLED
+            self._help_menu.entryconfig(self._update_menu_index, state=state)
+        except (tk.TclError, AttributeError):
+            pass
+
+    def _on_check_for_updates_clicked(self) -> None:
+        """Run an out-of-band update check from the Help menu.
+
+        Dispatches the network probe to the worker pool so a slow GitHub
+        response doesn't freeze Tk. The result is marshalled back to the
+        main thread via ``root.after`` before any dialog is shown.
+        """
+        self._set_update_menu_state(False)
+        if self.output_screen is not None:
+            self.output_screen.insert(tk.END, "Checking for updates…\n")
+            self.output_screen.see(tk.END)
+
+        def _probe() -> Tuple[Optional[Updater], bool, Optional[str]]:
+            try:
+                if getattr(sys, "frozen", False):
+                    updater = Updater()
+                else:
+                    updater = Updater(get_project_root())
+            except Exception as exc:
+                return None, False, friendly_error(exc)
+            try:
+                available = updater.check_for_updates()
+                return updater, available, None
+            except Exception as exc:
+                return updater, False, friendly_error(exc)
+
+        def _on_result(fut) -> None:
+            updater, available, err = fut.result()
+            self._set_update_menu_state(True)
+            if err:
+                self.output_screen.insert(tk.END, f"Update check failed: {err}\n")
+                self.output_screen.see(tk.END)
+                messagebox.showerror("Update Check Failed", err)
+                return
+            if not available:
+                # Manual re-check found nothing newer — drop the badge if it
+                # was up from a stale boot-time probe.
+                self.update_available = False
+                self._set_update_indicator(False)
+                self.output_screen.insert(tk.END, "You're already on the latest version.\n")
+                self.output_screen.see(tk.END)
+                messagebox.showinfo(
+                    "No Updates",
+                    f"ATLAS v{getattr(config, 'APP_VERSION', '?')} is up to date.",
+                )
+                return
+            # Updates available — surface the badge if the boot probe missed
+            # it (e.g., release was published after launch) and run the prompt.
+            self.update_available = True
+            self._set_update_indicator(True)
+            self._apply_update_with_prompt(updater)
+
+        self._worker_pool.submit(_probe).add_done_callback(
+            lambda fut: self.root.after(0, _on_result, fut)
+        )
+
+    def _apply_update_with_prompt(self, updater: Updater) -> None:
+        """Show the maintainer-supplied confirmation message in a Tk dialog,
+        then download + launch the installer on the worker pool."""
+        # Hook the Updater's confirmation callback into a Tk yes/no dialog.
+        def _ask(message: str) -> bool:
+            return messagebox.askyesno("Update Available", message)
+
+        updater.set_confirmation_callback(_ask)
+        self._set_update_menu_state(False)
+        self.output_screen.insert(tk.END, "Preparing update…\n")
+        self.output_screen.see(tk.END)
+
+        def _apply() -> Tuple[bool, str, Updater]:
+            ok, msg = updater.apply_update()
+            return ok, msg, updater
+
+        def _on_apply(fut) -> None:
+            ok, msg, up = fut.result()
+            self._set_update_menu_state(True)
+            self.output_screen.insert(tk.END, msg + "\n")
+            self.output_screen.see(tk.END)
+            if ok and up.installed_mode:
+                # In installed mode the installer is already detaching and
+                # the only safe thing for ATLAS to do is exit so file locks
+                # on ATLAS.exe / DLLs are released.
+                messagebox.showinfo(
+                    "Updating",
+                    "The installer is starting. ATLAS will now close and "
+                    "re-launch automatically when the install completes.",
+                )
+                up.restart_program()
+            elif ok:
+                messagebox.showinfo("Update Applied", msg)
+            else:
+                messagebox.showwarning("Update Not Applied", msg)
+
+        self._worker_pool.submit(_apply).add_done_callback(
+            lambda fut: self.root.after(0, _on_apply, fut)
+        )
+
+    def _show_about(self) -> None:
+        version = getattr(config, "APP_VERSION", "(unknown)")
+        owner = getattr(config, "GITHUB_OWNER", "")
+        repo  = getattr(config, "GITHUB_REPO", "")
+        repo_str = f"{owner}/{repo}" if owner and repo else "(unconfigured)"
+        manifesto = (
+            "Let me ask you a question.\n\n"
+            "Is an engineer not entitled to the hours of their own day?\n\n"
+            "\"No,\" says the spreadsheet, \"your hours belong to rows and columns.\"\n\n"
+            "\"No,\" says the terminal, \"your patience belongs to prompts and passwords.\"\n\n"
+            "\"No,\" says the old way, \"your attention belongs to every serial "
+            "number buried in the noise.\"\n\n"
+            "I rejected those answers.\n\n"
+            "I chose something better.\n\n"
+            "I chose to build the future.\n\n"
+            "I chose ATLAS.\n\n"
+            "A tool where the engineer is not chained to command repetition.\n\n"
+            "Where the technician is not buried beneath mismatched reports.\n\n"
+            "Where discovery, documentation, and deployment are no longer "
+            "scattered across windows, notes, and weary hands.\n\n"
+            "A system that reaches into the network, finds what is alive, "
+            "knows what it is, gathers what it carries, and turns the noise "
+            "of the factory into records that can be trusted.\n\n"
+            "I am not here to ask whether the work must be done.\n\n"
+            "I am here to ask why it must still be done by hand.\n\n"
+            "No more endless CLI sessions.\n\n"
+            "No more copy, paste, format, repeat.\n\n"
+            "No more losing the day to work that machines were born to carry.\n\n"
+            "With the click of a button, the tedious becomes automatic.\n\n"
+            "The scattered becomes structured.\n\n"
+            "The manual becomes memory.\n\n"
+            "And with the sweat once spent on repetition, we build something greater.\n\n"
+            "A faster factory.\n\n"
+            "A cleaner record.\n\n"
+            "A network understood.\n\n"
+            "This is ATLAS.\n\n"
+            "Not merely a program.\n\n"
+            "A refusal to waste human effort on work beneath human attention."
+        )
+        footer = (
+            f"\n\n— — —\n"
+            f"Automated Toolkit for Lightriver Asset & Systems\n"
+            f"Version: {version}    Update channel: {repo_str}\n"
+            f"© Chees3loaf/LightRiver Technologies"
+        )
+        self._show_about_dialog(manifesto + footer)
+
+    def _show_about_dialog(self, body: str) -> None:
+        """Render the About dialog in a scrollable Toplevel.
+
+        ``messagebox.showinfo`` doesn't scale gracefully to a multi-paragraph
+        manifesto — on shorter screens the OK button can fall off the bottom
+        and the text isn't selectable. A small custom Toplevel with a
+        scrolled Text widget keeps the whole thing readable on every display.
+        """
+        try:
+            dialog = tk.Toplevel(self.root)
+            dialog.title("About ATLAS")
+            dialog.transient(self.root)
+            dialog.grab_set()
+            dialog.resizable(True, True)
+            dialog.geometry("560x600")
+
+            text = scrolledtext.ScrolledText(
+                dialog, wrap=tk.WORD, padx=14, pady=12,
+                font=("Segoe UI", 10),
+            )
+            text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 0))
+            text.insert("1.0", body)
+            text.config(state=tk.DISABLED)
+
+            btn_frame = ttk.Frame(dialog)
+            btn_frame.pack(fill=tk.X, padx=8, pady=8)
+            tk.Button(btn_frame, text="Close", command=dialog.destroy, width=12)\
+                .pack(side=tk.RIGHT)
+
+            dialog.bind("<Escape>", lambda _e: dialog.destroy())
+            dialog.wait_window()
+        except tk.TclError:
+            # Fall back to a plain messagebox if the Toplevel couldn't render
+            # (e.g., headless / unusual Tk build).
+            messagebox.showinfo("About ATLAS", body)
 
     def switch_mode(self):
         """Hide all frames and show the selected one."""
@@ -178,11 +451,13 @@ class InventoryGUI:
             self.tds_frame.pack_forget()
         if self.packing_slip_frame:
             self.packing_slip_frame.pack_forget()
-        if self.raw_frame:
-            self.raw_frame.pack_forget()
+        if self.file_processing_frame:
+            self.file_processing_frame.pack_forget()
         if self.provision_frame:
             self.provision_frame.pack_forget()
-        
+        if getattr(self, "software_upgrade_frame", None):
+            self.software_upgrade_frame.pack_forget()
+
         if mode == "inventory":
             self.inventory_frame.pack(fill=tk.BOTH, expand=True)
         elif mode == "tds":
@@ -190,9 +465,11 @@ class InventoryGUI:
         elif mode == "packing_slip":
             self.packing_slip_frame.pack(fill=tk.BOTH, expand=True)
         elif mode == "raw":
-            self.raw_frame.pack(fill=tk.BOTH, expand=True)
+            self.file_processing_frame.pack(fill=tk.BOTH, expand=True)
         elif mode == "provision":
             self.provision_frame.pack(fill=tk.BOTH, expand=True)
+        elif mode == "software_upgrade":
+            self.software_upgrade_frame.pack(fill=tk.BOTH, expand=True)
 
     def update_status(self, message: str) -> None:
         self.inventory_frame.update_status(message)
@@ -268,7 +545,8 @@ class InventoryGUI:
             psi_packing_slip_template=self.psi_packing_slip_template,
         )
 
-    def get_user_inputs(self, default_filename, prefill: Optional[Dict[str, str]] = None):
+    def get_user_inputs(self, default_filename, prefill: Optional[Dict[str, str]] = None,
+                        append_mode: bool = False):
         """Prompt user for project information in a popup.
 
         Args:
@@ -277,22 +555,40 @@ class InventoryGUI:
                 When provided (e.g. from an uploaded inventory report), the
                 corresponding fields are pre-populated so the user only has
                 to confirm rather than retype.
+            append_mode: When True, omit the Filename field (the existing
+                workbook's path is reused) and label the popup as an
+                append-mode dialog so the user can see at a glance that
+                edits here only affect the NEW device sheet.
         """
         prefill = prefill or {}
         root = tk.Toplevel()  # Create a new popup window
-        root.title("User Inputs")
+        root.title("Append to Existing Report" if append_mode else "User Inputs")
 
-        # Dictionary to store input values
+        if append_mode:
+            tk.Label(
+                root,
+                text=(
+                    "Pre-filled from the uploaded report. Changes here apply\n"
+                    "only to the new device sheet; existing sheets are not modified."
+                ),
+                justify="left",
+                fg="#444",
+            ).grid(row=0, column=0, columnspan=2, padx=10, pady=(10, 4), sticky="w")
+            field_row_start = 1
+        else:
+            field_row_start = 0
+
         user_inputs = {
             "Customer": tk.StringVar(value=prefill.get("customer", "")),
             "Project": tk.StringVar(value=prefill.get("project", "")),
             "Purchase Order": tk.StringVar(value=prefill.get("po", "")),
             "Sales Order": tk.StringVar(value=prefill.get("so", "")),
-            "Filename": tk.StringVar(value=default_filename),
         }
+        if not append_mode:
+            user_inputs["Filename"] = tk.StringVar(value=default_filename)
 
         # Create input fields
-        row = 0
+        row = field_row_start
         for label, var in user_inputs.items():
             tk.Label(root, text=label + ":").grid(row=row, column=0, padx=10, pady=5, sticky="w")
             tk.Entry(root, textvariable=var, width=40).grid(row=row, column=1, padx=10, pady=5)
@@ -327,6 +623,7 @@ class InventoryGUI:
         user_inputs = self.get_user_inputs(
             default_filename,
             prefill=getattr(self.inventory_frame, "uploaded_metadata", {}) or {},
+            append_mode=append_mode,
         )
         if not user_inputs:
             messagebox.showerror("Input Error", "User input window was closed without entering details.")
@@ -402,10 +699,11 @@ class InventoryGUI:
                 "manual_script": manual_script,
             }
 
+            from utils.credentials import load_credentials_from_config
+            seed_user, seed_pass = load_credentials_from_config()
+
             if connection_mode == "LAN":
                 ip_address = self.inventory_frame.lan_ip.strip()
-                username = self.inventory_frame.lan_username_entry.get().strip()
-                password = self.inventory_frame.lan_password_entry.get().strip()
                 if not ip_address:
                     messagebox.showerror("Input Error", "LAN IP is required.")
                     return None
@@ -414,24 +712,15 @@ class InventoryGUI:
                 except ValueError:
                     messagebox.showerror("Input Error", "LAN IP must be a valid IPv4 or IPv6 address.")
                     return None
-                if not username or not password:
-                    messagebox.showerror("Input Error", "LAN username and password are required.")
-                    return None
                 context.update({
                     "target_id": ip_address,
                     "ip_address": ip_address,
-                    "username": username,
-                    "password": password,
+                    "username": seed_user or "",
+                    "password": seed_pass or "",
                 })
-                # Clear password from Entry widget to prevent lingering in memory
-                scrub_password_widget(self.inventory_frame.lan_password_entry)
-                # Overwrite local password variable to prevent plaintext exposure via memory inspection
-                del password
             else:
                 serial_port = self.inventory_frame.serial_port_var.get().strip()
                 baud_raw = self.inventory_frame.serial_baud_var.get().strip()
-                username = self.inventory_frame.serial_username_entry.get().strip()
-                password = self.inventory_frame.serial_password_entry.get().strip()
                 if not serial_port:
                     messagebox.showerror("Input Error", "Serial port is required (example: COM3).")
                     return None
@@ -443,20 +732,14 @@ class InventoryGUI:
                 except ValueError:
                     messagebox.showerror("Input Error", "Baud rate must be a number.")
                     return None
-                if not username or not password:
-                    messagebox.showerror("Input Error", "Serial username and password are required.")
-                    return None
 
                 context.update({
                     "target_id": serial_port,
                     "serial_port": serial_port,
                     "baud_rate": baud_rate,
-                    "username": username,
-                    "password": password,
+                    "username": seed_user or "",
+                    "password": seed_pass or "",
                 })
-                # Clear password from Entry widget to prevent lingering in memory
-                scrub_password_widget(self.inventory_frame.serial_password_entry)
-                del password
 
             return context
 
@@ -979,9 +1262,13 @@ class InventoryGUI:
 
         # ── Phase B: Select script and optionally inject kept SSH client ───
         # Nokia 1830 now uses SSH (paramiko auth_none + two-stage shell login).
+        # Pass through the credentials that authenticated during identification
+        # so the inventory script skips re-rotating through admin/cli/su.
         conn_type = 'ssh'
+        ident_creds = device_identifier.take_identified_credentials()
         script_instance = script_selector.select_script(
-            device_type, ip, connection_type=conn_type, stop_callback=self.should_stop
+            device_type, ip, connection_type=conn_type,
+            stop_callback=self.should_stop, credentials=ident_creds,
         )
         if not script_instance:
             reason = f"Unknown device type: {device_type}"
@@ -1149,8 +1436,13 @@ class InventoryGUI:
                     continue
 
                 conn_type = 'ssh'
+                # Re-identification just stored the working creds (the
+                # user-provided pair); thread them into the script so it
+                # starts with the right login on the first try.
+                ident_creds = device_identifier.take_identified_credentials()
                 script_instance = script_selector.select_script(
-                    device_type, ip, connection_type=conn_type, stop_callback=self.should_stop
+                    device_type, ip, connection_type=conn_type,
+                    stop_callback=self.should_stop, credentials=ident_creds,
                 )
                 if not script_instance:
                     self.failed_ips[ip] = f"Unknown device type: {device_type}"

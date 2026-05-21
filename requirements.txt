@@ -28,9 +28,6 @@ wexpect==4.0.0
 pexpect==4.9.0
 keyring==24.1.1
 
-# Terminal/Documentation Support
-docx==0.2.4
-
 # Deployment & Building
 pyinstaller==6.3.0
 pyinstaller-hooks-contrib==2023.12

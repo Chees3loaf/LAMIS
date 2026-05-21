@@ -248,6 +248,96 @@ class TestNokiaAutoDetection(unittest.TestCase):
             "scripts.Nokia_IXR_Raw",
         )
 
+    def test_detects_psi_4l_variant(self):
+        # Both 4L and 8L PSI hardware tags must auto-detect to Nokia_PSI;
+        # previously the 8L branch was unreachable dead code.
+        text = "Welcome to NOKIA-4L PSI shelf\nSystem build info..."
+        self.assertEqual(_detect_nokia_raw_script(text, ""), "scripts.Nokia_PSI")
+
+    def test_detects_psi_8l_variant(self):
+        text = "Welcome to NOKIA-8L PSI shelf\nSystem build info..."
+        self.assertEqual(_detect_nokia_raw_script(text, ""), "scripts.Nokia_PSI")
+
+    def test_detects_bare_psi_keyword(self):
+        text = "psi> show shelf\nShelf 1 info..."
+        self.assertEqual(_detect_nokia_raw_script(text, ""), "scripts.Nokia_PSI")
+
+
+class TestRawProcessMultiFamilyDispatch(unittest.TestCase):
+    """``_process_multi`` must derive the workbook-builder family from the
+    per-sheet *resolved* module path. Using the raw dropdown value would
+    always return "default" for Auto Detect Nokia because
+    ``SCRIPT_OPTIONS[AUTO_DETECT_NOKIA] == ''``, which silently bypasses
+    the PSI / RLS specific builders for multi-device runs.
+    """
+
+    def setUp(self):
+        from gui.raw_frame import RawFrame
+        # Skip Tk init — we only need the method, not the UI.
+        self.frame = RawFrame.__new__(RawFrame)
+        self.frame.gui = MagicMock()
+        self.frame.gui.db_cache = MagicMock()
+        self.frame.gui.db_file = ":memory:"
+        self.frame._input_path = "/tmp/multidev.xlsx"
+        self.frame._log_write = lambda *_a, **_kw: None
+        self._after_calls = []
+        self.frame.after = lambda delay, fn, *args: self._after_calls.append((fn, args))
+
+    def _stub_parse(self, family_per_sheet):
+        """Stub ``_parse_device`` so each sheet succeeds, and capture
+        the resolved module each call gets. Returns the captured list."""
+        captured = []
+        def _fake_parse(raw_text, device_id, module_path, outputs):
+            captured.append(module_path)
+            outputs[device_id] = {"data": MagicMock()}
+            return True
+        self.frame._parse_device = _fake_parse
+        return captured
+
+    def test_auto_detect_multi_psi_dispatches_psi_family(self):
+        """Multi-sheet workbook of PSI transcripts under Auto Detect must
+        hit the PSI builder family, not "default"."""
+        self._stub_parse(["psi"] * 2)
+        sheets = {
+            "PSI_NODE_A": "Welcome to NOKIA-4L PSI shelf\n",
+            "PSI_NODE_B": "Welcome to NOKIA-8L PSI shelf\n",
+        }
+        self.frame._process_multi(sheets, AUTO_DETECT_NOKIA)
+        # _export gets called via self.after(0, self._export, outputs, family, label)
+        self.assertEqual(len(self._after_calls), 1)
+        fn, args = self._after_calls[0]
+        outputs, family, label = args
+        self.assertEqual(family, "psi")
+        self.assertEqual(len(outputs), 2)
+
+    def test_auto_detect_multi_ixr_falls_back_to_default_family(self):
+        """IXR has no special family — default builder is the right choice."""
+        sheets = {
+            "ALSN001_7250": IXR_SAMPLE,
+            "ALSN002_7250": IXR_SAMPLE,
+        }
+        self._stub_parse(["default"] * 2)
+        self.frame._process_multi(sheets, AUTO_DETECT_NOKIA)
+        self.assertEqual(len(self._after_calls), 1)
+        _, args = self._after_calls[0]
+        _, family, _ = args
+        self.assertEqual(family, "default")
+
+    def test_auto_detect_mixed_psi_and_ixr_picks_psi_family(self):
+        """When a multi-sheet input mixes PSI (family="psi") and IXR
+        (family="default"), PSI is the only non-default family in the
+        set — it wins, and the IXR sheet still rides along on the same
+        PSI workbook. Verifies the "single non-default wins" rule."""
+        sheets = {
+            "PSI_NODE":   "Welcome to NOKIA-4L PSI shelf\n",
+            "IXR_NODE":   IXR_SAMPLE,
+        }
+        self._stub_parse(["mixed"] * 2)
+        self.frame._process_multi(sheets, AUTO_DETECT_NOKIA)
+        _, args = self._after_calls[0]
+        _, family, _ = args
+        self.assertEqual(family, "psi")
+
 
 class TestNokiaRawProcessing(unittest.TestCase):
 

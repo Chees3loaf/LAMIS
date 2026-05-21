@@ -47,6 +47,9 @@ _BUILTIN_DEFAULT_SEED: List[Tuple[str, str]] = [
     ("cli", "admin"),
     # Ciena 6500 / RLS default: su / Ciena123.
     ("su", "Ciena123"),
+    # Some older / case-sensitive devices use ADMIN/ADMIN — tried last so
+    # we don't pre-empt the more common admin/admin lowercase variant.
+    ("ADMIN", "ADMIN"),
 ]
 
 
@@ -183,6 +186,18 @@ def _seed_defaults_into_config() -> None:
 
     new_pairs = [(u, p) for u, p in seed if u not in existing_by_user]
 
+    # One-time cleanup: ATLAS no longer persists user-entered credentials,
+    # so any "credentials" block from an older install is now dead data.
+    # Drop it if present (idempotent — no-op on already-clean files).
+    legacy_creds_present = bool(config.get("credentials"))
+    if legacy_creds_present:
+        config.pop("credentials", None)
+        _write_config_file(config)
+        logging.info(
+            "[CREDS] Removed legacy user-credential block from encrypted "
+            "config (ATLAS no longer persists user-entered credentials)"
+        )
+
     if existing_raw and not new_pairs and not needs_reorder:
         return  # Already seeded, in the right order, no new defaults to add.
 
@@ -194,7 +209,6 @@ def _seed_defaults_into_config() -> None:
         logging.error(f"[CREDS] Failed to seed default credentials: {e}")
         return
 
-    config.setdefault("credentials", {})
     if existing_raw:
         # Rebuild defaults: emit seed entries in seed order first (re-using
         # the existing encrypted password if we already had it, else using
@@ -257,31 +271,23 @@ def _load_defaults_from_config() -> List[Tuple[str, str]]:
 
 
 def load_credentials_from_config() -> Tuple[Optional[str], Optional[str]]:
-    """Load primary saved credentials from encrypted config, or fall back to first default.
+    """Return the first default credential pair from the encrypted config.
+
+    ATLAS no longer persists user-entered credentials — the seeded
+    defaults are the only thing this function returns. The credential
+    rotation in ``handle_credential_failure`` cycles through every
+    default in order on auth failure; this just provides the starting
+    point.
 
     Returns:
-        (username, password) if found and decryption succeeds, else (None, None)
+        (username, password) of ``_BUILTIN_DEFAULT_SEED[0]`` after Fernet
+        decrypt, else ``(None, None)`` if defaults are disabled via
+        ``LAMIS_DISABLE_DEFAULT_CREDS`` or the seed list is empty.
     """
-    # Make sure defaults are seeded on first run so they're available below.
+    # Make sure defaults are seeded on first run, and migrate away any
+    # legacy user-credential block from older installs.
     _seed_defaults_into_config()
 
-    config = _read_config_file()
-    creds = config.get("credentials", {}) or {}
-
-    if creds.get("username"):
-        encrypted_pwd = creds.get("password")
-        if encrypted_pwd and encrypted_pwd != "[ENCRYPTED]":
-            try:
-                if creds.get("encrypted", True):
-                    password = _decrypt_password(encrypted_pwd)
-                else:
-                    password = encrypted_pwd
-                logging.debug(f"[CREDS] Loaded credentials for user: {creds['username']}")
-                return (creds["username"], password)
-            except Exception as e:
-                logging.error(f"[CREDS] Failed to decrypt stored credentials: {e}")
-
-    # No usable saved credentials — try the first default (unless disabled).
     if _defaults_disabled():
         logging.debug("[CREDS] Default credentials disabled by LAMIS_DISABLE_DEFAULT_CREDS")
         return (None, None)
@@ -303,78 +309,55 @@ def get_default_credentials_to_try() -> List[Tuple[str, str]]:
     return _load_defaults_from_config()
 
 
-def save_credentials_to_config(username: str, password: str) -> bool:
-    """Save credentials to encrypted config file.
+def get_default_credential(username: str) -> Optional[Tuple[str, str]]:
+    """Return the (username, password) pair for *username* from the encrypted
+    defaults store, or ``None`` if not present / defaults are disabled.
 
-    Args:
-        username: Device username
-        password: Device password
-
-    Returns:
-        True if save succeeded, False otherwise
+    This is the single point of access for callers that need a specific
+    vendor default — e.g. the TDS frame wants ``su`` for Ciena and the
+    SSH banner shortcut wants ``cli`` for the Nokia 1830. Looking the
+    entry up here keeps every consumer pulling from the same Fernet
+    source rather than maintaining its own hardcoded copy of the
+    password.
     """
-    try:
-        encrypted_pwd = _encrypt_password(password)
-
-        # Preserve any existing fields (notably the encrypted "defaults" block)
-        # so saving user credentials doesn't wipe the seeded defaults.
-        config = _read_config_file()
-        config["credentials"] = {
-            "username": username,
-            "password": encrypted_pwd,
-            "encrypted": True,
-        }
-        config.setdefault(
-            "notes",
-            "All credential values are encrypted with Fernet. "
-            "Set LAMIS_DISABLE_DEFAULT_CREDS=1 to skip default-credential attempts.",
-        )
-
-        if not _write_config_file(config):
-            return False
-
-        logging.info(f"[CREDS] Saved encrypted credentials for user: {username}")
-        return True
-
-    except Exception as e:
-        logging.error(f"[CREDS] Failed to save credentials to config: {e}")
-        return False
+    if not username:
+        return None
+    if _defaults_disabled():
+        return None
+    for u, p in get_default_credentials_to_try():
+        if u == username:
+            return (u, p)
+    return None
 
 
-def setup_credentials_config(username: str, password: str) -> bool:
-    """Convenience function to set up encrypted credentials config.
-
-    Usage:
-        python -c "from utils.credentials import setup_credentials_config; \
-                   setup_credentials_config('admin', 'mypassword')"
-
-    Args:
-        username: Device username
-        password: Device password
-
-    Returns:
-        True if setup succeeded
-    """
-    success = save_credentials_to_config(username, password)
-    if success:
-        print(f"Credentials saved securely to {CREDS_CONFIG_FILE}")
-        print(f"Encryption key stored at {CREDS_KEY_FILE}")
-        print("\nNOTE: Both files should be kept secure:")
-        print("  - Add .creds_key to .gitignore")
-        print("  - Keep credentials_config.json out of version control")
-    return success
+# Conventional username for each vendor's factory default in the seed list.
+# Callers that know they need "the Ciena default" can ask for vendor="ciena"
+# instead of hardcoding the username — keeps the username convention in one
+# place if the seed list is ever reordered or renamed.
+_VENDOR_DEFAULT_USERNAME: Dict[str, str] = {
+    "ciena": "su",        # Ciena 6500 / RLS — su / Ciena123
+    "ciena-rls": "su",
+    "ciena-6500": "su",
+    "rls": "su",
+    "6500": "su",
+    "nokia": "admin",     # Nokia SAR / IXR / Smartoptics — admin / admin
+    "nokia-1830": "cli",  # Nokia 1830 SSH bootstrap — cli / admin
+    "1830": "cli",
+    "smartoptics": "admin",
+    "dcp": "admin",
+}
 
 
-def delete_credentials_config() -> bool:
-    """Delete the credentials config file."""
-    try:
-        if CREDS_CONFIG_FILE.exists():
-            CREDS_CONFIG_FILE.unlink()
-            logging.info("[CREDS] Deleted credentials config file")
-        return True
-    except Exception as e:
-        logging.error(f"[CREDS] Failed to delete credentials config: {e}")
-        return False
+def get_default_credential_for_vendor(vendor: str) -> Optional[Tuple[str, str]]:
+    """Return the (user, pw) pair for *vendor*'s factory default, from the
+    encrypted store. Returns ``None`` if the vendor is unknown, defaults
+    are disabled, or the matching entry has been removed."""
+    if not vendor:
+        return None
+    user = _VENDOR_DEFAULT_USERNAME.get(vendor.strip().lower())
+    if not user:
+        return None
+    return get_default_credential(user)
 
 
 def prompt_for_credentials_gui(parent_window=None) -> Optional[Tuple[str, str]]:

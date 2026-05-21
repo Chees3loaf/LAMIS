@@ -72,7 +72,7 @@ class RawNokiaTranscriptMixin:
         self.device_type = self.RAW_DEVICE_TYPE
 
         chassis_match = re.search(
-            r"Chassis\s+\d+\s+Detail.*?Part number\s*:\s*([^\r\n]+).*?Serial number\s*:\s*([^\r\n]+)",
+            r"Chassis\s+\d+\s+Detail.*?Part number[ \t]*:[ \t]*([^\r\n]+).*?Serial number[ \t]*:[ \t]*([^\r\n]+)",
             output,
             re.IGNORECASE | re.DOTALL,
         )
@@ -99,8 +99,8 @@ class RawNokiaTranscriptMixin:
         )
         for match in fan_blocks:
             body = match.group("body")
-            part_match = re.search(r"Part number\s*:\s*([^\r\n]+)", body, re.IGNORECASE)
-            serial_match = re.search(r"Serial number\s*:\s*([^\r\n]+)", body, re.IGNORECASE)
+            part_match = re.search(r"Part number[ \t]*:[ \t]*([^\r\n]+)", body, re.IGNORECASE)
+            serial_match = re.search(r"Serial number[ \t]*:[ \t]*([^\r\n]+)", body, re.IGNORECASE)
             if not part_match or not serial_match:
                 continue
             tray_name = match.group("tray")

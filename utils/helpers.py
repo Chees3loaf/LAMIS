@@ -13,7 +13,7 @@ import threading
 import time
 import logging
 from collections import deque
-from typing import Callable, Deque, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple, Union
 from pathlib import Path
 
 try:
@@ -184,6 +184,272 @@ def get_known_hosts_path() -> Path:
     return known_hosts.resolve()
 
 
+def scrub_known_hosts(path: Optional[Union[str, Path]] = None) -> Tuple[int, int]:
+    """Drop unparseable entries from the known_hosts file at *path*.
+
+    paramiko's ``HostKeys.load`` aborts the entire load on the first
+    malformed line (truncated base64, mangled keytype, etc.). Any such
+    corruption then poisons every subsequent ``save_host_keys`` call —
+    the save path reloads before writing, so a single bad line takes
+    out unrelated working connections.
+
+    This helper reads the file line-by-line, keeps lines that paramiko's
+    own ``HostKeyEntry.from_line`` accepts, and rewrites the file atomically
+    when any lines need dropping. Comments and blank lines are preserved.
+
+    Returns ``(kept, dropped)``. A no-op call returns ``(N, 0)``. Safe to
+    call repeatedly (idempotent on clean files). Never raises — on I/O
+    or paramiko-availability failure it logs and returns ``(0, 0)``.
+    """
+    if paramiko is None:
+        return (0, 0)
+    if path is None:
+        path = get_known_hosts_path()
+    p = Path(path)
+    if not p.exists() or p.stat().st_size == 0:
+        return (0, 0)
+
+    try:
+        raw = p.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logging.warning(f"[HOSTKEY] scrub: cannot read {p}: {exc}")
+        return (0, 0)
+
+    kept_lines: list[str] = []
+    dropped: list[Tuple[int, str]] = []
+    for ln_no, line in enumerate(raw.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            # Preserve blank/comment lines verbatim.
+            kept_lines.append(line)
+            continue
+        try:
+            # Strip trailing \r so CRLF-terminated files don't choke
+            # paramiko's base64 decoder on the last column.
+            entry = paramiko.hostkeys.HostKeyEntry.from_line(
+                line.rstrip("\r"), ln_no
+            )
+        except Exception as exc:
+            dropped.append((ln_no, line[:80]))
+            logging.warning(
+                f"[HOSTKEY] scrub: dropping line {ln_no} -- "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+        if entry is None:
+            # from_line returns None for entries it silently ignores (e.g.
+            # disabled lines starting with @cert-authority on some
+            # paramiko versions). Preserve them as-is.
+            kept_lines.append(line)
+            continue
+        kept_lines.append(line)
+
+    if not dropped:
+        return (len(kept_lines), 0)
+
+    new_text = "\n".join(kept_lines)
+    if new_text and not new_text.endswith("\n"):
+        new_text += "\n"
+
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    try:
+        tmp.write_text(new_text, encoding="utf-8")
+        tmp.replace(p)
+    except OSError as exc:
+        logging.warning(f"[HOSTKEY] scrub: cannot rewrite {p}: {exc}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return (len(kept_lines), 0)
+
+    logging.info(
+        f"[HOSTKEY] scrub: kept {len(kept_lines)} line(s), "
+        f"dropped {len(dropped)} malformed line(s) from {p}"
+    )
+    return (len(kept_lines), len(dropped))
+
+
+def safe_load_host_keys(client: Any, path: Union[str, Path]) -> bool:
+    """Robust wrapper around ``client.load_host_keys`` that survives a
+    corrupt known_hosts file.
+
+    paramiko's stock load aborts on the first malformed line, which then
+    breaks every downstream SSH connection until the file is repaired.
+    This wrapper:
+
+      1. Attempts the load.
+      2. On ``InvalidHostKey``, scrubs the file (drops the bad line)
+         and retries once.
+      3. On any other failure (missing file, IO error), logs and
+         returns ``False``; the caller usually proceeds with an empty
+         in-memory key cache.
+
+    Returns ``True`` if the load succeeded (possibly after a scrub).
+    Never raises.
+    """
+    if paramiko is None:
+        return False
+    p = str(path)
+    try:
+        client.load_host_keys(p)
+        return True
+    except (FileNotFoundError, IOError):
+        return False
+    except paramiko.hostkeys.InvalidHostKey as ihk:
+        logging.warning(
+            f"[HOSTKEY] load_host_keys hit InvalidHostKey ({ihk}) -- "
+            f"scrubbing {p} and retrying"
+        )
+    except Exception as exc:
+        logging.warning(
+            f"[HOSTKEY] load_host_keys failed ({type(exc).__name__}: {exc})"
+        )
+        return False
+    try:
+        scrub_known_hosts(p)
+        client.load_host_keys(p)
+        return True
+    except Exception as exc:
+        logging.warning(
+            f"[HOSTKEY] load_host_keys retry failed ({type(exc).__name__}: {exc})"
+        )
+        return False
+
+
+# Process-wide lock serializing all writes to the known_hosts file.
+# Parallel inventory workers race to call ``save_host_keys`` after a
+# successful SSH handshake; without a lock, two threads' writes can
+# interleave and produce concatenated, malformed lines (e.g. a row
+# missing its newline ending up smashed into the next host's entry).
+_KNOWN_HOSTS_WRITE_LOCK = threading.Lock()
+
+
+def safe_save_host_keys(client: Any, path: Union[str, Path]) -> bool:
+    """Atomically persist a paramiko SSHClient's host-key cache.
+
+    Improves on ``client.save_host_keys`` in three ways:
+
+      1. Serialized across threads via a module-level lock so parallel
+         workers can't tear the file with interleaved writes.
+      2. Writes to a temp file in the same directory, then ``os.replace``
+         (atomic on Windows + POSIX) — partial writes never end up
+         visible.
+      3. On ``InvalidHostKey`` from the underlying load, scrubs the
+         existing file (dropping the malformed line), then retries.
+
+    Never raises; logs and returns ``False`` if both attempts fail.
+    The in-memory key on ``client`` is unaffected — the active SSH
+    session keeps working regardless of save outcome.
+    """
+    if paramiko is None:
+        return False
+
+    target = Path(path)
+
+    def _atomic_write_using_client() -> None:
+        """Build the new file contents from the client's current host-key
+        cache (merged with whatever's on disk) and atomically replace
+        the on-disk file. Inside the lock."""
+        # Snapshot the client's current in-memory keys.
+        client_keys = client.get_host_keys()
+
+        # Merge with what's already persisted so concurrent threads
+        # whose keys aren't in *this* client's cache don't get blown
+        # away. If reading the existing file fails, we still write
+        # whatever this client has — strictly more than nothing.
+        merged = paramiko.HostKeys()
+        try:
+            merged.load(str(target))
+        except Exception:
+            pass
+        for host, type_map in client_keys.items():
+            for ktype, key in type_map.items():
+                merged.add(host, ktype, key)
+
+        tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}.{threading.get_ident()}")
+        try:
+            with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+                for host, type_map in merged.items():
+                    for ktype, key in type_map.items():
+                        f.write(f"{host} {ktype} {key.get_base64()}\n")
+            os.replace(tmp, target)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
+    with _KNOWN_HOSTS_WRITE_LOCK:
+        try:
+            _atomic_write_using_client()
+            return True
+        except paramiko.hostkeys.InvalidHostKey as exc:
+            logging.warning(
+                f"[HOSTKEY] atomic save hit InvalidHostKey ({exc}) -- "
+                f"scrubbing {target} and retrying"
+            )
+        except Exception as exc:
+            logging.warning(
+                f"[HOSTKEY] atomic save failed ({type(exc).__name__}: {exc}) "
+                f"-- scrubbing {target} and retrying"
+            )
+
+        # Scrub still uses its own atomic write; that's safe inside the
+        # lock because the lock is non-reentrant by name but holds the
+        # same thread (we don't re-acquire). The scrub itself does its
+        # own atomic temp+rename without touching this lock.
+        try:
+            scrub_known_hosts(target)
+            _atomic_write_using_client()
+            return True
+        except Exception as exc:
+            logging.warning(
+                f"[HOSTKEY] atomic save retry failed ({type(exc).__name__}: "
+                f"{exc}) -- continuing without persisting the new key"
+            )
+            return False
+
+
+class SafeAutoAddPolicy:
+    """Drop-in replacement for ``paramiko.AutoAddPolicy`` that routes
+    persistence through :func:`safe_save_host_keys` instead of
+    ``client.save_host_keys``.
+
+    paramiko's stock policy calls the raw save (non-atomic, unlocked,
+    and re-loads the file first — which throws on the first malformed
+    line). Under parallel workers this both tears the file and breaks
+    unrelated working connections. This policy accepts the key in
+    memory and persists via our locked + atomic + scrub-on-fail path.
+    """
+
+    def __init__(self, known_hosts_path: Optional[Union[str, Path]] = None) -> None:
+        self._kh_path = (
+            str(known_hosts_path) if known_hosts_path is not None else None
+        )
+
+    def missing_host_key(self, client: Any, hostname: str, key: Any) -> None:
+        # Add to the client's in-memory cache so the current session
+        # passes verification.
+        client.get_host_keys().add(hostname, key.get_name(), key)
+        # Persist if we have a path. If the caller already attached the
+        # filename via ``load_host_keys`` we honour that; otherwise fall
+        # back to our standard location.
+        path = self._kh_path
+        if not path:
+            path = getattr(client, "_host_keys_filename", None) or str(get_known_hosts_path())
+        # IMPORTANT: clear the client's filename binding so paramiko's
+        # own internals don't ALSO try to save (it's currently inside
+        # client.connect() which would otherwise call the raw
+        # save_host_keys after we return).
+        try:
+            client._host_keys_filename = None
+        except Exception:
+            pass
+        safe_save_host_keys(client, path)
+
+
 class CredentialFilter(logging.Filter):
     """Logging filter that redacts credential values before records reach the file handler.
 
@@ -241,7 +507,12 @@ class AuthLockout:
       * A successful auth (``register_success``) wipes the IP's history.
     """
 
-    MAX_ATTEMPTS: int = 3
+    # Must be high enough to cover one full credential rotation without
+    # tripping mid-cycle. Today that's 1 primary + 4 seeded defaults
+    # (admin/admin, cli/admin, su/Ciena123, ADMIN/ADMIN) = 5 SSH probes
+    # before the GUI prompts the user; plus a couple of user-prompted
+    # retries on top.
+    MAX_ATTEMPTS: int = 8
     WINDOW: float = 300.0          # 5-minute sliding window for attempt counting
     BACKOFFS: Tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 30.0, 60.0)
     COOLDOWN: float = 600.0        # 10-minute lockout once MAX_ATTEMPTS is hit
@@ -832,115 +1103,29 @@ def extract_ip_sort_key(value: Union[str, None]) -> Tuple:
 
 
 def get_credentials(service: str = "ATLAS") -> Tuple[Optional[str], Optional[str]]:
-    """Retrieve stored credentials from config file or Windows Credential Manager.
+    """Return the first seeded default credential pair.
 
-    Attempts to retrieve credentials in this order:
-    1. Encrypted credentials_config.json file (if present)
-    2. Windows Credential Manager via keyring library
-    Returns (None, None) if credentials are not found.
+    ATLAS no longer persists user-entered credentials — the only stored
+    creds are the (Fernet-encrypted) built-in seed list shipped with the
+    app (admin/admin, cli/admin, su/Ciena123, ADMIN/ADMIN). This returns
+    the first of those so callers have a starting point; the credential
+    rotation in ``handle_credential_failure`` cycles through the rest on
+    auth failure.
 
     Args:
-        service: Service name under which credentials are stored in Credential Manager.
-                 Defaults to "ATLAS". Ignored when loading from config file.
+        service: Unused — retained for backward signature compatibility.
 
     Returns:
-        Tuple of (username, password) if found, else (None, None).
-
-    Example:
-        >>> username, password = get_credentials()
-        >>> if username is None:
-        ...     print("No saved credentials found")
+        Tuple of (username, password) of the first default, or
+        ``(None, None)`` when defaults are disabled via
+        ``LAMIS_DISABLE_DEFAULT_CREDS``.
     """
-    # First, try to load from encrypted config file
     try:
         from utils.credentials import load_credentials_from_config
-        username, password = load_credentials_from_config()
-        if username and password:
-            logging.debug("[CREDS] Using credentials from config file")
-            return (username, password)
+        return load_credentials_from_config()
     except Exception as e:
-        logging.debug(f"[CREDS] Config file not available: {e}")
-
-    # Fall back to Windows Credential Manager
-    try:
-        import keyring
-        username = keyring.get_password(service, "username")
-        if username:
-            password = keyring.get_password(service, username)
-            logging.debug("[CREDS] Using credentials from Credential Manager")
-            return (username, password)
-    except Exception as e:
-        logging.debug(f"Could not retrieve credentials from Credential Manager: {e}")
-
-    return (None, None)
-
-
-def save_credentials(username: str, password: str, service: str = "ATLAS") -> bool:
-    """Store credentials securely in Windows Credential Manager.
-
-    Saves username and password to the Windows Credential Manager using the
-    keyring library. These credentials can be retrieved later by get_credentials().
-
-    Args:
-        username: Username to save.
-        password: Password to save.
-        service: Service name under which to store credentials. Defaults to "ATLAS".
-
-    Returns:
-        True if save succeeded, False if an error occurred.
-
-    Example:
-        >>> if save_credentials("admin", "securepass"):
-        ...     print("Credentials saved successfully")
-        ... else:
-        ...     print("Failed to save credentials")
-    """
-    try:
-        import keyring
-        keyring.set_password(service, "username", username)
-        keyring.set_password(service, username, password)
-        logging.info(f"Credentials for '{username}' saved to Credential Manager")
-        return True
-    except Exception as e:
-        logging.error(f"Could not save credentials to Credential Manager: {e}")
-        return False
-
-
-def delete_credentials(service: str = "ATLAS", username: Optional[str] = None) -> bool:
-    """Delete stored credentials from Windows Credential Manager.
-
-    Deletes credentials from the Windows Credential Manager. If username is provided,
-    deletes only that user's credentials; otherwise deletes both stored entries.
-
-    Args:
-        service: Service name under which credentials are stored. Defaults to "ATLAS".
-        username: Optional username entry to delete. If None, deletes all ATLAS entries.
-
-    Returns:
-        True if delete succeeded, False if an error occurred.
-
-    Example:
-        >>> delete_credentials()  # Delete all ATLAS credentials
-        >>> delete_credentials(username="admin")  # Delete only "admin"
-    """
-    try:
-        import keyring
-        if username:
-            keyring.delete_password(service, username)
-        else:
-            # Delete both entries (username entry and password entry)
-            try:
-                stored_username = keyring.get_password(service, "username")
-                if stored_username:
-                    keyring.delete_password(service, stored_username)
-                    keyring.delete_password(service, "username")
-            except keyring.errors.PasswordDeleteError:
-                pass  # Already deleted or never existed
-        logging.info(f"Credentials deleted from Credential Manager")
-        return True
-    except Exception as e:
-        logging.warning(f"Could not delete credentials from Credential Manager: {e}")
-        return False
+        logging.debug(f"[CREDS] Default credentials not available: {e}")
+        return (None, None)
 
 
 # ----------------------------------------------------------------------
@@ -1096,7 +1281,7 @@ def get_host_key_policy():
         logging.warning(
             "LAMIS_AUTO_ACCEPT_HOSTKEYS=1 — auto-accepting unknown SSH host keys (TOFU)"
         )
-        return paramiko.AutoAddPolicy()
+        return SafeAutoAddPolicy(get_known_hosts_path())
 
     try:
         from config import SSH_AUTO_ACCEPT_HOST_KEYS  # local import to avoid cycles
@@ -1107,7 +1292,7 @@ def get_host_key_policy():
             "[HOSTKEY] Auto-accepting unknown host keys (TOFU). "
             "Set LAMIS_PROMPT_HOSTKEYS=1 to require operator confirmation."
         )
-        return paramiko.AutoAddPolicy()
+        return SafeAutoAddPolicy(get_known_hosts_path())
 
     return PromptingHostKeyPolicy()
 
@@ -1144,10 +1329,7 @@ def ensure_host_key_known(host: str, port: int = 22, timeout: float = 10.0) -> b
     kh_path = str(get_known_hosts_path())
     try:
         client = paramiko.SSHClient()
-        try:
-            client.load_host_keys(kh_path)
-        except (FileNotFoundError, IOError):
-            pass
+        safe_load_host_keys(client, kh_path)
 
         # Fast-path: already trusted
         host_keys = client.get_host_keys()
@@ -1190,10 +1372,7 @@ def ensure_host_key_known(host: str, port: int = 22, timeout: float = 10.0) -> b
             client.close()
             return False
 
-        try:
-            client.save_host_keys(kh_path)
-        except Exception as e:
-            logging.warning("[HOSTKEY] Could not persist known_hosts: %s", e)
+        safe_save_host_keys(client, kh_path)
 
         # Re-check that the key actually landed in known_hosts
         verified = client.get_host_keys().lookup(target) is not None

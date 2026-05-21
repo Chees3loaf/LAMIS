@@ -13,8 +13,6 @@ import config
 from utils.helpers import (
     UploadValidationError,
     friendly_error,
-    get_credentials,
-    save_credentials,
     scrub_password_widget,
     validate_uploaded_file,
 )
@@ -129,13 +127,6 @@ class InventoryFrame(ttk.Frame):
                 octet_entry.bind("<BackSpace>", lambda e, pi=prev_idx, oe=octet_entry: self._octet_backspace(e, pi, oe))
             if i < 3:
                 tk.Label(self.lan_details_frame, text=".").pack(side=tk.LEFT)
-        tk.Label(self.lan_details_frame, text="Username:").pack(side=tk.LEFT, padx=(10, 5))
-        self.lan_username_entry = tk.Entry(self.lan_details_frame, width=14)
-        self.lan_username_entry.pack(side=tk.LEFT, padx=5)
-        tk.Label(self.lan_details_frame, text="Password:").pack(side=tk.LEFT, padx=(10, 5))
-        self.lan_password_entry = tk.Entry(self.lan_details_frame, width=14, show="*")
-        self.lan_password_entry.pack(side=tk.LEFT, padx=5)
-        tk.Button(self.lan_details_frame, text="Save Creds", command=self._save_lan_credentials, width=10).pack(side=tk.LEFT, padx=5)
 
         self.serial_details_frame = ttk.Frame(self.manual_connection_frame)
         self.serial_details_frame.pack(fill=tk.X, padx=10, pady=5)
@@ -162,16 +153,6 @@ class InventoryFrame(ttk.Frame):
             width=10,
         )
         self.serial_baud_combobox.pack(side=tk.LEFT, padx=5)
-        tk.Label(self.serial_details_frame, text="Username:").pack(side=tk.LEFT, padx=(10, 5))
-        self.serial_username_entry = tk.Entry(self.serial_details_frame, width=14)
-        self.serial_username_entry.pack(side=tk.LEFT, padx=5)
-        tk.Label(self.serial_details_frame, text="Password:").pack(side=tk.LEFT, padx=(10, 5))
-        self.serial_password_entry = tk.Entry(self.serial_details_frame, width=14, show="*")
-        self.serial_password_entry.pack(side=tk.LEFT, padx=5)
-        tk.Button(self.serial_details_frame, text="Save Creds", command=self._save_serial_credentials, width=10).pack(side=tk.LEFT, padx=5)
-
-        # Try to load saved credentials and populate fields
-        self._load_saved_credentials()
 
         # --- Optional existing report (append mode) ---
         self.report_frame = ttk.LabelFrame(self, text="Device Report (Optional)")
@@ -378,51 +359,6 @@ class InventoryFrame(ttk.Frame):
         out = self.controller.output_screen
         out.insert(tk.END, "Inventory append mode disabled; a new report will be created.\n")
         out.see(tk.END)
-
-    # ------------------------------------------------------------------
-    # Credential management
-    # ------------------------------------------------------------------
-
-    def _load_saved_credentials(self) -> None:
-        """Load saved credentials from Credential Manager and populate entry fields if found."""
-        try:
-            username, password = get_credentials()
-            if username and password:
-                self.lan_username_entry.insert(0, username)
-                self.lan_password_entry.insert(0, password)
-                self.serial_username_entry.insert(0, username)
-                self.serial_password_entry.insert(0, password)
-                logging.debug(f"Loaded credentials for user '{username}' from Credential Manager")
-        except Exception as e:
-            logging.warning(f"Could not load saved credentials: {e}")
-
-    def _save_lan_credentials(self) -> None:
-        """Save credentials from LAN entry fields to Credential Manager."""
-        username = self.lan_username_entry.get().strip()
-        password = self.lan_password_entry.get().strip()
-        if not username or not password:
-            messagebox.showwarning("Missing Credentials", "Please enter both username and password.")
-            return
-        if save_credentials(username, password):
-            scrub_password_widget(self.lan_password_entry)
-            password = ""
-            messagebox.showinfo("Success", f"Credentials for '{username}' saved to Windows Credential Manager.\n\nThey will be automatically loaded on next app start.")
-        else:
-            messagebox.showerror("Error", "Failed to save credentials. Check the application log for details.")
-
-    def _save_serial_credentials(self) -> None:
-        """Save credentials from Serial entry fields to Credential Manager."""
-        username = self.serial_username_entry.get().strip()
-        password = self.serial_password_entry.get().strip()
-        if not username or not password:
-            messagebox.showwarning("Missing Credentials", "Please enter both username and password.")
-            return
-        if save_credentials(username, password):
-            scrub_password_widget(self.serial_password_entry)
-            password = ""
-            messagebox.showinfo("Success", f"Credentials for '{username}' saved to Windows Credential Manager.\n\nThey will be automatically loaded on next app start.")
-        else:
-            messagebox.showerror("Error", "Failed to save credentials. Check the application log for details.")
 
     # ------------------------------------------------------------------
     # Internal helpers

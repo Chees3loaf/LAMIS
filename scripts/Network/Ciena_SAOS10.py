@@ -35,7 +35,7 @@ from script_interface import (
     CredentialPromptRequired,
     NEEDS_CREDENTIALS_SENTINEL,
 )
-from utils.helpers import get_known_hosts_path, get_host_key_policy
+from utils.helpers import get_known_hosts_path, get_host_key_policy, safe_load_host_keys
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +255,7 @@ class Script(BaseScript):
             client.set_missing_host_key_policy(get_host_key_policy())
             known_hosts = get_known_hosts_path()
             if known_hosts:
-                client.load_host_keys(str(known_hosts))
+                safe_load_host_keys(client, str(known_hosts))
             client.connect(
                 target,
                 username=self.username,

@@ -105,7 +105,7 @@ class Script(BaseScript):
 
     def get_commands(self) -> List[str]:
         return [
-            'show shelf 1',              # shelf name + type info
+            'show general system-identification',  # canonical shelf type (PSI-4L/PSI-8L)
             'show shelf inventory *',    # shelf hardware
             'show card inventory *',     # card inventory
             'show interface inventory *', # module / transceiver inventory
@@ -171,6 +171,7 @@ class Script(BaseScript):
                 "-o", f"UserKnownHostsFile={_kh}",
                 "-o", "HostKeyAlgorithms=+ssh-rsa",
                 "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
+                "-o", "PreferredAuthentications=password",
                 "-p", str(self.port),
                 "-l", self.username,
                 str(self.ip_address),
@@ -380,15 +381,42 @@ class Script(BaseScript):
         cache_callback: Optional[Callable[[pd.DataFrame, str], None]] = None,
         ip: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Parse 'show shelf 1' — extract system name and type."""
+        """Parse shelf identity from PSI CLI output.
+
+        Preferred source is ``show general system-identification``
+        (Vendor/Product/Shelf type). Keeps backward compatibility with the
+        legacy ``show shelf 1`` parser.
+        """
         system_data = []
         try:
             output = output.strip()
             name_match = re.search(r"Name\s*:\s*(.+)", output)
+            product_match = re.search(r"Product\s*:\s*(.+)", output)
+            shelf_type_match = re.search(r"Shelf\s*type\s*:\s*(.+)", output, re.IGNORECASE)
             type_match = re.search(r"Programmed Type\s*:\s*(.+)", output)
 
-            system_name = name_match.group(1).strip() if name_match else "Unknown"
-            system_type = type_match.group(1).strip() if type_match else "Unknown"
+            # Prompts commonly look like "hostname#  show general ...".
+            prompt_name_match = re.search(
+                r"^\s*([A-Za-z0-9._-]+)#\s*show\s+general\s+system-identification",
+                output,
+                re.IGNORECASE | re.MULTILINE,
+            )
+
+            if name_match:
+                system_name = name_match.group(1).strip()
+            elif prompt_name_match:
+                system_name = prompt_name_match.group(1).strip()
+            elif product_match:
+                system_name = f"Nokia {product_match.group(1).strip()}"
+            else:
+                system_name = "Unknown"
+
+            if shelf_type_match:
+                system_type = shelf_type_match.group(1).strip()
+            elif type_match:
+                system_type = type_match.group(1).strip()
+            else:
+                system_type = "Unknown"
 
             system_data.append({
                 'System Name': system_name,
@@ -400,6 +428,8 @@ class Script(BaseScript):
                 'Name': system_name,
                 'Source': ip or 'Unknown',
             })
+            if re.search(r"^PSI-(4L|8L)$", system_type, re.IGNORECASE):
+                logging.info(f"[PSI] Shelf type detected: {system_type}")
             logging.info(f"Extracted shelf detail — Name: {system_name}, Type: {system_type}")
         except Exception as e:
             logging.error(f"Error in extract_shelf_detail: {e}")
@@ -859,6 +889,9 @@ class Script(BaseScript):
             if not output or not output.strip():
                 logging.warning(f"Empty output for command: {command}")
                 return False
+
+            if command.startswith("show general system-identification"):
+                return bool(re.search(r"Shelf\s*type\s*:", output, re.IGNORECASE))
 
             if command.startswith("show shelf 1"):
                 return bool(re.search(r"Name\s*:", output))

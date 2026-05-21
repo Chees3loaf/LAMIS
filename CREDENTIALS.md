@@ -1,68 +1,49 @@
 # Secure Credential Management
 
-ATLAS now supports secure credential storage using encrypted configuration files.
+ATLAS now stores only the built-in default credential seed in an encrypted
+config file under `%APPDATA%\ATLAS`. It no longer persists user-entered
+device credentials.
 
-## Setup
+## What Gets Stored
 
-### Option 1: Using Command Line (Recommended for Automation)
+On first launch, ATLAS creates:
 
-```bash
-python -c "from utils.credentials import setup_credentials_config; setup_credentials_config('admin', 'yourpassword')"
-```
+1. `credentials_config.json` in `%APPDATA%\ATLAS`
+2. `.creds_key` in `%APPDATA%\ATLAS`
 
-This will:
-1. Create `credentials_config.json` with encrypted credentials
-2. Create `.creds_key` with the encryption key (git-ignored)
-3. Set appropriate file permissions (600 - owner read/write only)
-
-### Option 2: Manual Configuration
-
-1. Get the encryption key:
-```bash
-python -c "from utils.credentials import _get_or_create_key; print(_get_or_create_key().decode())"
-```
-
-2. Create `credentials_config.json`:
-```json
-{
-  "credentials": {
-    "username": "admin",
-    "password": "[ENCRYPTED_PASSWORD_HERE]",
-    "encrypted": true
-  }
-}
-```
+The config file contains an encrypted `defaults` list. Those defaults are the
+only credentials ATLAS stores on disk.
 
 ## How It Works
 
-1. **Encryption**: Passwords are encrypted using Fernet (symmetric encryption from `cryptography` library)
-2. **Key Management**: Encryption key is stored in `.creds_key` (git-ignored)
-3. **Credential Loading**: The app checks for encrypted credentials in this order:
-   - `credentials_config.json` (if present)
-   - Windows Credential Manager (keyring)
-   - Returns (None, None) if neither found
+1. Passwords are encrypted with Fernet from `cryptography`
+2. The Fernet key is stored in `.creds_key`
+3. `load_credentials_from_config()` returns the first seeded default pair
+4. On auth failure, `handle_credential_failure()` rotates through the rest of
+  the seeded defaults
+5. When defaults are exhausted, the GUI prompts the operator for credentials
+6. Operator-entered credentials are used for that retry path but are not
+  written back to disk
 
 ## Security Notes
 
-- **Never commit** `credentials_config.json` or `.creds_key` to version control
-- Both files are already in `.gitignore`
-- File permissions are set to 600 (owner read/write only)
-- Encryption key is unique per installation
-- Credentials are decrypted in memory only when needed
+- Never commit `credentials_config.json` or `.creds_key` to version control
+- Both files live in `%APPDATA%\ATLAS`, not the repo root
+- File permissions / ACLs are restricted to the current user where possible
+- The encryption key is unique per installation
+- Passwords are decrypted only in memory when needed
 
-## Changing Credentials
+## Rotating Defaults
 
-To update credentials:
-```bash
-python -c "from utils.credentials import setup_credentials_config; setup_credentials_config('newuser', 'newpassword')"
-```
+To change the seeded defaults for a fresh install:
 
-## Deleting Credentials
+1. Stop ATLAS.
+2. Delete `%APPDATA%\ATLAS\credentials_config.json`.
+3. Optionally delete `%APPDATA%\ATLAS\.creds_key` to rotate the encryption key too.
+4. Set `LAMIS_SEED_DEFAULTS=user1:pw1,user2:pw2` before the next launch, or edit `_BUILTIN_DEFAULT_SEED` in `utils/credentials.py` before building.
+5. Launch ATLAS again so the encrypted defaults are re-seeded.
 
-```bash
-python -c "from utils.credentials import delete_credentials_config; delete_credentials_config()"
-```
+## Disabling Defaults
 
-## Fallback to Credential Manager
-
-If no config file is present, the app will fall back to Windows Credential Manager (if credentials were previously stored there). This ensures backward compatibility.
+Set `LAMIS_DISABLE_DEFAULT_CREDS=1` to skip default-credential attempts
+entirely. In that mode ATLAS will prompt once authentication fails.

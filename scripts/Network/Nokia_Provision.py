@@ -26,7 +26,7 @@ from script_interface import (
     NEEDS_CREDENTIALS_SENTINEL,
 )
 from utils.credentials import get_default_credentials_to_try, prompt_for_credentials_gui
-from utils.helpers import get_known_hosts_path, get_host_key_policy
+from utils.helpers import get_known_hosts_path, get_host_key_policy, safe_load_host_keys, safe_save_host_keys
 
 # ── Device type constants ───────────────────────────────────────────────────
 DEVICE_7705 = "7705"
@@ -402,7 +402,7 @@ class Script(BaseScript):
         _kh = str(get_known_hosts_path())
         self.ssh_client = paramiko.SSHClient()
         self.ssh_client.load_system_host_keys()
-        self.ssh_client.load_host_keys(_kh)
+        safe_load_host_keys(self.ssh_client, _kh)
         self.ssh_client.set_missing_host_key_policy(get_host_key_policy())
         self._log(f"SSH connecting to {self.ip_address}...")
         try:
@@ -419,7 +419,7 @@ class Script(BaseScript):
         except paramiko.AuthenticationException as exc:
             self._err(f"Authentication failed: {exc}")
             return None
-        self.ssh_client.save_host_keys(_kh)
+        safe_save_host_keys(self.ssh_client, _kh)
         self._log(f"SSH connected to {self.ip_address}")
         shell = self.ssh_client.invoke_shell()
         # Drain the login banner, handling the Auto-Discovery prompt if present.

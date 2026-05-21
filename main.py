@@ -3,6 +3,52 @@ import logging.handlers
 import os
 import sys
 from datetime import datetime
+
+
+def _maybe_dispatch_to_tds() -> None:
+    """If ``--tds-mode`` is on the command line, hand off to TDS_v6.2.py.
+
+    ATLAS used to ship a sibling ``TDS.exe`` so the GUI could spawn the
+    diagnostics tool as a subprocess. The same binary now handles both
+    roles: when ATLAS sees ``--tds-mode`` at startup, it strips the flag
+    and ``runpy``-executes the bundled TDS source instead of starting the
+    GUI. This keeps the installer down to a single visible executable
+    without forcing a refactor of the 17k-line TDS script.
+    """
+    if "--tds-mode" not in sys.argv:
+        return
+    # Strip the dispatch flag so TDS's argparse never sees it.
+    sys.argv = [a for a in sys.argv if a != "--tds-mode"]
+    # Locate the TDS source. Frozen builds extract data files under
+    # _MEIPASS; dev builds use the source tree relative to this file.
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    tds_src = os.path.join(base, "scripts", "TDS", "TDS_v6.2.py")
+    if not os.path.isfile(tds_src):
+        # Fall back to the project-root path so dev runs work even when
+        # cwd has wandered.
+        proj_root = os.path.dirname(os.path.abspath(__file__))
+        tds_src = os.path.join(proj_root, "scripts", "TDS", "TDS_v6.2.py")
+    if not os.path.isfile(tds_src):
+        sys.stderr.write(
+            "[ATLAS] --tds-mode requested but scripts/TDS/TDS_v6.2.py was "
+            "not found next to the executable.\n"
+        )
+        sys.exit(2)
+    import runpy
+    try:
+        runpy.run_path(tds_src, run_name="__main__")
+    except SystemExit:
+        # TDS exits the process via sys.exit() in several error paths;
+        # propagate the exit code through cleanly.
+        raise
+    sys.exit(0)
+
+
+# Dispatch BEFORE any heavy imports (tkinter, gui, paramiko, ...) so the
+# TDS subprocess doesn't pay the GUI startup tax.
+_maybe_dispatch_to_tds()
+
+
 from tkinter import Tk, Label
 from PIL import Image, ImageTk
 from gui.gui4_0 import InventoryGUI
@@ -17,7 +63,41 @@ from utils.helpers import (
     default_tk_host_key_prompt,
     restrict_path_to_owner,
     cleanup_stale_lamis_tempfiles,
+    scrub_known_hosts,
+    get_known_hosts_path,
 )
+
+# --- Host key cleanup on exit/crash ---
+import atexit
+import signal
+import threading
+import shutil
+
+def _delete_known_hosts():
+    try:
+        kh_path = get_known_hosts_path()
+        if kh_path.exists():
+            kh_path.unlink()
+            logging.info(f"[HOSTKEY] Deleted known_hosts at exit: {kh_path}")
+    except Exception as e:
+        logging.warning(f"[HOSTKEY] Could not delete known_hosts: {e}")
+
+def _register_known_hosts_cleanup():
+    # Register for normal exit
+    atexit.register(_delete_known_hosts)
+    # Register for signals (crash/interrupt)
+    def _signal_handler(signum, frame):
+        _delete_known_hosts()
+        # Re-raise default handler
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGABRT):
+        try:
+            signal.signal(sig, _signal_handler)
+        except Exception:
+            pass
+
+_register_known_hosts_cleanup()
 
 # Configure logging — write to console AND a rotating, timestamped log file.
 # Use %APPDATA%\ATLAS\logs so it's writable when installed in Program Files.
@@ -55,6 +135,16 @@ try:
     cleanup_stale_lamis_tempfiles(max_age_hours=24)
 except Exception as _cleanup_exc:  # pragma: no cover - defensive
     logging.debug("Startup tempfile cleanup skipped: %s", _cleanup_exc)
+
+# Drop any malformed entries from known_hosts at startup. A single corrupt
+# line (truncated base64 etc.) makes paramiko's HostKeys.load raise,
+# which in turn breaks every subsequent save_host_keys call — and a
+# save-failure during a successful SSH session bubbles up as a spurious
+# identification error. Idempotent on clean files.
+try:
+    scrub_known_hosts()
+except Exception as _scrub_exc:  # pragma: no cover - defensive
+    logging.debug("Startup known_hosts scrub skipped: %s", _scrub_exc)
 
 
 class LoadingScreen:
@@ -101,8 +191,16 @@ def show_loading_screen():
 
 
 def check_updates(loading_screen):
+    """Probe for updates and surface availability on the loading screen.
+
+    In dev mode the Updater needs a path to the working tree; in
+    installed (frozen) mode it auto-detects and queries the GitHub
+    Releases feed instead — no repo path needed."""
     try:
-        updater = Updater(os.path.dirname(__file__))
+        if getattr(sys, "frozen", False):
+            updater = Updater()
+        else:
+            updater = Updater(os.path.dirname(__file__))
         update_available = updater.check_for_updates()
     except Exception:
         update_available = False

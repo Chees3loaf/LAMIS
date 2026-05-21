@@ -866,24 +866,38 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_seed_order_includes_admin_first(self):
-        """admin/admin first, cli/admin second, su/Ciena123 third."""
+        """admin/admin, cli/admin, su/Ciena123, ADMIN/ADMIN — in that order."""
         self.assertEqual(
             self.creds_mod._BUILTIN_DEFAULT_SEED,
-            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123")],
+            [
+                ("admin", "admin"),
+                ("cli", "admin"),
+                ("su", "Ciena123"),
+                ("ADMIN", "ADMIN"),
+            ],
         )
 
-    def test_fresh_install_seeds_all_three(self):
+    def test_fresh_install_seeds_all_four(self):
         self.creds_mod._seed_defaults_into_config()
         pairs = self.creds_mod.get_default_credentials_to_try()
         self.assertEqual(
             pairs,
-            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123")],
+            [
+                ("admin", "admin"),
+                ("cli", "admin"),
+                ("su", "Ciena123"),
+                ("ADMIN", "ADMIN"),
+            ],
         )
 
     def test_upgrade_migration_adds_new_entry(self):
-        """Simulate a legacy install that only has admin/admin + ADMIN/ADMIN and
-        verify cli/admin and su/Ciena123 are added with the new seed priority
-        (admin first), while ADMIN/ADMIN becomes a non-seed trailing entry."""
+        """Legacy install with only admin/admin + ADMIN/ADMIN must end up with
+        the full 4-entry seed in seed order (admin, cli, su, ADMIN); the
+        pre-existing ADMIN/ADMIN entry is reordered into its seed slot.
+
+        ATLAS no longer persists user-entered credentials, so a legacy
+        ``credentials`` block in the config must be stripped during the
+        upgrade migration."""
         import json
         legacy = {
             "credentials": {"primary": {"username": "operator",
@@ -904,14 +918,14 @@ class TestDefaultCredentialSeed(unittest.TestCase):
             pairs,
             [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123"), ("ADMIN", "ADMIN")],
         )
-        # Primary user creds preserved.
+        # Legacy user-credentials block must be removed by the migration.
         cfg = json.loads(self._tmppath.read_text())
-        self.assertEqual(cfg["credentials"]["primary"]["username"], "operator")
+        self.assertNotIn("credentials", cfg)
 
     def test_upgrade_reorders_existing_entries_in_place(self):
-        """Old install where the previous order was cli/admin/ADMIN — seeder must
-        rewrite to the new (admin, cli, su) seed order, leaving ADMIN/ADMIN and any
-        user-added extras as trailing non-seed entries."""
+        """Old install where the previous order was cli/admin/ADMIN — seeder
+        must rewrite to the new (admin, cli, su, ADMIN) seed order, leaving
+        user-added extras (operator/custom) as trailing non-seed entries."""
         import json
         legacy = {
             "credentials": {"primary": {"username": "operator",
@@ -943,7 +957,7 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         self.creds_mod._seed_defaults_into_config()
         self.creds_mod._seed_defaults_into_config()
         pairs = self.creds_mod.get_default_credentials_to_try()
-        self.assertEqual(len(pairs), 3)
+        self.assertEqual(len(pairs), 4)
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1005,11 @@ class TestNokia1830TwoStageLogin(unittest.TestCase):
                 if isinstance(chunk, str):
                     chunk = chunk.encode()
                 return chunk
+
+            def close(inner):
+                # production code closes the shell channel in `finally`
+                # blocks; no-op here.
+                return None
 
         return FakeSession()
 
@@ -1040,6 +1059,12 @@ class TestNokia1830TwoStageLogin(unittest.TestCase):
         class FakeClient:
             def __init__(self):
                 self.closed = False
+
+            def save_host_keys(inner, _path):
+                # paramiko.SSHClient API surface — production code calls
+                # this after a successful connect to persist any newly
+                # learnt host keys. No-op in tests.
+                return None
 
             def invoke_shell(inner):
                 # Sequence:
@@ -1128,14 +1153,18 @@ class TestHandleCredentialFailureRotation(unittest.TestCase):
         ip = "203.0.113.42"
         q = Queue()
 
-        # Stub default cred list with 3 entries; the primary (#0) is assumed
-        # already tried by the caller, so the rotation should yield #1 then #2.
+        # Stub default cred list with 3 entries. Rotation starts at index 0
+        # because the primary credential may come from Credential Manager
+        # (not necessarily defaults[0]) — so we can't assume it was tried.
+        # All three entries are dispensed before CredentialPromptRequired
+        # signals exhaustion.
         with mock.patch(
             "script_interface.get_default_credentials_to_try",
             return_value=[("admin", "admin"), ("ADMIN", "ADMIN"), ("cli", "admin")],
         ):
             r1 = handle_credential_failure(ip, q, tried_defaults=False)
             r2 = handle_credential_failure(ip, q, tried_defaults=False)
+            r3 = handle_credential_failure(ip, q, tried_defaults=False)
             # Defaults exhausted — next call must raise so the GUI worker
             # can park the IP for a main-thread credential prompt. We
             # deliberately do NOT call prompt_for_credentials_gui from here;
@@ -1144,12 +1173,13 @@ class TestHandleCredentialFailureRotation(unittest.TestCase):
                 handle_credential_failure(ip, q, tried_defaults=False)
             # And a follow-up call must NOT raise again — it should return
             # (None, None) so the caller stops retrying this IP.
-            r4 = handle_credential_failure(ip, q, tried_defaults=False)
+            r5 = handle_credential_failure(ip, q, tried_defaults=False)
 
-        self.assertEqual(r1, ("ADMIN", "ADMIN"))
-        self.assertEqual(r2, ("cli", "admin"))
+        self.assertEqual(r1, ("admin", "admin"))
+        self.assertEqual(r2, ("ADMIN", "ADMIN"))
+        self.assertEqual(r3, ("cli", "admin"))
         self.assertEqual(ctx.exception.ip, ip)
-        self.assertEqual(r4, (None, None))
+        self.assertEqual(r5, (None, None))
 
     def test_reset_clears_state(self):
         from script_interface import handle_credential_failure, reset_auth_attempt
@@ -1159,9 +1189,11 @@ class TestHandleCredentialFailureRotation(unittest.TestCase):
             "script_interface.get_default_credentials_to_try",
             return_value=[("a", "a"), ("b", "b"), ("c", "c")],
         ):
+            self.assertEqual(handle_credential_failure(ip, q), ("a", "a"))
             self.assertEqual(handle_credential_failure(ip, q), ("b", "b"))
             reset_auth_attempt(ip)
-            self.assertEqual(handle_credential_failure(ip, q), ("b", "b"))
+            # After reset, rotation rewinds to index 0.
+            self.assertEqual(handle_credential_failure(ip, q), ("a", "a"))
 
 
 # ---------------------------------------------------------------------------

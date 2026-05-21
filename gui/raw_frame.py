@@ -64,17 +64,28 @@ def _split_raw_output_by_commands(raw_text: str, commands: List[str]) -> List[st
     login banner) are discarded.
     """
     lines = raw_text.splitlines()
+    prompt_re = re.compile(r"^[^\#]*#\s*")
 
     # Find the first line index where each command appears.
     cmd_line: Dict[int, int] = {}  # command_index -> line_index
 
-    for line_idx, line in enumerate(lines):
-        # Strip a leading "HOSTNAME# " prompt if present, then compare.
-        candidate = re.sub(r"^[^\#]*#\s*", "", line).strip()
-        for cmd_idx, cmd in enumerate(commands):
-            if cmd_idx not in cmd_line and candidate.startswith(cmd):
-                cmd_line[cmd_idx] = line_idx
-                break  # a line can only start one command
+    # Two-pass match: prefer prompt-prefixed command lines (``HOSTNAME# cmd``)
+    # over bare echoes (``cmd``). When a user paste-bombs several commands at
+    # once, the device echoes the buffered input as bare lines BEFORE the
+    # previous command's output, then prints the real prompt+command later.
+    # Matching bare echoes first scrambles section boundaries; the
+    # prompt-prefixed line is the authoritative start. We still fall through
+    # to bare matching in pass 2 so hand-crafted transcripts without
+    # prompts continue to work.
+    for require_prompt in (True, False):
+        for line_idx, line in enumerate(lines):
+            if require_prompt and not prompt_re.match(line):
+                continue
+            candidate = prompt_re.sub("", line).strip()
+            for cmd_idx, cmd in enumerate(commands):
+                if cmd_idx not in cmd_line and candidate.startswith(cmd):
+                    cmd_line[cmd_idx] = line_idx
+                    break  # a line can only start one command
 
     sorted_positions = sorted(cmd_line.items(), key=lambda x: x[1])
     result = [""] * len(commands)
@@ -177,6 +188,11 @@ def _detect_nokia_raw_script(raw_text: str, device_id: str = "") -> Optional[str
         return "scripts.Nokia_IXR_Raw"
     if re.search(r"(?<![0-9A-Za-z])(7705|sar(?:-8)?)(?![0-9A-Za-z])", haystack, re.IGNORECASE):
         return "scripts.Nokia_SAR_Raw"
+    if re.search(r"(?<![0-9A-Za-z])(1830|nokia\s*1830)(?![0-9A-Za-z])", haystack, re.IGNORECASE):
+        return "scripts.Nokia_1830"
+    # Matches bare "psi" / "nokia" or the 4L / 8L PSI hardware variants.
+    if re.search(r"(?<![0-9A-Za-z])(psi|nokia(?:-[48]l)?)(?![0-9A-Za-z])", haystack, re.IGNORECASE):
+        return "scripts.Nokia_PSI"
 
     has_mda_detail = re.search(r"^MDA\s+\d+/\d+\s+detail", raw_text, re.IGNORECASE | re.MULTILINE)
     has_chassis_detail = re.search(r"^\s*Chassis\s+1\s+Detail", raw_text, re.IGNORECASE | re.MULTILINE)
@@ -454,6 +470,11 @@ class RawFrame(ttk.Frame):
         """Parse every sheet as its own device, merge results, then export."""
         raw_outputs: Dict[str, Any] = {}
         success_count = 0
+        # Track per-sheet resolved modules so we can pick the right
+        # workbook-builder family below. Using the raw dropdown value
+        # would always return "default" for Auto Detect Nokia (its
+        # SCRIPT_OPTIONS value is "").
+        resolved_modules: List[str] = []
 
         for sheet_name, raw_text in sheets.items():
             self._log_write(f"{'─'*50}\n")
@@ -469,6 +490,7 @@ class RawFrame(ttk.Frame):
             ok = self._parse_device(raw_text, sheet_name, module_path, raw_outputs)
             if ok:
                 success_count += 1
+                resolved_modules.append(module_path)
 
         self._log_write(f"\n{'═'*50}\n")
         self._log_write(
@@ -486,7 +508,7 @@ class RawFrame(ttk.Frame):
             return
 
         # Re-key every device as "Manual" / "Manual_02" / "Manual_03" … so the
-        # summary IP column shows "Manual" instead of the node hostname.
+        # summary IP column shows "Manual" instead of the node IP address.
         # Zero-pad numbers so lexicographic sort matches numeric order.
         merged_outputs: Dict[str, Any] = {}
         n = len(raw_outputs)
@@ -495,7 +517,12 @@ class RawFrame(ttk.Frame):
             key = "Manual" if i == 1 else f"Manual_{str(i).zfill(width)}"
             merged_outputs[key] = data
 
-        family = _FAMILY_BY_MODULE.get(SCRIPT_OPTIONS.get(script_name, ""), "default")
+        # Derive family from the resolved per-sheet modules — picks the
+        # first non-default family if there is one, else falls back to
+        # "default". Mixed-family inputs (rare) land on "default" too.
+        families = {_FAMILY_BY_MODULE.get(m, "default") for m in resolved_modules}
+        non_default = families - {"default"}
+        family = next(iter(non_default)) if len(non_default) == 1 else "default"
         label = Path(self._input_path).stem if self._input_path else "MultiDevice"
         self.after(0, self._export, merged_outputs, family, label)
 
