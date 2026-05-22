@@ -1,0 +1,6 @@
+{
+  "_comment": "Maps Sales/marketing SKUs (typically *_BUNDLE variants) to the canonical Factory shipping part number used for BoM comparison. Both sides are folded to the canonical key before the missing-parts diff so a bundle on the Sales side and the bare component on the Factory side don't show up as a shortfall. Add new pairs as { 'alias_pn': 'canonical_pn' }. Keys are matched case-insensitively after a 1P/P vendor-prefix strip.",
+  "aliases": {
+    "3HE13584AA": "3HE11278AA"
+  }
+}

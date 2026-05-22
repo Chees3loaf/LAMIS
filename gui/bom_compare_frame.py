@@ -10,6 +10,7 @@ sheet for per-site quantities, and emits a new workbook with three tabs:
 * Factory BoM    — full-fidelity copy of the Factory BOM sheet.
 * Sales BoM      — full-fidelity copy of the Sales BOM sheet.
 """
+import json
 import logging
 import os
 import re
@@ -22,6 +23,8 @@ from tkinter import ttk, scrolledtext, filedialog, messagebox
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+from utils.helpers import get_data_dir
 
 
 # Header keywords used to recognize the fixed left-side columns.
@@ -74,6 +77,105 @@ def _hkey(s: Any) -> str:
 def _norm_site(name: str) -> str:
     """Case/whitespace-insensitive site key for cross-workbook matching."""
     return re.sub(r"\s+", " ", str(name or "").strip()).lower()
+
+
+# Vendor-prefix strip used so "1P3HE13584AA" / "P3HE13584AA" / "3HE13584AA"
+# all canonicalize to the same alias key.
+_VENDOR_PREFIX_RE = re.compile(r"^(?:1P|P)", re.IGNORECASE)
+
+
+def _strip_vendor_prefix(pn: str) -> str:
+    return _VENDOR_PREFIX_RE.sub("", (pn or "").strip(), count=1)
+
+
+def load_part_aliases(path: Optional[str] = None) -> Dict[str, str]:
+    """Load the alias → canonical part-number map from ``data/part_aliases.json``.
+
+    Returns an empty dict if the file is missing or malformed — the BoM
+    comparison still works without aliases, just without bundle/component
+    correlation. All keys and values are uppercased + vendor-prefix
+    stripped so lookup is uniform regardless of how the source BoMs typed
+    the SKU.
+    """
+    if path is None:
+        path = str(get_data_dir() / "part_aliases.json")
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as exc:
+        logging.warning(f"[BOM-COMPARE] Could not load part aliases from {path}: {exc}")
+        return {}
+
+    raw = payload.get("aliases") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            continue
+        ak = _strip_vendor_prefix(k).upper()
+        av = _strip_vendor_prefix(v).upper()
+        if ak and av:
+            out[ak] = av
+    return out
+
+
+def canonical_part(pn: str, aliases: Dict[str, str]) -> str:
+    """Resolve *pn* to its canonical part number through the alias map.
+
+    Handles 1P/P vendor prefixes and case differences. Falls back to the
+    original (uppercased, prefix-stripped) part number when no alias is
+    registered.
+    """
+    if not pn:
+        return ""
+    key = _strip_vendor_prefix(pn).upper()
+    return aliases.get(key, key)
+
+
+def fold_aliased_parts(
+    parts: Dict[str, Dict[str, Any]],
+    aliases: Dict[str, str],
+) -> Dict[str, Dict[str, Any]]:
+    """Collapse aliased SKUs in a ``_parse_per_site_bom`` result into the
+    canonical part number.
+
+    Quantities are summed per site; descriptions prefer the canonical
+    SKU's description when both forms are present (so the Missing BOM
+    sheet shows the bare-chassis text, not the bundle text). Returns a
+    new dict; *parts* is not mutated.
+    """
+    if not aliases:
+        return parts
+    folded: Dict[str, Dict[str, Any]] = {}
+    for pn, info in parts.items():
+        canon = canonical_part(pn, aliases)
+        is_canonical_input = (canon == _strip_vendor_prefix(pn).upper() == canon)
+        existing = folded.get(canon)
+        if existing is None:
+            folded[canon] = {
+                "desc": info.get("desc", ""),
+                "site_qty": dict(info.get("site_qty", {})),
+                # Track whether the description came from the canonical SKU
+                # so a later alias entry doesn't overwrite the better text.
+                "_desc_is_canonical": is_canonical_input,
+            }
+            continue
+        for site, q in info.get("site_qty", {}).items():
+            existing["site_qty"][site] = existing["site_qty"].get(site, 0) + int(q)
+        # Prefer the canonical description if we have one; otherwise the
+        # first non-empty wins.
+        if is_canonical_input and info.get("desc"):
+            existing["desc"] = info["desc"]
+            existing["_desc_is_canonical"] = True
+        elif not existing.get("desc") and info.get("desc"):
+            existing["desc"] = info["desc"]
+    # Drop the bookkeeping flag before returning.
+    for v in folded.values():
+        v.pop("_desc_is_canonical", None)
+    return folded
 
 
 class BomCompareFrame(ttk.Frame):
@@ -241,10 +343,43 @@ class BomCompareFrame(ttk.Frame):
             f"Sales: {len(sal_parts)} parts across {len(sal_sites)} site col(s)"
         )
 
+        # Fold alias SKUs (e.g. CHASSIS BUNDLE -> bare CHASSIS) into their
+        # canonical part numbers on BOTH sides before any keyed lookup so
+        # bundle/component pairs correlate cleanly during the diff.
+        aliases = load_part_aliases()
+        if aliases:
+            fac_before, sal_before = len(fac_parts), len(sal_parts)
+            fac_parts = fold_aliased_parts(fac_parts, aliases)
+            sal_parts = fold_aliased_parts(sal_parts, aliases)
+            # Re-key the per-part group maps too so the breakdown picks up
+            # canonical SKUs (otherwise group="Optics" fallback kicks in).
+            fac_part_to_group = {
+                canonical_part(pn, aliases): grp
+                for pn, grp in fac_part_to_group.items()
+            }
+            sal_part_to_group = {
+                canonical_part(pn, aliases): grp
+                for pn, grp in sal_part_to_group.items()
+            }
+            collapsed = (fac_before - len(fac_parts)) + (sal_before - len(sal_parts))
+            self._append_log(
+                f"Aliases: {len(aliases)} registered, "
+                f"{collapsed} row(s) folded into canonical SKUs"
+            )
+
         # Prefer a Spare/Spare Materials column on the Factory BoM sheet
         # itself; fall back to a separate Spares tab when the column isn't
         # present.
         spares = fac_inline_spares or self._parse_spares(fac_data)
+        if spares and aliases:
+            # Spares pool must also be canonicalized so an alias-keyed
+            # shortfall finds its backfill regardless of which form the
+            # Spares column used.
+            canon_spares: Dict[str, int] = {}
+            for pn, qty in spares.items():
+                ck = canonical_part(pn, aliases)
+                canon_spares[ck] = canon_spares.get(ck, 0) + int(qty)
+            spares = canon_spares
         if spares:
             src = "BOM column" if fac_inline_spares else "separate tab"
             self._append_log(f"Spares pool ({src}): {len(spares)} unique parts available for backfill")
