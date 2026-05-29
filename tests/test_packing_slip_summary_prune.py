@@ -147,5 +147,123 @@ class TestExtractSheetFromLink(unittest.TestCase):
         self.assertIsNone(PackingSlipFrame._extract_sheet_from_link(None))
 
 
+class TestPopulateFieldsFromFile(unittest.TestCase):
+    """``_try_populate_fields_from_file`` extracts Customer / Project /
+    PO / SO from an uploaded workbook. The hard part is picking the
+    right sheet:
+
+    * Inventory / BoM workbooks carry a BOM aggregate tab where
+      ``C7 = "Equipment Description"`` and ``D7 = <first device name>``.
+      Reading PO/SO from that tab leaks the column header into the
+      Purchase Order field — the bug the fix addresses.
+    * Per-device "Device Report" tabs carry ``B7 = "Customer PO/Sale
+      Order:"`` followed by the real PO at C7 and SO at D7. That
+      label is the structural marker we now require.
+    """
+
+    def _new_frame(self):
+        frame = PackingSlipFrame.__new__(PackingSlipFrame)
+        frame._last_customer = ""
+        frame._last_project = ""
+        frame._last_customer_po = ""
+        frame._last_sales_order = ""
+        frame._refresh_info_display = lambda: None  # no Tk widgets
+        return frame
+
+    def _make_inventory_bom_workbook(self, path):
+        """Mirror the real PG&E inventory BoM layout: Summary +
+        BOM aggregate + one Device Report tab."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Summary"
+        ws["B5"] = "Customer"; ws["D5"] = "Project"
+        ws["B7"] = "PG&E";    ws["D7"] = "One Offs"
+
+        bom = wb.create_sheet("BOM")
+        bom["A7"] = "Item"
+        bom["B7"] = "Part No."
+        # The reported bug: C7/D7 here are column headers / device names
+        # that used to be mis-read as PO/SO.
+        bom["C7"] = "Equipment Description"
+        bom["D7"] = "IPMuxSar8-L0015-A1"
+
+        dev = wb.create_sheet("IPMuxSar8_L0015_A1")
+        dev["B5"] = "Customer:";              dev["C5"] = "PG&E"
+        dev["B6"] = "Project:";               dev["C6"] = "One Offs"
+        dev["B7"] = "Customer PO/Sale Order:"
+        dev["C7"] = "2701295874"
+        dev["D7"] = "26079"
+        wb.save(path)
+
+    def _make_packing_slip_workbook(self, path):
+        """Per-device packing slip tabs have ``B7 = 'Device ID:'``, not
+        a PO label. PO/SO must NOT be populated from C7/D7 here."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Summary"
+        ws["B5"] = "Customer"; ws["D5"] = "Project"
+        ws["B7"] = "PG&E";    ws["D7"] = "One Offs"
+
+        dev = wb.create_sheet("IPMuxSar8_L0015_A1")
+        dev["B5"] = "Customer:"; dev["C5"] = "PG&E"
+        dev["B6"] = "Project:";  dev["C6"] = "One Offs"
+        dev["B7"] = "Device ID:"
+        dev["C7"] = "IPMuxSar8_L0015_A1"  # the value that was leaking as PO
+        wb.save(path)
+
+    def test_inventory_bom_reads_po_so_from_device_report(self):
+        import os, tempfile
+        fd, path = tempfile.mkstemp(suffix=".xlsx"); os.close(fd)
+        try:
+            self._make_inventory_bom_workbook(path)
+            frame = self._new_frame()
+            frame._try_populate_fields_from_file(path)
+            self.assertEqual(frame._last_customer, "PG&E")
+            self.assertEqual(frame._last_project, "One Offs")
+            self.assertEqual(frame._last_customer_po, "2701295874")
+            self.assertEqual(frame._last_sales_order, "26079")
+        finally:
+            os.unlink(path)
+
+    def test_inventory_bom_does_not_read_bom_tab_as_device_report(self):
+        """Regression for the reported bug. With ONLY the BOM aggregate
+        tab (no Device Reports), the Purchase Order field must NOT pick
+        up "Equipment Description" from BOM C7."""
+        import os, tempfile
+        fd, path = tempfile.mkstemp(suffix=".xlsx"); os.close(fd)
+        try:
+            wb = openpyxl.Workbook()
+            ws = wb.active; ws.title = "Summary"
+            ws["B7"] = "PG&E"; ws["D7"] = "One Offs"
+            bom = wb.create_sheet("BOM")
+            bom["C7"] = "Equipment Description"
+            bom["D7"] = "IPMuxSar8-L0015-A1"
+            wb.save(path)
+            frame = self._new_frame()
+            frame._try_populate_fields_from_file(path)
+            self.assertEqual(frame._last_customer_po, "TBD")
+            self.assertEqual(frame._last_sales_order, "TBD")
+            # And the BOM tab's C7 must NOT leak into PO.
+            self.assertNotEqual(frame._last_customer_po, "Equipment Description")
+        finally:
+            os.unlink(path)
+
+    def test_packing_slip_layout_no_po_so(self):
+        """Packing slip per-device tabs have B7='Device ID:' (no PO
+        marker), so PO/SO must default to TBD."""
+        import os, tempfile
+        fd, path = tempfile.mkstemp(suffix=".xlsx"); os.close(fd)
+        try:
+            self._make_packing_slip_workbook(path)
+            frame = self._new_frame()
+            frame._try_populate_fields_from_file(path)
+            self.assertEqual(frame._last_customer, "PG&E")
+            self.assertEqual(frame._last_project, "One Offs")
+            self.assertEqual(frame._last_customer_po, "TBD")
+            self.assertEqual(frame._last_sales_order, "TBD")
+        finally:
+            os.unlink(path)
+
+
 if __name__ == "__main__":
     unittest.main()

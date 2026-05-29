@@ -460,28 +460,43 @@ class Script(BaseScript):
             # --- Primary: parse structured per-MDA detail blocks ---
             # 'show mda detail' produces blocks separated by ===... / MDA N/M / ===... headers.
             # Split on those separators so each chunk covers exactly one MDA.
+            #
+            # We capture the slot number directly from the header
+            # (``MDA 1/5 detail``) — the second group of N/M is the slot.
+            # The previous implementation searched the BODY for a line
+            # matching ``MDA   : N`` to extract the slot, but some cards
+            # (e.g. the 32-port T1/E1 ASAP ``a32-chds1v2``) format their
+            # specific-data section without that exact line, so the
+            # whole slot was silently dropped at the
+            # ``if not mda_m: continue`` check. Pulling the slot from
+            # the header is robust against per-card body variations.
             block_splitter = re.compile(
-                r"={5,}[\s\S]*?MDA\s+[\d/]+[\s\S]*?={5,}", re.MULTILINE
+                r"={5,}[\s\S]*?MDA\s+(\d+)/(\d+)[\s\S]*?={5,}", re.MULTILINE
             )
-            block_starts = [m.start() for m in block_splitter.finditer(output)]
+            block_matches = list(block_splitter.finditer(output))
 
             detail_entries = {}  # mda_num -> entry dict (so duplicates from summary are avoided)
 
-            if block_starts:
-                for i, start in enumerate(block_starts):
-                    end = block_starts[i + 1] if i + 1 < len(block_starts) else len(output)
+            if block_matches:
+                for i, match in enumerate(block_matches):
+                    start = match.start()
+                    end = block_matches[i + 1].start() if i + 1 < len(block_matches) else len(output)
                     block = output[start:end]
 
-                    mda_m = re.search(r'MDA\s*:\s*(\d+)', block)
+                    # Slot number from the matched header. Group 1 is
+                    # the chassis index (typically 1); group 2 is the
+                    # slot, which is what we want for the MDA Name.
+                    header_slot = match.group(2).strip()
+
                     prov_m = re.search(r'Provisioned Type\s*:\s*([^\r\n]+)', block, re.IGNORECASE)
                     equip_m = re.search(r'Equipped Type\s*:\s*([^\r\n]+)', block, re.IGNORECASE)
                     part_m = re.search(r'Part number[ \t]*:[ \t]*([^\r\n]+)', block, re.IGNORECASE)
                     serial_m = re.search(r'Serial number[ \t]*:[ \t]*([^\r\n]+)', block, re.IGNORECASE)
 
-                    if not mda_m or not part_m or not serial_m:
+                    if not part_m or not serial_m:
                         continue
 
-                    mda_num = mda_m.group(1).strip()
+                    mda_num = header_slot
                     prov_type = prov_m.group(1).strip() if prov_m else ""
                     equip_type = equip_m.group(1).strip() if equip_m else ""
 
@@ -610,8 +625,23 @@ class Script(BaseScript):
                 logging.debug(f"Processing line: {line.strip()}")
 
                 if "Optical Compliance" in line:
-                    # 🔹 **Look back for related data** (Previous 5 lines max)
-                    for j in range(max(0, i - 5), i):
+                    # 🔹 **Look back for related data, CLOSEST line first**
+                    # (Previous 5 lines max). The `show port detail | match`
+                    # filter keeps an `Interface` line for EVERY port —
+                    # populated or not — but only emits Serial/Model/
+                    # Part/Optical Compliance for ports with an SFP. When
+                    # the previous port had no SFP (e.g., a 7705 SAR-8
+                    # a6-eth-10G card with empty xcme ports 1-4 followed
+                    # by an SFP on port 5), the look-back window contains
+                    # TWO Interface lines: the empty previous port and
+                    # the current populated one. Iterating forward (the
+                    # old behavior) picked the EARLIEST Interface — the
+                    # previous, empty port — and the SFP got reported
+                    # against the wrong port number (1/1/4 instead of
+                    # 1/1/5). Iterating backward picks the closest
+                    # Interface above the Optical Compliance line, which
+                    # is always the current port.
+                    for j in range(i - 1, max(-1, i - 6), -1):
                         if not current_interface:
                             interface_match = interface_pattern.search(lines[j])
                             if interface_match:

@@ -26,16 +26,23 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 AUTO_DETECT_NOKIA = "Auto Detect Nokia"
+# Sentinel for the Sales BoM Import flow — not a CLI parser, so its
+# value is a non-module marker. _worker special-cases this value to
+# dispatch the Sales-BoM-to-packing-slip pipeline instead of the
+# CLI-transcript parsing path.
+SALES_BOM_IMPORT = "Sales BoM"
+_SALES_BOM_MARKER = "__sales_bom_import__"
 
 # Display name → module path for the script dropdown
 SCRIPT_OPTIONS: Dict[str, str] = {
     AUTO_DETECT_NOKIA: "",
-    "Nokia PSI":   "scripts.Nokia_PSI",
-    "Nokia 1830":  "scripts.Nokia_1830",
-    "Nokia SAR":   "scripts.Nokia_SAR_Raw",
-    "Nokia IXR":   "scripts.Nokia_IXR_Raw",
-    "Ciena 6500":  "scripts.Ciena_6500",
-    "Ciena RLS":   "scripts.Ciena_RLS",
+    "Nokia PSI":     "scripts.Nokia_PSI",
+    "Nokia 1830":    "scripts.Nokia_1830",
+    "Nokia SAR":     "scripts.Nokia_SAR_Raw",
+    "Nokia IXR":     "scripts.Nokia_IXR_Raw",
+    "Ciena 6500":    "scripts.Ciena_6500",
+    "Ciena RLS":     "scripts.Ciena_RLS",
+    SALES_BOM_IMPORT: _SALES_BOM_MARKER,
 }
 
 # Map module path → workbook-builder family key
@@ -413,6 +420,13 @@ class RawFrame(ttk.Frame):
         try:
             input_path = Path(file_path)
 
+            # Sales BoM Import is a completely different flow from the
+            # CLI-transcript path — it parses a Sales BoM workbook and
+            # produces a packing-slip-style output. Branch early.
+            if script_name == SALES_BOM_IMPORT:
+                self._process_sales_bom_import(file_path)
+                return
+
             if input_path.is_dir():
                 devices = _read_text_folder(file_path)
                 if not devices:
@@ -525,6 +539,304 @@ class RawFrame(ttk.Frame):
         family = next(iter(non_default)) if len(non_default) == 1 else "default"
         label = Path(self._input_path).stem if self._input_path else "MultiDevice"
         self.after(0, self._export, merged_outputs, family, label)
+
+    # ------------------------------------------------------------------
+    # Sales BoM Import path — completely separate from CLI-transcript
+    # processing. Parses a Sales BoM xlsx, prompts the user to pick a
+    # worksheet, then generates a packing-slip-style workbook via
+    # WorkbookBuilder.build_sales_bom_packing_slip_workbook.
+    # ------------------------------------------------------------------
+
+    def _process_sales_bom_import(self, source_path: str) -> None:
+        """Worker entrypoint for the Sales BoM Import option.
+
+        Logs every step under the ``[SalesBoM-UI]`` prefix so the
+        operator can correlate UI events with the workbook builder's
+        ``[SalesBoM]`` log lines when troubleshooting.
+        """
+        logging.info(
+            f"[SalesBoM-UI] _process_sales_bom_import start: source={source_path!r}"
+        )
+        try:
+            import openpyxl
+        except Exception as exc:
+            logging.exception("[SalesBoM-UI] openpyxl import failed")
+            self._log_write(f"openpyxl unavailable: {exc}\n")
+            self.after(0, self._finish, False)
+            return
+
+        ext = Path(source_path).suffix.lower()
+        if ext not in (".xlsx", ".xls"):
+            logging.error(
+                f"[SalesBoM-UI] Unsupported extension {ext!r} for {source_path!r}"
+            )
+            self._log_write(
+                "Sales BoM Import expects an .xlsx / .xls file; "
+                f"got {ext!r}.\n"
+            )
+            self.after(0, self._finish, False)
+            return
+
+        try:
+            src_size = os.path.getsize(source_path)
+            logging.debug(
+                f"[SalesBoM-UI] Source file size: {src_size:,} bytes"
+            )
+        except OSError as exc:
+            logging.error(f"[SalesBoM-UI] Cannot stat source: {exc}")
+
+        self._log_write(f"Sales BoM Import — source: {source_path}\n")
+        try:
+            wb = openpyxl.load_workbook(source_path, data_only=True, read_only=True)
+            sheet_names = list(wb.sheetnames)
+            wb.close()
+            logging.info(
+                f"[SalesBoM-UI] Loaded source with {len(sheet_names)} sheet(s): "
+                f"{sheet_names}"
+            )
+        except Exception as exc:
+            logging.exception(
+                f"[SalesBoM-UI] Failed to open source workbook {source_path!r}"
+            )
+            self._log_write(f"Could not open Sales BoM: {exc}\n")
+            self.after(0, self._finish, False)
+            return
+
+        if not sheet_names:
+            logging.warning(
+                f"[SalesBoM-UI] Source has no worksheets: {source_path!r}"
+            )
+            self._log_write("Sales BoM has no worksheets.\n")
+            self.after(0, self._finish, False)
+            return
+
+        self._log_write(f"Worksheets found: {', '.join(sheet_names)}\n")
+
+        # Prompt for worksheet(s) (modal dialog on the main thread).
+        chosen: Dict[str, Optional[List[str]]] = {"sheets": None}
+
+        def _ask():
+            logging.debug("[SalesBoM-UI] Showing worksheet picker dialog")
+            chosen["sheets"] = self._pick_worksheet_dialog(
+                source_path, sheet_names
+            )
+
+        # Marshal back to main thread, wait for result before continuing.
+        ev = threading.Event()
+
+        def _wrapped():
+            try:
+                _ask()
+            finally:
+                ev.set()
+        self.after(0, _wrapped)
+        if not ev.wait(timeout=300):
+            logging.warning(
+                "[SalesBoM-UI] Worksheet picker timed out after 300s — "
+                "operator left the dialog open"
+            )
+            self._log_write("Worksheet selection timed out.\n")
+            self.after(0, self._finish, False)
+            return
+        selected = chosen.get("sheets")
+        if selected is None or not selected:
+            logging.info(
+                "[SalesBoM-UI] Worksheet selection cancelled / empty"
+            )
+            self._log_write("Worksheet selection cancelled.\n")
+            self.after(0, self._finish, False)
+            return
+
+        logging.info(
+            f"[SalesBoM-UI] Worksheet(s) selected ({len(selected)}): "
+            f"{selected!r}"
+        )
+        self._log_write(
+            f"Selected worksheet(s): {', '.join(selected)}\n"
+        )
+        # Hand off to the export path on the main thread — reuses the
+        # existing customer/project prompt + save-folder picker.
+        self.after(0, self._export_sales_bom, source_path, selected)
+
+    def _pick_worksheet_dialog(
+        self,
+        source_path: str,
+        sheet_names: List[str],
+    ) -> Optional[List[str]]:
+        """Show a modal multi-select dialog of worksheet names.
+
+        Returns the chosen names (preserving listbox order), or
+        ``None`` if the user cancelled. Returns ``[]`` only if the
+        operator clicked OK with no selection (treated as cancel by
+        the caller).
+
+        Selection mode is ``EXTENDED`` so the operator can shift-click
+        a range or ctrl-click individual items. When multiple sheets
+        are picked, the builder merges their data into one combined
+        output workbook (sites with the same name sum quantities;
+        first-seen description wins).
+        """
+        logging.debug(
+            f"[SalesBoM-UI] _pick_worksheet_dialog opened with "
+            f"{len(sheet_names)} option(s)"
+        )
+        top = tk.Toplevel(self)
+        top.title("Pick BoM Worksheet(s)")
+        top.transient(self.winfo_toplevel())
+        top.resizable(True, True)
+
+        ttk.Label(
+            top,
+            text=(
+                f"Source: {os.path.basename(source_path)}\n\n"
+                "Pick one or more worksheets to process. Shift-click for\n"
+                "a range, Ctrl-click for individual selections. When more\n"
+                "than one is picked the data is merged into a single output\n"
+                "workbook — sites with the same name sum across sheets."
+            ),
+            justify=tk.LEFT,
+        ).pack(padx=12, pady=(12, 6), anchor="w")
+
+        listbox = tk.Listbox(
+            top,
+            selectmode=tk.EXTENDED,
+            height=min(16, len(sheet_names) + 1),
+            width=50,
+        )
+        for n in sheet_names:
+            listbox.insert(tk.END, n)
+        listbox.selection_set(0)
+        listbox.pack(padx=12, pady=6, fill=tk.BOTH, expand=True)
+
+        result: Dict[str, Optional[List[str]]] = {"v": None}
+
+        def _ok():
+            sel = listbox.curselection()
+            if sel:
+                result["v"] = [sheet_names[i] for i in sel]
+                logging.debug(
+                    f"[SalesBoM-UI] Worksheet picker: OK -> {result['v']!r} "
+                    f"({len(result['v'])} selected)"
+                )
+            else:
+                result["v"] = []
+                logging.debug(
+                    "[SalesBoM-UI] Worksheet picker: OK with empty selection"
+                )
+            top.destroy()
+
+        def _cancel():
+            result["v"] = None
+            logging.debug("[SalesBoM-UI] Worksheet picker: cancelled")
+            top.destroy()
+
+        btn = ttk.Frame(top)
+        btn.pack(fill=tk.X, padx=12, pady=(6, 12))
+        ttk.Button(btn, text="OK", command=_ok, width=10).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btn, text="Cancel", command=_cancel, width=10).pack(side=tk.RIGHT, padx=4)
+
+        listbox.bind("<Double-Button-1>", lambda _e: _ok())
+        top.bind("<Return>", lambda _e: _ok())
+        top.bind("<Escape>", lambda _e: _cancel())
+        top.grab_set()
+        top.wait_window()
+        return result["v"]
+
+    def _export_sales_bom(self, source_path: str, sheet_names) -> None:
+        """Prompt for customer/project + save folder, then call the
+        WorkbookBuilder to produce the per-site packing-slip output.
+
+        ``sheet_names`` is either a single sheet name (legacy) or a
+        list of names. When multiple are passed, the builder merges
+        the data into one combined output workbook.
+
+        Every step is logged under ``[SalesBoM-UI]`` so cancellations,
+        validation failures, and unexpected exceptions all surface in
+        the ATLAS log file.
+        """
+        # Normalize to list for downstream uniformity.
+        if isinstance(sheet_names, str):
+            sheet_names = [sheet_names]
+        logging.info(
+            f"[SalesBoM-UI] _export_sales_bom start: source={source_path!r}  "
+            f"sheets={sheet_names!r}"
+        )
+        try:
+            default_name = re.sub(r"[^\w\-]", "_", Path(source_path).stem)
+            logging.debug(
+                f"[SalesBoM-UI] Default filename derived from source stem: "
+                f"{default_name!r}"
+            )
+            user_in = self.gui.get_user_inputs(default_name)
+            if not user_in:
+                logging.info(
+                    "[SalesBoM-UI] Customer/project prompt cancelled by operator"
+                )
+                self._log_write("Export cancelled.\n")
+                self._finish(False)
+                return
+            customer = user_in.get("Customer", "")
+            project = user_in.get("Project", "")
+            filename = user_in.get("Filename", default_name)
+            logging.info(
+                f"[SalesBoM-UI] User inputs received: customer={customer!r}  "
+                f"project={project!r}  filename={filename!r}"
+            )
+
+            from utils.helpers import sanitize_filename_component
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+            safe_name = "_".join(
+                filter(None, [
+                    sanitize_filename_component(filename),
+                    sanitize_filename_component(customer),
+                    sanitize_filename_component(project),
+                    "SalesBoM_Site_Packing",
+                    timestamp,
+                ])
+            )
+            logging.debug(f"[SalesBoM-UI] Sanitized filename stem: {safe_name!r}")
+
+            save_dir = filedialog.askdirectory(title="Choose folder to save Sales BoM packing slips")
+            if not save_dir:
+                logging.info(
+                    "[SalesBoM-UI] Save folder prompt cancelled by operator"
+                )
+                self._log_write("Export cancelled (no folder chosen).\n")
+                self._finish(False)
+                return
+
+            output_file = os.path.join(save_dir, f"{safe_name}.xlsx")
+            logging.info(f"[SalesBoM-UI] Save target: {output_file!r}")
+            self._log_write(f"Building output: {output_file}\n")
+            self._status_var.set("Building…")
+
+            builder = self.gui.workbook_builder
+            try:
+                builder.build_sales_bom_packing_slip_workbook(
+                    source_path=source_path,
+                    selected_sheets=sheet_names,
+                    output_file=output_file,
+                    customer=customer,
+                    project=project,
+                )
+            except Exception:
+                # WorkbookBuilder already logged details under [SalesBoM];
+                # add the UI-side context and re-raise for the outer
+                # handler.
+                logging.exception(
+                    "[SalesBoM-UI] WorkbookBuilder.build_sales_bom_packing_"
+                    "slip_workbook raised — full traceback logged above"
+                )
+                raise
+            logging.info(
+                f"[SalesBoM-UI] Build succeeded: {output_file!r}"
+            )
+            self._log_write("Sales BoM packing slips generated.\n")
+            self._finish(True)
+        except Exception as exc:
+            logging.exception("[SalesBoM-UI] Sales BoM Import export error")
+            self._log_write(f"\nExport ERROR: {exc}\n")
+            self._finish(False)
 
     def _parse_device(
         self,

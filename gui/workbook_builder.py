@@ -215,8 +215,22 @@ class WorkbookBuilder:
             except Exception as exc:
                 logging.warning(f"Autosize failed for sheet '{sheet_name}': {exc}")
 
-    def copy_sheet(self, source_sheet: Any, target_wb: Any, new_sheet_name: str) -> Any:
-        """Copy an entire sheet from one workbook to another while preserving formatting."""
+    def copy_sheet(
+        self,
+        source_sheet: Any,
+        target_wb: Any,
+        new_sheet_name: str,
+        copy_images: bool = True,
+    ) -> Any:
+        """Copy an entire sheet from one workbook to another while preserving formatting.
+
+        ``copy_images=False`` skips embedded images on the destination
+        sheet. Use this for sheets where the source's branding artwork
+        (e.g. the LightRiver banner on Sales / Factory BoM templates)
+        produces drawing XML that Excel rejects after openpyxl's
+        BytesIO-based image rebuild — the reference-copy tabs in the
+        BoM Comparison output don't need the branding anyway.
+        """
         new_sheet = target_wb.create_sheet(title=new_sheet_name)
 
         for row in source_sheet.iter_rows():
@@ -262,25 +276,26 @@ class WorkbookBuilder:
         # Copy embedded images (e.g. the LightRiver banner on the BOM template).
         # Each image's byte data is reread from disk so the new workbook owns
         # an independent copy rather than aliasing the source's buffer.
-        try:
-            from openpyxl.drawing.image import Image as XLImage
-            from io import BytesIO
-            for src_img in getattr(source_sheet, "_images", []) or []:
-                try:
-                    data_fn = getattr(src_img, "_data", None)
-                    if not callable(data_fn):
-                        continue
-                    img_bytes = data_fn()
-                    if not img_bytes:
-                        continue
-                    new_img = XLImage(BytesIO(img_bytes))
-                    if src_img.anchor is not None:
-                        new_img.anchor = copy(src_img.anchor)
-                    new_sheet.add_image(new_img)
-                except Exception as exc:
-                    logging.debug(f"[copy_sheet] Skipped one image: {exc}")
-        except Exception as exc:
-            logging.debug(f"[copy_sheet] Image-copy block failed: {exc}")
+        if copy_images:
+            try:
+                from openpyxl.drawing.image import Image as XLImage
+                from io import BytesIO
+                for src_img in getattr(source_sheet, "_images", []) or []:
+                    try:
+                        data_fn = getattr(src_img, "_data", None)
+                        if not callable(data_fn):
+                            continue
+                        img_bytes = data_fn()
+                        if not img_bytes:
+                            continue
+                        new_img = XLImage(BytesIO(img_bytes))
+                        if src_img.anchor is not None:
+                            new_img.anchor = copy(src_img.anchor)
+                        new_sheet.add_image(new_img)
+                    except Exception as exc:
+                        logging.debug(f"[copy_sheet] Skipped one image: {exc}")
+            except Exception as exc:
+                logging.debug(f"[copy_sheet] Image-copy block failed: {exc}")
 
         return new_sheet
 
@@ -1122,6 +1137,70 @@ class WorkbookBuilder:
                         bucket.append((part, desc, grp))
         return result
 
+    @staticmethod
+    def _fold_kits_into_bom_data(
+        bom_data: Dict[str, List[Tuple[str, str, str]]],
+    ) -> int:
+        """Per-site, fold complete kit-component sets into kit instances.
+
+        For every site in *bom_data*, if all components of a known kit
+        (defined in ``data/part_aliases.json`` under ``"kits"``) appear
+        on that site, collapse ``k = min(component counts)`` of each
+        component into ``k`` kit entries. Components that don't form a
+        complete kit at the site stay as individual lines. Returns the
+        total number of kit instances created across all sites.
+
+        Mutates *bom_data* in place. No-op when there are no kit
+        definitions or none can be fully assembled.
+        """
+        try:
+            # Lazy import to avoid circular dependency at module load.
+            from gui.bom_compare_frame import load_part_kits
+        except Exception:
+            return 0
+        kits = load_part_kits()
+        if not kits:
+            return 0
+        total_folded = 0
+        for site, entries in bom_data.items():
+            counts: Dict[str, int] = {}
+            for pn, _desc, _grp in entries:
+                counts[pn] = counts.get(pn, 0) + 1
+            for kd in kits:
+                comps = kd["components"]
+                comp_counts = [counts.get(c, 0) for c in comps]
+                if not all(n > 0 for n in comp_counts):
+                    continue
+                k = min(comp_counts)
+                kit_sku = kd["kit"]
+                kit_desc = kd.get("kit_description", "")
+                # Group: prefer the kit definition's, else inherit
+                # whatever group the first component had on this site.
+                kit_group = kd.get("group", "")
+                if not kit_group:
+                    for pn, _desc, grp in entries:
+                        if pn == comps[0]:
+                            kit_group = grp or "Chassis/Shelf"
+                            break
+                    else:
+                        kit_group = "Chassis/Shelf"
+                # Remove k entries of each component from this site.
+                for c in comps:
+                    removed = 0
+                    new_entries: List[Tuple[str, str, str]] = []
+                    for e in entries:
+                        if removed < k and e[0] == c:
+                            removed += 1
+                            continue
+                        new_entries.append(e)
+                    entries[:] = new_entries
+                    counts[c] = counts.get(c, 0) - k
+                # Add k kit instances.
+                entries.extend([(kit_sku, kit_desc, kit_group)] * k)
+                counts[kit_sku] = counts.get(kit_sku, 0) + k
+                total_folded += k
+        return total_folded
+
     def _build_bom_sheet(
         self,
         wb: Any,
@@ -1157,6 +1236,14 @@ class WorkbookBuilder:
                 if st not in bom_data or not bom_data[st]:
                     bom_data[st] = entries
             del wb["BOM"]
+
+        # Per-site kit folding: when a site lists all components of a
+        # known kit, collapse them into kit instances. See
+        # _fold_kits_into_bom_data + data/part_aliases.json "kits".
+        try:
+            self._fold_kits_into_bom_data(bom_data)
+        except Exception as exc:
+            logging.debug(f"[BOM] kit folding skipped: {exc}")
 
         # Prefer copying the BOM template (carries title, fixed-column headers,
         # widths, freeze panes). Fall back to a programmatic scaffold if the
@@ -2394,6 +2481,628 @@ class WorkbookBuilder:
                 shutil.rmtree(tempdir, ignore_errors=True)
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Sales BoM Import — per-site packing-slip workbook from a Sales BoM
+    # ------------------------------------------------------------------
+
+    def build_sales_bom_packing_slip_workbook(
+        self,
+        source_path: str,
+        selected_sheets,  # str OR List[str] — single sheet name (legacy) or list of names
+        output_file: str,
+        customer: str = "",
+        project: str = "",
+    ) -> str:
+        """Generate a packing-slip-style workbook from a Sales BoM.
+
+        ``selected_sheets`` accepts either a single sheet name (legacy
+        single-pick behavior) or a list of names. When multiple sheets
+        are passed, their data is **merged into a single output**:
+        sites that share a name across sheets get their quantities
+        summed; first-seen part description / group wins.
+
+        Layout of the output workbook (unchanged by multi-sheet):
+
+        * ``Summary`` — site list mirroring the standard ATLAS Summary
+          layout, hyperlinked to per-site tabs.
+        * ``BOM`` — aggregate Bill of Materials covering every site in
+          the merged data. Uses the older "Factory Bill of Materials"
+          banner via ``data/BoM_Factory_Aggregate_Template.xlsx``.
+        * One tab per site — 3-column layout (``Part Number`` /
+          ``Description`` / ``Quantity``) with headers at row 14 and
+          data starting at row 15. Quantity values are plain numbers.
+        * ``Spares`` tab — appears when any selected sheet has a
+          Spares column with non-zero entries.
+
+        Sanitization mirrors BoM Compare: source loaded ``data_only=True``,
+        price columns excluded by the parser, alias folding applied
+        per-sheet before merge.
+
+        Every step is logged under the ``[SalesBoM]`` prefix at INFO
+        (high-level) and DEBUG (data-shape) levels — grep the ATLAS
+        log file for ``[SalesBoM]`` to trace a single run.
+
+        Returns the absolute path of the saved file.
+        """
+        import time as _time
+        from gui.bom_compare_frame import (
+            BomCompareFrame, load_part_aliases, fold_aliased_parts,
+            canonical_part,
+        )
+
+        # Normalize input: accept either a single sheet name (legacy
+        # callers) or a list of names.
+        if isinstance(selected_sheets, str):
+            sheet_list: List[str] = [selected_sheets]
+        else:
+            sheet_list = list(selected_sheets or [])
+        if not sheet_list:
+            raise ValueError("selected_sheets must not be empty")
+
+        run_start = _time.monotonic()
+        logging.info(
+            f"[SalesBoM] === BEGIN === source={source_path!r}  "
+            f"sheets={sheet_list!r}  output={output_file!r}  "
+            f"customer={customer!r}  project={project!r}"
+        )
+        # --- Source workbook load ---
+        try:
+            src_size = os.path.getsize(source_path)
+            logging.debug(f"[SalesBoM] Source size: {src_size:,} bytes")
+        except OSError as exc:
+            logging.error(f"[SalesBoM] Could not stat source file: {exc}")
+            raise
+
+        try:
+            src_wb = openpyxl.load_workbook(source_path, data_only=True)
+        except Exception as exc:
+            logging.exception(
+                f"[SalesBoM] Failed to load source workbook {source_path!r}"
+            )
+            raise
+        logging.debug(
+            f"[SalesBoM] Loaded source with {len(src_wb.sheetnames)} sheet(s): "
+            f"{src_wb.sheetnames}"
+        )
+
+        # Validate every selected sheet up front.
+        missing = [s for s in sheet_list if s not in src_wb.sheetnames]
+        if missing:
+            logging.error(
+                f"[SalesBoM] Selected sheets not in source workbook: "
+                f"{missing}  available={src_wb.sheetnames}"
+            )
+            raise ValueError(
+                f"Selected sheet(s) {missing} not found in source workbook. "
+                f"Available: {src_wb.sheetnames}"
+            )
+
+        # --- Load aliases once; apply per-sheet during parse + merge. ---
+        aliases = load_part_aliases()
+        if not aliases:
+            logging.debug("[SalesBoM] No aliases registered — skipping fold")
+
+        # --- Per-sheet parse + merge into combined data structures. ---
+        # sites: ordered union (first-seen wins)
+        # parts: pn -> {desc, site_qty: {site: qty}}; site quantities
+        #        sum across sheets, desc is first-seen non-empty
+        # part_to_group: first-seen group per part
+        # inline_spares: spares quantities summed across sheets
+        sites: List[str] = []
+        parts: Dict[str, Dict[str, Any]] = {}
+        part_to_group: Dict[str, str] = {}
+        inline_spares: Dict[str, int] = {}
+        total_parts_across_sheets = 0
+        for sheet_name in sheet_list:
+            src_ws = src_wb[sheet_name]
+            logging.debug(
+                f"[SalesBoM] Parsing sheet {sheet_name!r} dims "
+                f"{src_ws.max_row}x{src_ws.max_column}"
+            )
+            try:
+                s_sites, s_parts, s_spares, s_groups = (
+                    BomCompareFrame._parse_per_site_bom(src_ws)
+                )
+            except Exception:
+                logging.exception(
+                    f"[SalesBoM] Parser failed on sheet {sheet_name!r} — "
+                    f"verify the sheet has a Part No. header + Total / Qty "
+                    f"header within the first 25 rows."
+                )
+                raise
+
+            # Alias-fold this sheet before merging so canonical keys
+            # align across sheets and across the alias map.
+            if aliases:
+                s_parts_before = len(s_parts)
+                s_parts = fold_aliased_parts(s_parts, aliases)
+                s_groups = {
+                    canonical_part(pn, aliases): grp
+                    for pn, grp in s_groups.items()
+                }
+                if s_spares:
+                    canon_sp: Dict[str, int] = {}
+                    for pn, qty in s_spares.items():
+                        ck = canonical_part(pn, aliases)
+                        canon_sp[ck] = canon_sp.get(ck, 0) + int(qty)
+                    s_spares = canon_sp
+                if s_parts_before != len(s_parts):
+                    logging.debug(
+                        f"[SalesBoM] Sheet {sheet_name!r}: alias fold "
+                        f"collapsed {s_parts_before - len(s_parts)} row(s)"
+                    )
+
+            logging.info(
+                f"[SalesBoM] Parsed sheet {sheet_name!r}: {len(s_parts)} "
+                f"part(s), {len(s_sites)} site(s), {len(s_spares)} "
+                f"inline-spare entries"
+            )
+            total_parts_across_sheets += len(s_parts)
+
+            # Merge sites — preserve first-seen order across sheets.
+            for s in s_sites:
+                if s not in sites:
+                    sites.append(s)
+
+            # Merge parts — sum per-site quantities; first non-empty
+            # description / group wins.
+            for pn, info in s_parts.items():
+                if pn not in parts:
+                    parts[pn] = {
+                        "desc": info.get("desc", ""),
+                        "site_qty": dict(info.get("site_qty", {})),
+                    }
+                else:
+                    for site, qty in info.get("site_qty", {}).items():
+                        parts[pn]["site_qty"][site] = (
+                            parts[pn]["site_qty"].get(site, 0) + int(qty)
+                        )
+                    if not parts[pn]["desc"] and info.get("desc"):
+                        parts[pn]["desc"] = info["desc"]
+            for pn, grp in s_groups.items():
+                if pn not in part_to_group:
+                    part_to_group[pn] = grp
+            # Sum spares across sheets.
+            for pn, qty in s_spares.items():
+                inline_spares[pn] = inline_spares.get(pn, 0) + int(qty)
+
+        if len(sheet_list) > 1:
+            logging.info(
+                f"[SalesBoM] Multi-sheet merge complete: {len(sheet_list)} "
+                f"sheets -> {len(parts)} unique part(s) (raw total before "
+                f"merge: {total_parts_across_sheets}), {len(sites)} unique "
+                f"site(s), {len(inline_spares)} spare entries"
+            )
+        logging.debug(f"[SalesBoM] Sites (merged): {sites}")
+
+        # --- Merge Sales-side "Spares" column as a virtual 'Spares' site ---
+        # The Sales BoM's Spares column lists extras the customer
+        # ordered (shipped alongside per-site allocations). To match
+        # the BoM's own Total column AND give the operator visibility
+        # into "how many are allocated to spares," treat the Spares
+        # column as one more site: it gets its own tab, its own column
+        # on the BoM aggregate, and rolls naturally into the Total
+        # column (Total = sum of per-site columns + Spares column).
+        SPARES_SITE = "Spares"
+        if inline_spares:
+            if SPARES_SITE not in sites:
+                sites = list(sites) + [SPARES_SITE]
+            n_added = 0
+            for pn, qty in inline_spares.items():
+                qty_i = int(qty)
+                if qty_i <= 0:
+                    continue
+                if pn not in parts:
+                    # Spares-only part — no per-site quantity in the
+                    # source. Description may not be available here;
+                    # downstream display falls back to the empty string.
+                    parts[pn] = {"desc": "", "site_qty": {}}
+                parts[pn].setdefault("site_qty", {})[SPARES_SITE] = qty_i
+                n_added += 1
+            logging.info(
+                f"[SalesBoM] Merged Spares column as virtual site: "
+                f"{n_added} part(s) with non-zero spares (BoM aggregate "
+                f"+ dedicated 'Spares' tab will reflect these quantities)"
+            )
+        else:
+            logging.debug(
+                "[SalesBoM] No inline Spares column on source sheet — "
+                "skipping virtual-site merge"
+            )
+
+        # --- Initialize output workbook ---
+        out_wb = openpyxl.Workbook()
+        del out_wb[out_wb.sheetnames[0]]
+
+        # --- Summary sheet ---
+        logging.debug("[SalesBoM] Creating Summary sheet")
+        try:
+            summary_sheet = out_wb.create_sheet("Summary", 0)
+            self._setup_summary_sheet_header(
+                summary_sheet, customer, project, list(sites)
+            )
+            summary_items: List[Tuple[str, str, str]] = [
+                ("", site, site) for site in sites
+            ]
+            self._populate_summary_table(summary_sheet, summary_items, start_row=10)
+            logging.debug(f"[SalesBoM] Summary populated with {len(summary_items)} rows")
+        except Exception:
+            logging.exception("[SalesBoM] Summary sheet construction failed")
+            raise
+
+        # --- BoM aggregate sheet (uses older "Factory Bill of Materials"
+        # banner via dedicated template) ---
+        factory_tpl = os.path.join(
+            os.path.dirname(self.bom_template),
+            "BoM_Factory_Aggregate_Template.xlsx",
+        ) if self.bom_template else ""
+        if not (factory_tpl and os.path.exists(factory_tpl)):
+            logging.warning(
+                f"[SalesBoM] Factory aggregate template not found at "
+                f"{factory_tpl!r} — BOM tab will use the standard "
+                f"BOM_Template.xlsx (with the 'LightRiver Live Inventory' "
+                f"banner) as a fallback."
+            )
+
+        bom_data: Dict[str, List[Tuple[str, str, str]]] = {}
+        total_entries = 0
+        for site in sites:
+            entries: List[Tuple[str, str, str]] = []
+            for pn, info in parts.items():
+                qty = int(info.get("site_qty", {}).get(site, 0))
+                if qty <= 0:
+                    continue
+                grp = part_to_group.get(pn) or "Chassis/Shelf"
+                desc = info.get("desc", "")
+                entries.extend([(pn, desc, grp)] * qty)
+            if entries:
+                bom_data[site] = entries
+                total_entries += len(entries)
+        logging.info(
+            f"[SalesBoM] BoM aggregate: {total_entries} entries across "
+            f"{len(bom_data)} site(s) (skipping sites with zero ordered)"
+        )
+
+        orig_bom_template = self.bom_template
+        if factory_tpl and os.path.exists(factory_tpl):
+            self.bom_template = factory_tpl
+            logging.debug(
+                f"[SalesBoM] Swapped self.bom_template to {factory_tpl!r} "
+                f"for BoM aggregate build"
+            )
+        try:
+            self._build_bom_sheet(out_wb, summary_items, bom_data)
+        except Exception:
+            logging.exception("[SalesBoM] _build_bom_sheet failed")
+            raise
+        finally:
+            self.bom_template = orig_bom_template
+            logging.debug("[SalesBoM] Restored original self.bom_template")
+
+        # --- Surface the per-row Total Ordered on the BoM aggregate ---
+        # The template writes a SUM formula in the rightmost column (CB
+        # on the user's data), which means an operator has to scroll
+        # across 70+ site columns to see it. Insert a plain-value Total
+        # Ordered column at position D (right after Equipment Description)
+        # and extend the freeze pane so it stays visible while
+        # scrolling horizontally.
+        try:
+            if "BOM" in out_wb.sheetnames:
+                self._add_visible_total_column_to_bom(out_wb["BOM"])
+        except Exception:
+            logging.exception(
+                "[SalesBoM] Could not insert visible Total column on BoM tab"
+            )
+
+        # --- Per-site tabs ---
+        per_site_built = 0
+        for site in sites:
+            try:
+                ws = self._add_sales_bom_site_tab(
+                    out_wb, site, customer, project, parts,
+                )
+                per_site_built += 1
+                logging.debug(
+                    f"[SalesBoM] Per-site tab created: site={site!r}  "
+                    f"sheet_title={ws.title!r}"
+                )
+            except Exception:
+                logging.exception(
+                    f"[SalesBoM] Failed to build per-site tab for {site!r} "
+                    f"— continuing with remaining sites"
+                )
+        logging.info(
+            f"[SalesBoM] Per-site tabs built: {per_site_built}/{len(sites)}"
+        )
+
+        # --- Tab ordering ---
+        pinned = ["Summary"] + (["BOM"] if "BOM" in out_wb.sheetnames else [])
+        per_site_tabs = [s for s in sites if s in out_wb.sheetnames]
+        ordered = pinned + per_site_tabs
+        remaining = [n for n in out_wb.sheetnames if n not in ordered]
+        out_wb._sheets = [out_wb[n] for n in ordered + remaining]
+        logging.debug(
+            f"[SalesBoM] Final tab order ({len(out_wb.sheetnames)} sheets): "
+            f"{out_wb.sheetnames}"
+        )
+
+        # --- Save ---
+        save_dir = os.path.dirname(output_file)
+        if save_dir:
+            try:
+                os.makedirs(save_dir, exist_ok=True)
+            except OSError as exc:
+                logging.error(
+                    f"[SalesBoM] Could not create save directory {save_dir!r}: {exc}"
+                )
+                raise
+        try:
+            self.autosize_workbook_columns(out_wb)
+            out_wb.save(output_file)
+        except Exception:
+            logging.exception(
+                f"[SalesBoM] Save failed for {output_file!r} — "
+                f"check permissions, disk space, and whether the file is "
+                f"already open in Excel"
+            )
+            raise
+        out_size = os.path.getsize(output_file) if os.path.exists(output_file) else 0
+        elapsed = _time.monotonic() - run_start
+        logging.info(
+            f"[SalesBoM] === END === saved {output_file!r}  "
+            f"size={out_size:,} bytes  sheets={len(out_wb.sheetnames)}  "
+            f"elapsed={elapsed:.2f}s"
+        )
+        return output_file
+
+    @staticmethod
+    def _add_visible_total_column_to_bom(ws: Any) -> bool:
+        """Insert a plain-value 'Total Ordered' column at position D on
+        a BoM aggregate sheet so the per-row total is visible without
+        scrolling to the rightmost column.
+
+        Pre-conditions (matches what ``_build_bom_sheet`` produces):
+        * Row 7 carries column headers (Item at A7, Part No. at B7,
+          Equipment Description at C7, sites from D7 onward, ending in
+          a 'Total' header at the rightmost column).
+        * Row 8 carries the 'Qty' sub-headers.
+        * Data rows start at row 10.
+
+        Algorithm:
+        1. Locate the original Total column (rightmost row-7 header).
+        2. Pre-compute each data row's total by summing the in-row
+           data cells between the original site-start (col 4) and the
+           original Total column (exclusive).
+        3. Insert a new column at position D. openpyxl shifts every
+           existing column right by 1 (including the original Total at
+           ``old_total_col + 1``). Cell-reference formulas do NOT
+           auto-update, so the shifted Total column's SUM(...) range
+           is now stale — we replace it with our computed values.
+        4. Style the new headers; remove the now-stale shifted Total
+           column at the right edge.
+        5. Move the freeze pane from D9 (Item/PN/Desc frozen) to E9
+           so Item / PN / Desc / Total all stay visible while
+           scrolling across the per-site columns.
+
+        Returns True on success, False if no Total column could be
+        located (sheet not in the expected layout).
+        """
+        if ws is None:
+            return False
+        # 1) Find the original Total column. The BOM template lays it
+        # out as the rightmost 'Total' header on row 7.
+        max_c = ws.max_column or 0
+        max_r = ws.max_row or 0
+        if max_c < 5 or max_r < 10:
+            logging.debug(
+                "[SalesBoM] BoM tab too small for Total-column insert "
+                f"({max_r}x{max_c})"
+            )
+            return False
+        old_total_col = None
+        for c in range(max_c, 0, -1):
+            v = ws.cell(7, c).value
+            if v and str(v).strip().lower() == "total":
+                old_total_col = c
+                break
+        if old_total_col is None or old_total_col < 5:
+            logging.debug(
+                "[SalesBoM] Could not locate Total header on row 7 "
+                "of BoM tab"
+            )
+            return False
+
+        # 2) Pre-compute per-row totals before any shifts happen. Sum
+        # every numeric data cell between the first site column (4) and
+        # the original Total column (exclusive). This includes the
+        # Spares column (which sits just before Total in the template).
+        DATA_FIRST_ROW = 10
+        row_totals: Dict[int, int] = {}
+        for r in range(DATA_FIRST_ROW, max_r + 1):
+            total = 0
+            for c in range(4, old_total_col):
+                v = ws.cell(r, c).value
+                if isinstance(v, (int, float)):
+                    total += int(v)
+            # Only record rows that have data (skip blank section
+            # banner rows and similar template artifacts).
+            if total > 0 or ws.cell(r, 2).value:
+                row_totals[r] = total
+
+        # 3) Insert a new column at D. Existing data shifts right by 1;
+        # the original Total column is now at ``old_total_col + 1``.
+        ws.insert_cols(4)
+        new_total_col = 4
+        new_total_letter = get_column_letter(new_total_col)
+        old_total_col_shifted = old_total_col + 1
+        logging.debug(
+            f"[SalesBoM] BoM tab Total insert: original Total at col "
+            f"{old_total_col}, shifted to {old_total_col_shifted}, "
+            f"new Total inserted at col {new_total_col}"
+        )
+
+        # 4a) Style new column headers — copy the visual style from the
+        # original Total header cell (post-shift) so the new column
+        # blends with the existing template aesthetic.
+        from copy import copy as _copy
+        ref_header = ws.cell(7, old_total_col_shifted)
+        ref_sub = ws.cell(8, old_total_col_shifted)
+        new_hdr = ws.cell(7, new_total_col, "Total Ordered")
+        new_sub = ws.cell(8, new_total_col, "Qty")
+        for src_cell, dst_cell in ((ref_header, new_hdr), (ref_sub, new_sub)):
+            if src_cell.has_style:
+                dst_cell.font = _copy(src_cell.font)
+                dst_cell.fill = _copy(src_cell.fill)
+                dst_cell.border = _copy(src_cell.border)
+                dst_cell.alignment = _copy(src_cell.alignment)
+                dst_cell.number_format = src_cell.number_format
+
+        # 4b) Fill data cells with computed totals. Copy a numeric
+        # cell's style from the original Total column for visual
+        # consistency.
+        for r, total in row_totals.items():
+            cell = ws.cell(r, new_total_col, total)
+            ref_data = ws.cell(r, old_total_col_shifted)
+            if ref_data.has_style:
+                cell.font = _copy(ref_data.font)
+                cell.fill = _copy(ref_data.fill)
+                cell.border = _copy(ref_data.border)
+                cell.alignment = _copy(ref_data.alignment)
+                cell.number_format = ref_data.number_format
+
+        # 4c) Remove the shifted original Total column — its SUM(...)
+        # formula references stale cell coordinates (insert_cols did
+        # not update them), so leaving it in place would surface the
+        # wrong number once Excel recalculates.
+        try:
+            ws.delete_cols(old_total_col_shifted)
+            logging.debug(
+                f"[SalesBoM] Deleted stale Total formula at col "
+                f"{old_total_col_shifted}"
+            )
+        except Exception:
+            logging.exception(
+                "[SalesBoM] Could not delete stale Total formula column"
+            )
+
+        # 5) Set column width and extend the freeze pane to include the
+        # new Total column.
+        try:
+            ws.column_dimensions[new_total_letter].width = 14
+        except Exception:
+            pass
+        # Templates typically freeze at D9 (rows 1-8 + cols A-C static).
+        # Move to E9 so Item / PN / Desc / Total all stay visible.
+        try:
+            ws.freeze_panes = "E9"
+        except Exception:
+            logging.debug("[SalesBoM] Could not extend freeze pane on BoM tab")
+
+        logging.info(
+            f"[SalesBoM] Inserted 'Total Ordered' column at "
+            f"{new_total_letter} on BoM tab; totals computed for "
+            f"{len(row_totals)} row(s); freeze pane extended to E9"
+        )
+        return True
+
+    def _add_sales_bom_site_tab(
+        self,
+        wb: Any,
+        site: str,
+        customer: str,
+        project: str,
+        parts: Dict[str, Dict[str, Any]],
+    ) -> Any:
+        """Create one site tab on *wb* listing every part the Sales BoM
+        wants at *site*, in the 3-column layout.
+
+        Header style mirrors the standard Packing Slip: customer at C5,
+        project at C6, site name at C7, column headers at row 14
+        (B=Part Number, C=Description, D=Quantity), data from row 15.
+        """
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+        # Sanitize site name for sheet title (Excel disallows :\/?*[])
+        safe_title = re.sub(r"[:\\/?*\[\]]", "_", str(site).strip())[:31] or "Site"
+        if safe_title != site:
+            logging.debug(
+                f"[SalesBoM] Site name sanitized for sheet title: "
+                f"{site!r} -> {safe_title!r}"
+            )
+        # Dedupe against existing tab titles.
+        base = safe_title
+        counter = 2
+        while safe_title in wb.sheetnames:
+            suffix = f"_{counter}"
+            safe_title = (base[: 31 - len(suffix)] + suffix)
+            counter += 1
+        if counter > 2:
+            logging.debug(
+                f"[SalesBoM] Site tab name collided; deduped to {safe_title!r}"
+            )
+        ws = wb.create_sheet(safe_title)
+
+        # Return link to Summary at A1.
+        ws["A1"] = "Return"
+        ws["A1"].hyperlink = "#'Summary'!A1"
+        ws["A1"].style = "Hyperlink"
+
+        # Customer / Project / Site header block.
+        thin = Side(style="thin", color="FF7F7F7F")
+        border = Border(left=thin, right=thin, top=thin, bottom=thin)
+        bold = Font(bold=True)
+        accent_fill = PatternFill(start_color="FF0087FF", end_color="FF0087FF", fill_type="solid")
+        white_bold = Font(color="FFFFFFFF", bold=True)
+        center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        left = Alignment(horizontal="left", vertical="center", wrap_text=True)
+
+        ws["B5"] = "Customer:"
+        ws["B5"].font = bold
+        ws["C5"] = customer or ""
+        ws["B6"] = "Project:"
+        ws["B6"].font = bold
+        ws["C6"] = project or ""
+        ws["B7"] = "Site:"
+        ws["B7"].font = bold
+        ws["C7"] = site
+
+        # Column header row at 14.
+        for col, label in (("B14", "Part Number"), ("C14", "Description"), ("D14", "Quantity")):
+            cell = ws[col]
+            cell.value = label
+            cell.fill = accent_fill
+            cell.font = white_bold
+            cell.alignment = center
+            cell.border = border
+
+        # Data rows from 15: one row per part with positive qty at this site.
+        # Sorted by group then by part number so the layout reads naturally.
+        rows: List[Tuple[str, str, int, str]] = []
+        for pn, info in parts.items():
+            qty = int(info.get("site_qty", {}).get(site, 0))
+            if qty <= 0:
+                continue
+            rows.append((pn, info.get("desc", ""), qty, ""))
+        rows.sort(key=lambda r: (r[0],))
+
+        for i, (pn, desc, qty, _) in enumerate(rows, start=15):
+            ws.cell(i, 2, pn).alignment = center
+            ws.cell(i, 3, desc).alignment = left
+            ws.cell(i, 4, qty).alignment = center
+            for c in (2, 3, 4):
+                ws.cell(i, c).border = border
+
+        # Column widths
+        ws.column_dimensions["A"].width = 6
+        ws.column_dimensions["B"].width = 18
+        ws.column_dimensions["C"].width = 60
+        ws.column_dimensions["D"].width = 12
+        ws.freeze_panes = "A15"
+        logging.debug(
+            f"[SalesBoM] Site tab {safe_title!r}: {len(rows)} part row(s), "
+            f"total qty={sum(r[2] for r in rows)}"
+        )
+        return ws
 
     # ------------------------------------------------------------------
     # Packing slip workbook

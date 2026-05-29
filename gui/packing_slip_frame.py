@@ -183,26 +183,48 @@ class PackingSlipFrame(ttk.Frame):
 
         Two source layouts are supported:
 
-        * **Inventory / BoM workbook** — Summary sheet at B7 / D7
-          (Customer / Project). PO / SO are not present on inventory
-          summaries; they fall back to "TBD".
-        * **Existing packing slip workbook** — first device sheet at
-          C5 / C6 (Customer / Project) plus C7 / D7 (PO / SO).
+        * **Inventory / BoM workbook** — Summary sheet has Customer at
+          B7 and Project at D7. Per-device "Device Report" tabs carry
+          Customer at C5, Project at C6, Customer PO at C7, Sales
+          Order at D7. PO/SO come from the first Device Report tab.
+        * **Existing packing slip workbook** — per-device sheets carry
+          Customer at C5 and Project at C6, but B7 is ``Device ID:``
+          (not a PO marker), so PO/SO default to TBD.
+
+        A sheet is recognized as a Device Report when its ``B7`` cell
+        starts with ``Customer PO`` (the label adjacent to the PO/SO
+        values). Without that marker we don't read C7/D7 — that
+        prevents the BOM aggregate's column headers ("Equipment
+        Description" at C7, first device name at D7) from being
+        mis-read as PO/SO, which was the reported bug.
         """
+        def _is_device_report(ws) -> bool:
+            try:
+                b7 = ws["B7"].value
+            except Exception:
+                return False
+            return (
+                isinstance(b7, str)
+                and b7.strip().lower().startswith("customer po")
+            )
+
         customer, project, po, so = "", "", "", ""
         try:
             wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-
-            device_sheets = [n for n in wb.sheetnames if "summary" not in n.lower()]
             summary_sheets = [n for n in wb.sheetnames if "summary" in n.lower()]
 
-            # Strategy 1: packing slip / device report format
-            # Header cells: C5 = Customer, C6 = Project, C7 = PO, D7 = SO
-            if device_sheets:
-                ws = wb[device_sheets[0]]
+            # Strategy 1a: any sheet that LOOKS like a Device Report.
+            # The structural marker on B7 keeps the BOM aggregate (which
+            # has "Equipment Description" at C7 and the first device
+            # name at D7) from being mistaken for a Device Report.
+            device_report_sheets = [
+                n for n in wb.sheetnames if _is_device_report(wb[n])
+            ]
+            if device_report_sheets:
+                ws = wb[device_report_sheets[0]]
                 for coord, target in (
                     ("C5", "customer"), ("C6", "project"),
-                    ("C7", "po"), ("D7", "so"),
+                    ("C7", "po"),       ("D7", "so"),
                 ):
                     val = ws[coord].value
                     if val and str(val).strip() not in ("", "nan", "None"):
@@ -215,15 +237,43 @@ class PackingSlipFrame(ttk.Frame):
                         elif target == "so":
                             so = str(val).strip()
 
+            # Strategy 1b: Packing-Slip-style per-device sheet supplies
+            # Customer + Project (B5='Customer:' C5=name, B6='Project:'
+            # C6=name) but NOT PO/SO. Only consult when 1a missed.
+            if not customer or not project:
+                for name in wb.sheetnames:
+                    if name in device_report_sheets:
+                        continue
+                    if "summary" in name.lower() or name.upper() == "BOM":
+                        continue
+                    ws = wb[name]
+                    b5 = ws["B5"].value
+                    b6 = ws["B6"].value
+                    if (
+                        isinstance(b5, str)
+                        and b5.strip().lower().startswith("customer")
+                        and isinstance(b6, str)
+                        and b6.strip().lower().startswith("project")
+                    ):
+                        if not customer:
+                            v = ws["C5"].value
+                            if v and str(v).strip() not in ("", "nan", "None"):
+                                customer = str(v).strip()
+                        if not project:
+                            v = ws["C6"].value
+                            if v and str(v).strip() not in ("", "nan", "None"):
+                                project = str(v).strip()
+                        break
+
             # Strategy 2: inventory report summary sheet
             # Summary sheet: B7 = Customer value, D7 = Project value
-            if not customer and summary_sheets:
+            if (not customer or not project) and summary_sheets:
                 ws = wb[summary_sheets[0]]
                 b7 = ws["B7"].value
                 d7 = ws["D7"].value
-                if b7 and str(b7).strip() not in ("", "nan", "None"):
+                if not customer and b7 and str(b7).strip() not in ("", "nan", "None"):
                     customer = str(b7).strip()
-                if d7 and str(d7).strip() not in ("", "nan", "None"):
+                if not project and d7 and str(d7).strip() not in ("", "nan", "None"):
                     project = str(d7).strip()
 
             wb.close()
