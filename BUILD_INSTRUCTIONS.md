@@ -82,12 +82,20 @@ Outputs:
 ### Common options
 
 ```bat
-build.bat --clean              :: wipe build\ and dist\ first
+build.bat                      :: build + sign (signs by default)
+build.bat --clean              :: wipe build\ and dist\ first, then build + sign
 build.bat --release            :: also delete dist\ATLAS\ at the end
                                   (keeps only the Setup.exe for distribution)
-build.bat --sign cert.pfx      :: sign ATLAS.exe + TDS.exe + Setup.exe
-build.bat --clean --sign cert.pfx --release   :: full release build
+build.bat --no-sign            :: build without signing (debug / CI)
+build.bat --sign other.pfx     :: sign with a non-default cert
+build.bat --clean --release    :: full release build (signed)
 ```
+
+**Signing is on by default.** The build looks for the cert at
+`certs\LightRiver_codesign.pfx` (gitignored) and prompts for its
+password each run. If the cert is missing the build aborts with a
+message — either drop the `.pfx` at that path or pass `--no-sign`. To
+use a different cert path on the fly, pass `--sign path\to\other.pfx`.
 
 By default the unpacked `dist\ATLAS\` folder is preserved so you can run
 `ATLAS.exe` directly to smoke-test before installing. Add `--release` when
@@ -275,8 +283,8 @@ policies that require signed binaries. Both `ATLAS.exe` and `TDS.exe`
 should be signed in addition to the installer.
 
 ```bat
-:: All-in-one: clean build, sign every artifact, produce release installer
-build.bat --clean --sign "certs\LightRiver_codesign.pfx" --release
+:: All-in-one: clean build, sign every artifact (default), produce release installer
+build.bat --clean --release
 ```
 
 Or sign after the fact:

@@ -4,11 +4,18 @@ REM
 REM Drives PyInstaller using ATLAS.spec (the source of truth for hidden
 REM imports, data files, and the second TDS.exe target) and then NSIS.
 REM
+REM Signing is ALWAYS ON by default using certs\LightRiver_codesign.pfx.
+REM Drop the .pfx at that path once (gitignored) and every build will
+REM sign ATLAS.exe and ATLAS_Setup.exe. sign.bat prompts for the
+REM certificate password interactively each run.
+REM
 REM Usage:
-REM   build.bat                            -- Build exe + installer
+REM   build.bat                            -- Build + sign exe + installer
 REM   build.bat --clean                    -- Wipe build/ and dist/ first
-REM   build.bat --sign cert.pfx            -- Build then sign exe + installer
-REM   build.bat --clean --sign cert.pfx    -- Clean + build + sign
+REM   build.bat --no-sign                  -- Skip signing (for debug or CI
+REM                                           without cert)
+REM   build.bat --sign other.pfx           -- Sign with a non-default cert
+REM                                           (overrides certs\LightRiver_codesign.pfx)
 REM   build.bat --release                  -- After installer build, remove
 REM                                           dist\ATLAS\ (keep only Setup.exe).
 REM                                           Default keeps dist\ATLAS\ so you
@@ -29,10 +36,13 @@ set SPEC_FILE=ATLAS.spec
 set NSI_FILE=ATLAS.nsi
 
 REM ---- Parse arguments --------------------------------------------------
+REM DO_SIGN defaults to 1 — every build signs unless --no-sign is passed.
+REM CERT_FILE defaults to certs\LightRiver_codesign.pfx (gitignored). Pass
+REM --sign other.pfx to override.
 set DO_CLEAN=0
-set DO_SIGN=0
+set DO_SIGN=1
 set DO_RELEASE=0
-set CERT_FILE=
+set CERT_FILE=certs\LightRiver_codesign.pfx
 
 :parse_args
 if "%1"=="--clean" (
@@ -44,6 +54,11 @@ if "%1"=="--sign" (
     set DO_SIGN=1
     set CERT_FILE=%2
     shift
+    shift
+    goto parse_args
+)
+if "%1"=="--no-sign" (
+    set DO_SIGN=0
     shift
     goto parse_args
 )
@@ -135,15 +150,19 @@ echo.
 echo [OK] Executable built: dist\%APP_NAME%\%APP_NAME%.exe
 echo      TDS now runs through ATLAS.exe --tds-mode ^(no separate TDS.exe^).
 
-REM ---- Optionally sign the executables before packaging ----------------
+REM ---- Sign the executables before packaging --------------------------
+REM Signing is on by default; pass --no-sign to skip (debug / CI builds).
 if "%DO_SIGN%"=="1" (
-    if "%CERT_FILE%"=="" (
-        echo [!] --sign requires a certificate path. Example:
-        echo     build.bat --sign "certs\LightRiver_codesign.pfx"
+    if not exist "%CERT_FILE%" (
+        echo.
+        echo [!] Code-signing certificate not found:
+        echo         %CERT_FILE%
+        echo     Drop the .pfx at that path to enable auto-signing, or
+        echo     re-run with --no-sign to skip signing for this build.
         exit /b 1
     )
     echo.
-    echo [*] Signing executables...
+    echo [*] Signing executables with %CERT_FILE% ...
     call sign.bat "%CERT_FILE%" --exe-only
     if errorlevel 1 (
         echo [!] Signing failed - aborting installer build.
@@ -215,7 +234,7 @@ echo Build Summary
 echo ============================================
 if exist dist\%APP_NAME%_Setup.exe echo Installer  : dist\%APP_NAME%_Setup.exe
 if exist dist\%APP_NAME%\%APP_NAME%.exe echo Unpacked   : dist\%APP_NAME%\%APP_NAME%.exe   ^(run to smoke-test^)
-if "%DO_SIGN%"=="1" (echo Signed     : YES) else (echo Signed     : NO  ^(re-run with: build.bat --sign cert.pfx^))
+if "%DO_SIGN%"=="1" (echo Signed     : YES  ^(%CERT_FILE%^)) else (echo Signed     : NO  ^(--no-sign was passed^))
 if defined INSTALLER_HASH (
     echo SHA-256    : !INSTALLER_HASH!
     echo.
