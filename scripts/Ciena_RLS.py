@@ -22,13 +22,15 @@ class Script(BaseScript):
     def __init__(self, *,
                  connection_type='telnet',
                  command_tracker=None,
-                 ip_address,
+                 ip_address=None,
                  username='su',
                  password='admin',
                  timeout=5,
                  db_path=None,
                  db_cache=None,
-                 stop_callback=None):
+                 stop_callback=None,
+                 serial_port=None,
+                 baud_rate=None):
         # --- DB wiring ---
         if db_cache is not None:
             self.db_cache = db_cache
@@ -52,9 +54,22 @@ class Script(BaseScript):
         self.timeout = timeout
         self.port = 22
         self.stop_callback = stop_callback
+        # Serial-mode state. ``baud_rate`` may be None (the GUI doesn't
+        # know the device's actual rate), in which case
+        # ``execute_serial_commands`` probes the standard RLS speeds.
+        self.serial_port = serial_port
+        self.baud_rate = baud_rate
+        self.serial_port_obj = None
 
-        if not self.ip_address:
-            raise ValueError("Missing required 'ip_address' for network-based connection.")
+        # Network-based connections need an IP; serial doesn't.
+        if connection_type in ("telnet", "ssh") and not self.ip_address:
+            raise ValueError(
+                f"Missing required 'ip_address' for {connection_type} connection."
+            )
+        if connection_type == "serial" and not self.serial_port:
+            raise ValueError(
+                "Missing required 'serial_port' for serial connection."
+            )
 
     # ------------------------------------------------------------------
     # Abort / stop helpers
@@ -132,6 +147,8 @@ class Script(BaseScript):
     def execute_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
         if self.connection_type == 'ssh':
             return self.execute_ssh_commands(commands)
+        if self.connection_type == 'serial':
+            return self.execute_serial_commands(commands)
 
         outputs = []
         for command in commands:
@@ -410,6 +427,120 @@ class Script(BaseScript):
                         logging.debug(f"Error closing Telnet after failed login: {close_err}")
 
         return False
+
+    # ------------------------------------------------------------------
+    # Serial path
+    # ------------------------------------------------------------------
+
+    # RLS console default credentials. Tried before the encrypted seed
+    # pool on the assumption that most lab gear ships with the factory
+    # password; if a customer has rotated it, the seed pool catches up.
+    _SERIAL_DEFAULT_CREDS: List[Tuple[str, str]] = [("su", "Ciena123")]
+
+    # Baud rates the probe tries when the GUI doesn't pin one. RLS gear
+    # ships at 9600 or 115200 depending on flash image vintage.
+    _SERIAL_DEFAULT_BAUDS: List[int] = [9600, 115200]
+
+    def execute_serial_commands(
+        self, commands: List[str]
+    ) -> Tuple[List[str], Optional[str]]:
+        """Drive the RLS console over a serial port.
+
+        Auto-probes baud rate (9600 / 115200 by default — overridable
+        via ``baud_rate`` in ``__init__``), authenticates using the
+        factory default ``su`` / ``Ciena123`` first then the encrypted
+        seed pool, and runs each command through
+        :func:`utils.serial_helpers.capture_until_prompt`.
+        """
+        try:
+            from utils.serial_helpers import (
+                open_serial_with_baud_probe,
+                serial_login,
+                capture_until_prompt,
+            )
+            from utils.credentials import get_default_credentials_to_try
+        except Exception as exc:
+            logging.error(f"[RLS-SERIAL] Helper import failed: {exc}")
+            return [], f"Serial helpers unavailable: {exc}"
+
+        # Pick the baud list: GUI-specified single rate, else probe both.
+        bauds = (
+            [int(self.baud_rate)] if self.baud_rate
+            else list(self._SERIAL_DEFAULT_BAUDS)
+        )
+
+        ser = open_serial_with_baud_probe(
+            self.serial_port,
+            bauds,
+            timeout=2.0,
+            should_stop=self.should_stop,
+        )
+        if ser is None:
+            return [], (
+                f"No console prompt detected on {self.serial_port} at "
+                f"{bauds} baud — check cable / device power."
+            )
+        self.serial_port_obj = ser
+
+        try:
+            # Credential ladder: caller-supplied > RLS factory > seed pool.
+            creds: List[Tuple[str, str]] = []
+            if self.username and self.password:
+                creds.append((self.username, self.password))
+            for pair in self._SERIAL_DEFAULT_CREDS:
+                if pair not in creds:
+                    creds.append(pair)
+            for pair in get_default_credentials_to_try():
+                if pair not in creds:
+                    creds.append(pair)
+
+            ok, used = serial_login(
+                ser, creds, timeout=10.0, should_stop=self.should_stop
+            )
+            if not ok:
+                return [], (
+                    f"RLS serial login failed on {self.serial_port}: "
+                    f"all default credentials exhausted."
+                )
+            if used:
+                logging.info(
+                    f"[RLS-SERIAL] Authenticated on {self.serial_port} "
+                    f"as {used[0]!r}"
+                )
+
+            outputs: List[str] = []
+            for command in commands:
+                if self.should_stop():
+                    return outputs, "Aborted"
+                logging.info(f"[RLS-SERIAL] Executing: {command}")
+                output = capture_until_prompt(
+                    ser, command, timeout=30.0,
+                    should_stop=self.should_stop,
+                )
+                if output is None:
+                    error = (
+                        "Aborted" if self.should_stop()
+                        else f"Failed to execute command: {command}"
+                    )
+                    return outputs, error
+                outputs.append(output)
+                # The command tracker keys on (ip, command, ctype); when
+                # running over serial we use the port name as the IP
+                # surrogate so the same key shape works.
+                self.command_tracker.mark_as_executed(
+                    self.serial_port, command, self.connection_type
+                )
+            return outputs, None
+        except Exception as exc:
+            logging.error(f"[RLS-SERIAL] Unhandled error: {exc}")
+            return [], str(exc)
+        finally:
+            try:
+                if self.serial_port_obj is not None:
+                    self.serial_port_obj.close()
+            except Exception:
+                pass
+            self.serial_port_obj = None
 
     def execute_telnet_command(self, command: str) -> Tuple[Optional[str], Optional[str]]:
         try:

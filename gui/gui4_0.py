@@ -73,7 +73,7 @@ class InventoryGUI:
     }
 
     _allowed_lan_scripts = {"Nokia 1830", "Nokia PSI", "Ciena 6500", "Ciena RLS", "Ciena SAOS", "Ciena SAOS 10"}
-    _allowed_serial_scripts = {"Nokia SAR", "Nokia IXR"}
+    _allowed_serial_scripts = {"Nokia SAR", "Nokia IXR", "Ciena RLS"}
 
     def __init__(self, root, update_available, command_tracker, db_cache):
         self.root = root

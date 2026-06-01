@@ -88,7 +88,7 @@ class InventoryFrame(ttk.Frame):
         ).pack(side=tk.LEFT, padx=10)
 
         self.lan_script_options = ["Nokia 1830", "Nokia PSI", "Ciena 6500", "Ciena RLS"]
-        self.serial_script_options = ["Nokia SAR", "Nokia IXR"]
+        self.serial_script_options = ["Nokia SAR", "Nokia IXR", "Ciena RLS"]
 
         self.manual_connection_frame = ttk.LabelFrame(self, text="Direct Connection")
 

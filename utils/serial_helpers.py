@@ -82,6 +82,75 @@ def _read_until(
     return bytes(buf), False
 
 
+def open_serial_with_baud_probe(
+    port: str,
+    baud_rates: List[int],
+    *,
+    timeout: float = 2.0,
+    should_stop: Optional[Callable[[], bool]] = None,
+):
+    """Open *port* trying each baud in *baud_rates*, returning the first
+    that produces a recognisable login/shell/password prompt within
+    *timeout* seconds.
+
+    Returns the opened ``serial.Serial`` instance on success, or ``None``
+    when every candidate baud rate is silent or garbled. The caller is
+    responsible for closing the returned object.
+
+    The probe sends a single CR to wake the console, reads briefly, and
+    looks for any of: Login:/Username:/Password:/<host>#/<host>>. A
+    wrong baud rate typically returns high-bit garbage or nothing at
+    all — neither matches the prompt patterns so we move on. Used by
+    devices where the operator may not know the console speed in
+    advance (RLS lab gear ships at 9600 OR 115200 depending on the
+    flash image).
+    """
+    import serial  # local import keeps the module importable on systems
+                   # without pyserial when only the regexes are needed
+    for baud in baud_rates:
+        if should_stop and should_stop():
+            return None
+        logging.info(f"[SERIAL] Probing {port} at {baud} baud...")
+        try:
+            ser = serial.Serial(port, baud, timeout=timeout)
+        except Exception as exc:
+            logging.warning(f"[SERIAL] Could not open {port}@{baud}: {exc}")
+            continue
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+        try:
+            ser.write(b"\r")
+        except Exception:
+            try:
+                ser.close()
+            except Exception:
+                pass
+            continue
+        buf, matched = _read_until(
+            ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop
+        )
+        if matched:
+            logging.info(f"[SERIAL] {port} locked onto {baud} baud")
+            return ser
+        # Empty buffer = no response (cable issue or really wrong speed);
+        # non-empty = bytes arrived but didn't match a prompt (likely the
+        # wrong baud emitting garbage). Either way, close and try next.
+        logging.info(
+            f"[SERIAL] {port}@{baud} did not yield a prompt "
+            f"(got {len(buf)} bytes); trying next baud"
+        )
+        try:
+            ser.close()
+        except Exception:
+            pass
+    logging.warning(
+        f"[SERIAL] No baud rate in {baud_rates} produced a prompt on {port}"
+    )
+    return None
+
+
 def serial_login(
     ser,
     defaults: List[Tuple[str, str]],
