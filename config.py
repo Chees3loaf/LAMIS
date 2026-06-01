@@ -12,12 +12,16 @@ and easier to customize across different environments.
 # Keep this in lockstep with ATLAS.nsi `ProductVersion` so the installer and
 # the running app agree on what's currently installed. The updater compares
 # this against the latest GitHub release tag.
-APP_VERSION = "2.0.4"
+APP_VERSION = "2.0.5"
 
 # GitHub release feed used by utils.update.Updater when running as an
 # installed (frozen) build. Overridable via the LAMIS_UPDATE_REPO env var.
+# The repo named here only needs to host the GitHub Releases — it doesn't
+# have to be the source repo. Releases live in a dedicated public
+# "Network-Inventory-Update" repo so source can stay wherever it lives
+# while update distribution gets its own home.
 GITHUB_OWNER = "Chees3loaf"
-GITHUB_REPO = "LAMIS"
+GITHUB_REPO = "Network-Inventory-Update"
 
 # Filename of the installer asset attached to each release.
 INSTALLER_ASSET_NAME = "ATLAS_Setup.exe"
