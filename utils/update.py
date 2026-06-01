@@ -40,18 +40,28 @@ _DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0) | _NO_WINDOW
 # pre-release suffixes ("-rc.1", "-beta.2"). Captures the numeric portion
 # for comparison.
 _VERSION_RE = re.compile(
-    r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)(?:[-+].*)?$"
+    r"^v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
+    r"(?:\.(?P<hotfix>\d+))?(?:[-+].*)?$"
 )
 
 
-def _parse_version(s: str) -> Optional[Tuple[int, int, int]]:
-    """Return (major, minor, patch) for *s* or ``None`` if unparseable."""
+def _parse_version(s: str) -> Optional[Tuple[int, int, int, int]]:
+    """Return ``(major, minor, patch, hotfix)`` for *s* or ``None`` if
+    unparseable. Three-part inputs get a ``hotfix=0`` so the 4-tuple
+    comparison naturally orders ``2.0.6`` before ``2.0.6.1``.
+    """
     if not s:
         return None
     m = _VERSION_RE.match(s.strip())
     if not m:
         return None
-    return (int(m.group("major")), int(m.group("minor")), int(m.group("patch")))
+    hotfix = int(m.group("hotfix")) if m.group("hotfix") else 0
+    return (
+        int(m.group("major")),
+        int(m.group("minor")),
+        int(m.group("patch")),
+        hotfix,
+    )
 
 
 def _is_newer(latest: str, current: str) -> bool:
@@ -351,8 +361,9 @@ class Updater:
             f"Installed version: {self.current_version}\n"
             f"New version:       {tag}\n\n"
             f"{notes_body[:600]}\n\n"
-            "Apply this update now? ATLAS will close while the installer runs, "
-            "then re-launch automatically."
+            "Apply this update now? ATLAS will close, and the installer "
+            "will start automatically once ATLAS has fully exited. The "
+            "new version re-launches when the install completes."
         )
 
         if self.confirmation_callback:
@@ -366,24 +377,80 @@ class Updater:
             except OSError: pass
             return False, "Update cancelled by operator."
 
+        # Operator complaint: previously the installer's NSIS UI could
+        # pop up WHILE the ATLAS main window was still visible (the
+        # post-confirmation "ATLAS will close" messagebox hadn't been
+        # dismissed yet, and Popen returned immediately, so the user saw
+        # two windows fighting). The fix: don't launch the installer
+        # ourselves. Instead spawn a tiny PowerShell watcher that polls
+        # for our PID to vanish and only then runs the installer. The
+        # watcher is detached and hidden, so the user sees nothing until
+        # ATLAS is fully gone — at which point the NSIS UI appears.
+        watcher_launched = self._spawn_post_exit_installer_watcher(installer_path)
+        if not watcher_launched:
+            # Fallback: the watcher couldn't be spawned (PowerShell
+            # missing / blocked by policy). Best effort — direct
+            # detached launch like before. The race may briefly show the
+            # NSIS window over ATLAS, but the update still happens.
+            try:
+                subprocess.Popen(
+                    [installer_path],
+                    cwd=os.path.dirname(installer_path),
+                    close_fds=True,
+                    creationflags=_DETACHED,
+                )
+            except OSError as e:
+                return False, f"Failed to launch installer: {e}"
+
+        return True, (
+            f"Installer {os.path.basename(installer_path)} is queued — "
+            f"it will start as soon as ATLAS exits."
+        )
+
+    @staticmethod
+    def _spawn_post_exit_installer_watcher(installer_path: str) -> bool:
+        """Spawn a hidden PowerShell process that waits for THIS process
+        to exit, then launches *installer_path*.
+
+        Returns ``True`` on successful spawn (no guarantee about the
+        downstream installer launch — that happens after we've already
+        called ``os._exit``). Returns ``False`` if PowerShell couldn't
+        be located or the spawn itself failed.
+
+        The polling loop wakes every 200 ms — fast enough that the user
+        perceives the installer as launching "immediately" after ATLAS
+        closes, slow enough that idle CPU is negligible.
+        """
+        # Escape any single quotes in the path; PowerShell's
+        # single-quoted strings don't expand variables but do treat ''
+        # as an escaped single quote.
+        safe_path = installer_path.replace("'", "''")
+        ps_cmd = (
+            f"$id = {os.getpid()}; "
+            f"while (Get-Process -Id $id -ErrorAction SilentlyContinue) "
+            f"{{ Start-Sleep -Milliseconds 200 }}; "
+            f"Start-Process -FilePath '{safe_path}'"
+        )
         try:
-            # Launch the installer detached so ATLAS can exit and release
-            # its locks on the install directory. Without the /S flag the
-            # operator sees the standard NSIS UI and the FINISHPAGE_RUN
-            # entry will re-launch ATLAS once install finishes.
             subprocess.Popen(
-                [installer_path],
-                cwd=os.path.dirname(installer_path),
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-WindowStyle", "Hidden",
+                    "-Command", ps_cmd,
+                ],
                 close_fds=True,
                 creationflags=_DETACHED,
             )
-        except OSError as e:
-            return False, f"Failed to launch installer: {e}"
-
-        return True, (
-            f"Installer {os.path.basename(installer_path)} launched. "
-            f"ATLAS will exit so the installer can replace its files."
-        )
+            return True
+        except (OSError, FileNotFoundError) as e:
+            logging.warning(
+                f"[UPDATE] Could not spawn PowerShell installer watcher: {e}. "
+                f"Falling back to direct launch (NSIS UI may briefly "
+                f"overlap ATLAS)."
+            )
+            return False
 
     # ------------------------------------------------------------------
     # Dev-mode: git pull path (legacy behaviour, unchanged)

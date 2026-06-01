@@ -1644,7 +1644,12 @@ class WorkbookBuilder:
             logging.info(f"Starting Excel export for {len(outputs)} devices.")
 
             processed_data = {}
-            summary_index = {}
+            # Keyed by sheet_title (guaranteed unique via make_unique_sheet_title)
+            # so multiple devices sharing one mgmt IP (e.g. factory-default
+            # Ciena RLS gear all reporting 10.0.0.1, or Serial-mode scans down
+            # the same COM port) each keep a distinct Summary row instead of
+            # overwriting each other.
+            summary_index: Dict[str, Tuple[str, str]] = {}  # sheet_title -> (ip, system_name)
             bom_data: Dict[str, List[Tuple[str, str, str]]] = {}
 
             if "Summary" in wb.sheetnames:
@@ -1673,7 +1678,7 @@ class WorkbookBuilder:
                         name_str = str(name_val).strip()
                         if not ip_str or ip_str.lower() == "nan":
                             continue
-                        summary_index[ip_str] = (name_str, sname)
+                        summary_index[sname] = (ip_str, name_str)
                         if name_str:
                             name_index[name_str.lower()] = (ip_str, sname)
                     except Exception as _exc:
@@ -1681,7 +1686,7 @@ class WorkbookBuilder:
 
             # Snapshot of pre-existing IPs so we can detect whether this run
             # added new sites and stamp an "Additional Capture" timestamp.
-            pre_existing_ips = set(summary_index.keys())
+            pre_existing_ips = {entry[0] for entry in summary_index.values()}
 
             self._setup_summary_sheet_header(summary_sheet, customer, project, list(outputs.keys()))
 
@@ -1752,11 +1757,22 @@ class WorkbookBuilder:
                         # cases where multiple devices reuse the same mgmt IP.
                         hit = name_index.get(system_name.strip().lower())
                         if hit:
-                            prior_ip, prior_sheet_title = hit
-                            if prior_ip != ip_key:
-                                summary_index.pop(prior_ip, None)
-                        elif ip_key in summary_index:
-                            prior_sheet_title = summary_index[ip_key][1]
+                            _prior_ip, prior_sheet_title = hit
+                            summary_index.pop(prior_sheet_title, None)
+                        else:
+                            # Fallback: same IP, no hostname match. Only safe to
+                            # treat as a "rescan of this device" when exactly one
+                            # prior entry has that IP — otherwise this is a
+                            # second device sharing the IP and we leave the
+                            # prior entry alone (Bug-3 fix: don't overwrite
+                            # legitimate distinct devices keyed by the same IP).
+                            ip_hits = [
+                                st for st, (rip, _) in summary_index.items()
+                                if rip == ip_key
+                            ]
+                            if len(ip_hits) == 1:
+                                prior_sheet_title = ip_hits[0]
+                                summary_index.pop(prior_sheet_title, None)
 
                     new_sheet_title = make_unique_sheet_title(system_name)
                     new_sheet = self.copy_sheet(template_sheet, wb, new_sheet_title)
@@ -1848,7 +1864,7 @@ class WorkbookBuilder:
                         new_sheet.title = system_name
 
                     processed_data[ip] = write_df
-                    summary_index[str(ip)] = (system_name, new_sheet.title)
+                    summary_index[new_sheet.title] = (str(ip), system_name)
                     bom_data[new_sheet.title] = self._collect_bom_entries_from_df(write_df)
                 except Exception as exc:
                     logging.error(f"Failed to process data for IP {ip}. Error: {exc}")
@@ -1863,7 +1879,10 @@ class WorkbookBuilder:
                         cell.hyperlink = None
 
             # Populate summary table using shared helper (also sets the correct device count).
-            summary_items = [(ip, device_name, sheet_title) for ip, (device_name, sheet_title) in summary_index.items()]
+            summary_items = [
+                (ip, device_name, sheet_title)
+                for sheet_title, (ip, device_name) in summary_index.items()
+            ]
             self._populate_summary_table(summary_sheet, summary_items, start_row=10)
 
             if not append_mode and sheet and sheet.title in wb.sheetnames:
@@ -1884,7 +1903,9 @@ class WorkbookBuilder:
             # If new sites landed during this run, stamp Summary col A so
             # the workbook carries an audit trail of when each batch was
             # added. The original Capture Time stays where it is.
-            new_ips = [ip for ip in summary_index if ip not in pre_existing_ips]
+            new_ips = [
+                ip for ip, _ in summary_index.values() if ip not in pre_existing_ips
+            ]
             if new_ips and pre_existing_ips:
                 self._append_summary_timestamp(summary_sheet, "Additional Capture")
 
@@ -2088,7 +2109,9 @@ class WorkbookBuilder:
                 )
 
         processed_data: Dict[str, Any] = {}
-        summary_index: Dict[str, tuple] = {}
+        # sheet_title -> (ip, system_name). See the LAN path above for the
+        # rationale — devices sharing one mgmt IP must each retain a row.
+        summary_index: Dict[str, Tuple[str, str]] = {}
         bom_data: Dict[str, List[Tuple[str, str, str]]] = {}
 
         def _unique_title(base):
@@ -2198,14 +2221,14 @@ class WorkbookBuilder:
                 # Borders around every populated data row so the equipment
                 # list reads as a table rather than free text.
                 self.apply_device_data_borders(ns)
-                summary_index[str(ip)] = (system_name, title)
+                summary_index[title] = (str(ip), system_name)
                 processed_data[ip] = pd.DataFrame()
                 bom_data[title] = self._collect_bom_entries_from_psi_data(data_dict)
 
             except Exception as exc:
                 logging.error(f"PSI report: failed for IP {ip}: {exc}", exc_info=True)
 
-        items = [(ip, n, t) for ip, (n, t) in summary_index.items()]
+        items = [(ip, n, t) for t, (ip, n) in summary_index.items()]
         self._populate_summary_table(summary_sheet, items, start_row=10)
 
         if not append_mode and base_sheet and base_sheet.title in wb.sheetnames and len(wb.sheetnames) > 1:
@@ -3108,7 +3131,7 @@ class WorkbookBuilder:
     # Packing slip workbook
     # ------------------------------------------------------------------
 
-    def build_packing_slip_workbook(self, processed_data: Dict[str, Any], ip_list: List[str], customer: str, project: str, customer_po: str, sales_order: str, save_folder: str) -> str:
+    def build_packing_slip_workbook(self, processed_data: Dict[str, Any], ip_list: List[str], customer: str, project: str, customer_po: str, sales_order: str, save_folder: str, display_ip_for_key: Optional[Dict[str, str]] = None) -> str:
         """Generate a packing-slip Excel workbook from *processed_data*.
 
         Copies the packing slip template, populates a per-device sheet for
@@ -3123,6 +3146,12 @@ class WorkbookBuilder:
             customer_po: Purchase order number.
             sales_order: Sales order number.
             save_folder: Directory in which to write the output file.
+            display_ip_for_key: Optional mapping from the (possibly
+                disambiguated) ``processed_data`` key back to the bare
+                source IP for display on the Summary sheet. When multiple
+                devices share an IP (e.g., factory-default Ciena gear
+                pulled over LAN), the dict key gets a suffix to stay
+                unique, but the Summary should still show the real IP.
 
         Returns:
             Absolute path to the saved packing slip file.
@@ -3291,8 +3320,12 @@ class WorkbookBuilder:
             )
             for row_offset, (seq, ip, device_name, sheet_title) in enumerate(summary_rows):
                 row_num = summary_start_row + row_offset
+                # Show the bare source IP when the dict key was disambiguated
+                # (multiple devices sharing one IP). Falls back to the key for
+                # the normal one-device-per-IP case.
+                display_ip = (display_ip_for_key or {}).get(str(ip), str(ip))
                 summary_sheet[f"B{row_num}"] = row_offset + 1
-                summary_sheet[f"C{row_num}"] = str(ip)
+                summary_sheet[f"C{row_num}"] = display_ip
                 summary_sheet[f"D{row_num}"] = str(device_name)
                 summary_sheet[f"D{row_num}"].hyperlink = f"#'{sheet_title}'!A1"
                 summary_sheet[f"D{row_num}"].style = "Hyperlink"
@@ -3464,6 +3497,7 @@ class WorkbookBuilder:
         family_for_ip: Optional[Dict[str, str]] = None,
         rls_packing_slip_template: Optional[str] = None,
         psi_packing_slip_template: Optional[str] = None,
+        display_ip_for_key: Optional[Dict[str, str]] = None,
     ) -> str:
         """Generate a packing slip workbook using the default template for all devices.
 
@@ -3474,6 +3508,7 @@ class WorkbookBuilder:
         # Always use the default template for all devices.
         return self.build_packing_slip_workbook(
             processed_data, ip_list, customer, project, customer_po, sales_order, save_folder,
+            display_ip_for_key=display_ip_for_key,
         )
 
     @staticmethod

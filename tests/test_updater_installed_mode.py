@@ -12,14 +12,21 @@ from utils.update import Updater, _parse_version, _is_newer
 class TestVersionParsing(unittest.TestCase):
 
     def test_parses_plain_semver(self):
-        self.assertEqual(_parse_version("2.0.0"), (2, 0, 0))
+        # Three-part input gets a hotfix=0 component so comparisons line up
+        # cleanly with four-part hotfix releases (e.g. 2.0.6 vs 2.0.6.1).
+        self.assertEqual(_parse_version("2.0.0"), (2, 0, 0, 0))
 
     def test_parses_with_v_prefix(self):
-        self.assertEqual(_parse_version("v2.0.1"), (2, 0, 1))
+        self.assertEqual(_parse_version("v2.0.1"), (2, 0, 1, 0))
 
     def test_parses_with_prerelease_suffix(self):
-        self.assertEqual(_parse_version("2.1.0-rc.1"), (2, 1, 0))
-        self.assertEqual(_parse_version("v2.1.0+build.42"), (2, 1, 0))
+        self.assertEqual(_parse_version("2.1.0-rc.1"), (2, 1, 0, 0))
+        self.assertEqual(_parse_version("v2.1.0+build.42"), (2, 1, 0, 0))
+
+    def test_parses_four_part_hotfix(self):
+        # 4-part X.Y.Z.W form for hotfix point releases (2.0.6.1 fixing 2.0.6).
+        self.assertEqual(_parse_version("2.0.6.1"), (2, 0, 6, 1))
+        self.assertEqual(_parse_version("v2.0.6.1"), (2, 0, 6, 1))
 
     def test_returns_none_for_garbage(self):
         self.assertIsNone(_parse_version(""))
@@ -33,6 +40,16 @@ class TestVersionParsing(unittest.TestCase):
         self.assertFalse(_is_newer("2.0.0", "2.0.0"))
         self.assertFalse(_is_newer("1.99.99", "2.0.0"))
         self.assertFalse(_is_newer("garbage", "2.0.0"))
+
+    def test_is_newer_hotfix_after_patch(self):
+        # The reason 4-part support exists at all: a 2.0.6 client MUST see
+        # 2.0.6.1 as a newer release and trigger the update flow.
+        self.assertTrue(_is_newer("v2.0.6.1", "2.0.6"))
+        self.assertTrue(_is_newer("2.0.6.2", "2.0.6.1"))
+        # And 3-part 2.0.7 is still strictly newer than any 2.0.6.X.
+        self.assertTrue(_is_newer("2.0.7", "2.0.6.99"))
+        # Reverse: a hotfix is NOT newer than its base.
+        self.assertFalse(_is_newer("2.0.6", "2.0.6.1"))
 
 
 class TestModeDetection(unittest.TestCase):
@@ -172,7 +189,12 @@ class TestApplyUpdateInstalled(unittest.TestCase):
             if os.path.exists(fake_path):
                 os.unlink(fake_path)
 
-    def test_approved_launches_installer_and_returns_success(self):
+    def test_approved_spawns_watcher_not_direct_installer(self):
+        """The installer must NOT be launched directly. Operator
+        previously reported the NSIS UI popping up over a still-visible
+        ATLAS window. The fix queues a hidden PowerShell watcher that
+        starts the installer ONLY after this process exits, so Popen's
+        first arg is powershell.exe, not the installer path."""
         up = _make_installed_updater("2.0.0")
         up._latest_release = {
             "tag_name": "v2.0.1",
@@ -193,8 +215,53 @@ class TestApplyUpdateInstalled(unittest.TestCase):
                  patch.object(upd.subprocess, "Popen") as popen:
                 ok, msg = up.apply_update()
             self.assertTrue(ok, msg)
-            self.assertIn("launched", msg.lower())
+            # Message reflects deferred-launch behaviour.
+            self.assertIn("queued", msg.lower())
             popen.assert_called_once()
+            launched_args = popen.call_args[0][0]
+            # The first arg is now powershell.exe, NOT the installer path.
+            self.assertEqual(launched_args[0].lower(), "powershell.exe")
+            # The installer path must still appear inside the -Command arg.
+            cmd_arg = " ".join(launched_args)
+            self.assertIn(fake_path, cmd_arg)
+            # And the watcher must wait for OUR pid before launching.
+            self.assertIn(str(os.getpid()), cmd_arg)
+            self.assertIn("Get-Process", cmd_arg)
+            self.assertIn("Start-Process", cmd_arg)
+        finally:
+            if os.path.exists(fake_path):
+                os.unlink(fake_path)
+
+    def test_watcher_failure_falls_back_to_direct_launch(self):
+        """If PowerShell can't be spawned (policy / missing), the
+        installer must still get launched directly rather than the
+        update silently aborting. The fallback is the legacy direct
+        Popen path."""
+        up = _make_installed_updater("2.0.0")
+        up._latest_release = {
+            "tag_name": "v2.0.1",
+            "body": "",
+            "assets": [{
+                "name": "ATLAS_Setup.exe",
+                "browser_download_url": "https://example.com/ATLAS_Setup.exe",
+                "size": 4,
+            }],
+        }
+        up.set_confirmation_callback(lambda _msg: True)
+        fake_path = os.path.abspath("_fake_installer_fallback.exe")
+        with open(fake_path, "wb") as f:
+            f.write(b"data")
+        try:
+            with patch.object(up, "_download_installer",
+                              return_value=(fake_path, None)), \
+                 patch.object(up, "_spawn_post_exit_installer_watcher",
+                              return_value=False), \
+                 patch.object(upd.subprocess, "Popen") as popen:
+                ok, msg = up.apply_update()
+            self.assertTrue(ok, msg)
+            popen.assert_called_once()
+            # When the watcher path returns False, we Popen the installer
+            # directly — first arg back to the installer path.
             launched_args = popen.call_args[0][0]
             self.assertEqual(launched_args[0], fake_path)
         finally:

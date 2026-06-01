@@ -380,6 +380,7 @@ class PackingSlipFrame(ttk.Frame):
             save_path = self.controller.build_unified_packing_slip_workbook(
                 processed_data, ip_list, customer, project, customer_po, sales_order, tmp_dir,
                 family_for_ip=family_for_ip,
+                display_ip_for_key=getattr(self, "_display_ip_for_key", None),
             )
 
             self.ps_status_label.config(text="Status: Ready")
@@ -722,6 +723,12 @@ class PackingSlipFrame(ttk.Frame):
         """
         processed_data: Dict[str, pd.DataFrame] = {}
         self._family_by_ip = {}
+        # Maps disambiguated key (e.g. "10.0.0.1_us..._com") back to the bare
+        # source IP ("10.0.0.1") so the Summary column shows the real IP
+        # rather than the synthetic dict key. Pre-seeded for every device,
+        # even when no dedup was needed, so the workbook builder never
+        # silently falls through to the mangled key.
+        self._display_ip_for_key: Dict[str, str] = {}
         try:
             xl = pd.ExcelFile(file_path)
             for sheet_name in xl.sheet_names:
@@ -744,6 +751,11 @@ class PackingSlipFrame(ttk.Frame):
                         system_type = st
                 except (IndexError, KeyError):
                     pass
+
+                # Remember the bare IP BEFORE we mangle the key. The display
+                # map lets the workbook builder show "10.0.0.1" on the Summary
+                # row even when the dict key is "10.0.0.1_<sheetname>".
+                bare_ip = ip_address
 
                 # Ensure key uniqueness if multiple devices share the same IP
                 if ip_address in processed_data:
@@ -796,6 +808,7 @@ class PackingSlipFrame(ttk.Frame):
 
                 if not df.empty:
                     processed_data[ip_address] = df.reset_index(drop=True)
+                    self._display_ip_for_key[ip_address] = bare_ip
                     # Map system type to family.
                     st_l = system_type.lower()
                     if "rls" in st_l or "ciena" in st_l:

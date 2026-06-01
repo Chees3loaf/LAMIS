@@ -340,13 +340,20 @@ class InventoryGUI:
             self.output_screen.insert(tk.END, msg + "\n")
             self.output_screen.see(tk.END)
             if ok and up.installed_mode:
-                # In installed mode the installer is already detaching and
-                # the only safe thing for ATLAS to do is exit so file locks
-                # on ATLAS.exe / DLLs are released.
+                # In installed mode a hidden PowerShell watcher is polling
+                # for this process to exit; once it sees ATLAS gone it'll
+                # launch the NSIS installer. Show one final acknowledgement
+                # and then call restart_program (os._exit) so the watcher
+                # can take over. Clicking OK is what kicks the sequence:
+                # OK -> ATLAS closes -> watcher detects -> installer UI
+                # appears. The installer was previously launching BEFORE
+                # this messagebox was dismissed, which sometimes layered
+                # the NSIS window over a still-visible ATLAS.
                 messagebox.showinfo(
-                    "Updating",
-                    "The installer is starting. ATLAS will now close and "
-                    "re-launch automatically when the install completes.",
+                    "Update Ready",
+                    "Click OK to close ATLAS. The installer will start "
+                    "automatically once ATLAS has fully exited, and the "
+                    "new version will re-launch when install completes.",
                 )
                 up.restart_program()
             elif ok:
@@ -533,16 +540,17 @@ class InventoryGUI:
     def copy_sheet(self, source_sheet: Any, target_wb: Any, new_sheet_name: str) -> Any:
         return self.workbook_builder.copy_sheet(source_sheet, target_wb, new_sheet_name)
 
-    def build_packing_slip_workbook(self, processed_data: Dict[str, Any], ip_list: List[str], customer: str, project: str, customer_po: str, sales_order: str, save_folder: str) -> str:
-        return self.workbook_builder.build_packing_slip_workbook(processed_data, ip_list, customer, project, customer_po, sales_order, save_folder)
+    def build_packing_slip_workbook(self, processed_data: Dict[str, Any], ip_list: List[str], customer: str, project: str, customer_po: str, sales_order: str, save_folder: str, display_ip_for_key: Optional[Dict[str, str]] = None) -> str:
+        return self.workbook_builder.build_packing_slip_workbook(processed_data, ip_list, customer, project, customer_po, sales_order, save_folder, display_ip_for_key=display_ip_for_key)
 
-    def build_unified_packing_slip_workbook(self, processed_data: Dict[str, Any], ip_list: List[str], customer: str, project: str, customer_po: str, sales_order: str, save_folder: str, family_for_ip: Optional[Dict[str, str]] = None) -> str:
+    def build_unified_packing_slip_workbook(self, processed_data: Dict[str, Any], ip_list: List[str], customer: str, project: str, customer_po: str, sales_order: str, save_folder: str, family_for_ip: Optional[Dict[str, str]] = None, display_ip_for_key: Optional[Dict[str, str]] = None) -> str:
         """Per-device-family packing slip workbook (RLS / PSI / default templates merged)."""
         return self.workbook_builder.build_unified_packing_slip_workbook(
             processed_data, ip_list, customer, project, customer_po, sales_order, save_folder,
             family_for_ip=family_for_ip,
             rls_packing_slip_template=self.rls_packing_slip_template,
             psi_packing_slip_template=self.psi_packing_slip_template,
+            display_ip_for_key=display_ip_for_key,
         )
 
     def get_user_inputs(self, default_filename, prefill: Optional[Dict[str, str]] = None,

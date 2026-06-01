@@ -12,6 +12,7 @@ Usage::
     python tools/release.py --patch          # 2.0.4 -> 2.0.5
     python tools/release.py --minor          # 2.0.4 -> 2.1.0
     python tools/release.py --major          # 2.0.4 -> 3.0.0
+    python tools/release.py --hotfix         # 2.0.6 -> 2.0.6.1
     python tools/release.py --patch --dry-run    # show diff only
     python tools/release.py --patch --commit     # also git-add + commit + tag
     python tools/release.py --patch --commit --push   # commit + tag + push
@@ -35,15 +36,19 @@ ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PY = ROOT / "config.py"
 ATLAS_NSI = ROOT / "ATLAS.nsi"
 
-SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+# 3-part (X.Y.Z) is the normal case; 4-part (X.Y.Z.W) is for hotfix
+# point releases on top of a tagged patch (e.g. 2.0.6.1 fixes 2.0.6
+# without burning a 2.0.7 number that would otherwise be reserved for
+# the next feature drop).
+SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?$")
 
 # Capture the version string inside the quotes so a single sub() can both
 # locate and replace it. The bumper rewrites only the captured group.
 CONFIG_VERSION_RE = re.compile(
-    r'^(APP_VERSION\s*=\s*")(\d+\.\d+\.\d+)(")', re.MULTILINE
+    r'^(APP_VERSION\s*=\s*")(\d+\.\d+\.\d+(?:\.\d+)?)(")', re.MULTILINE
 )
 NSI_VERSION_RE = re.compile(
-    r'^(!define\s+ATLAS_VERSION\s+")(\d+\.\d+\.\d+)(")', re.MULTILINE
+    r'^(!define\s+ATLAS_VERSION\s+")(\d+\.\d+\.\d+(?:\.\d+)?)(")', re.MULTILINE
 )
 NSI_VERSION_4PART_RE = re.compile(
     r'^(!define\s+ATLAS_VERSION_4PART\s+")(\d+\.\d+\.\d+\.\d+)(")', re.MULTILINE
@@ -71,24 +76,47 @@ def _read_current_version_nsi() -> tuple[str, str]:
     return m.group(2), m4.group(2)
 
 
-def _parse_semver(s: str) -> tuple[int, int, int]:
+def _parse_semver(s: str) -> tuple[int, int, int, int]:
+    """Return ``(major, minor, patch, hotfix)``. ``hotfix`` is 0 when the
+    input is 3-part. The 4-tuple form makes ordering comparisons across
+    3-part and 4-part inputs trivial (``2.0.6`` < ``2.0.6.1`` because
+    ``(2,0,6,0) < (2,0,6,1)``)."""
     m = SEMVER_RE.match(s)
     if not m:
         raise SystemExit(
-            f"[!] Version must be MAJOR.MINOR.PATCH (got {s!r})"
+            f"[!] Version must be MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH.HOTFIX "
+            f"(got {s!r})"
         )
-    return int(m.group(1)), int(m.group(2)), int(m.group(3))
+    hotfix = int(m.group(4)) if m.group(4) else 0
+    return int(m.group(1)), int(m.group(2)), int(m.group(3)), hotfix
 
 
 def _bump(version: str, kind: str) -> str:
-    major, minor, patch = _parse_semver(version)
+    major, minor, patch, hotfix = _parse_semver(version)
     if kind == "major":
         return f"{major + 1}.0.0"
     if kind == "minor":
         return f"{major}.{minor + 1}.0"
     if kind == "patch":
+        # A patch bump always lands on the next 3-part release — it
+        # never auto-increments the hotfix counter, since a hotfix
+        # number is a deliberate "fix the prior release in place"
+        # choice (user must pass --hotfix or an explicit version).
         return f"{major}.{minor}.{patch + 1}"
+    if kind == "hotfix":
+        return f"{major}.{minor}.{patch}.{hotfix + 1}"
     raise SystemExit(f"[!] Unknown bump kind {kind!r}")
+
+
+def _is_four_part(version: str) -> bool:
+    return version.count(".") == 3
+
+
+def _to_4part(version: str) -> str:
+    """Convert any accepted semver to the Windows 4-part form for NSI."""
+    if _is_four_part(version):
+        return version
+    return f"{version}.0"
 
 
 def _write(path: Path, pattern: re.Pattern, new_version: str) -> bool:
@@ -135,6 +163,10 @@ def main() -> int:
     target.add_argument("--major", action="store_true", help="Bump MAJOR.")
     target.add_argument("--minor", action="store_true", help="Bump MINOR.")
     target.add_argument("--patch", action="store_true", help="Bump PATCH.")
+    target.add_argument(
+        "--hotfix", action="store_true",
+        help="Bump HOTFIX (4-part, e.g. 2.0.6 -> 2.0.6.1).",
+    )
     p.add_argument(
         "--dry-run", action="store_true",
         help="Show what would change; don't write files.",
@@ -160,12 +192,11 @@ def main() -> int:
             f"[!] config.py APP_VERSION = {cur_config!r} but ATLAS.nsi "
             f"ATLAS_VERSION = {cur_nsi!r}. Fix the mismatch first."
         )
-    expected_4part = f"{cur_nsi}.0"
+    expected_4part = _to_4part(cur_nsi)
     if cur_nsi_4part != expected_4part:
         raise SystemExit(
             f"[!] ATLAS.nsi ATLAS_VERSION_4PART = {cur_nsi_4part!r} but "
-            f"expected {expected_4part!r} (must be ATLAS_VERSION + '.0'). "
-            f"Fix manually first."
+            f"expected {expected_4part!r}. Fix manually first."
         )
 
     # Resolve target version.
@@ -176,6 +207,7 @@ def main() -> int:
         kind = (
             "major" if args.major else
             "minor" if args.minor else
+            "hotfix" if args.hotfix else
             "patch"
         )
         new_version = _bump(cur_config, kind)
@@ -190,7 +222,7 @@ def main() -> int:
             f"current {cur_config}. Refusing to downgrade."
         )
 
-    new_4part = f"{new_version}.0"
+    new_4part = _to_4part(new_version)
 
     print(f"Current: {cur_config}")
     print(f"New    : {new_version}")

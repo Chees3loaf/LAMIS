@@ -18,7 +18,7 @@ from tkinter import ttk, scrolledtext, filedialog, messagebox
 import openpyxl
 
 
-_HYPERLINK_TARGET_RE = re.compile(r"^'?([^'!]+?)'?!")
+_HYPERLINK_TARGET_RE = re.compile(r"^#?'?([^'!]+?)'?!")
 
 # Tabs that should never end up on a synthesized BOM: template/metadata
 # leftovers (Customer-project, Customer, Project, Header, Cover) and
