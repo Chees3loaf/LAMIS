@@ -184,6 +184,52 @@ def get_known_hosts_path() -> Path:
     return known_hosts.resolve()
 
 
+def clear_known_host_entry(
+    ip: str,
+    path: Optional[Union[str, Path]] = None,
+) -> bool:
+    """Remove any saved SSH host keys for *ip* from the ATLAS known_hosts file.
+
+    Returns ``True`` when a key was removed, ``False`` when nothing matched
+    or the file was missing. Used by LAN-mode inventory pulls — the same
+    IP (typically the lab management address ``10.0.0.1``) commonly maps
+    to different physical devices between runs, so the previously-stored
+    TOFU key blocks the next attempt. Calling this at the end of every
+    LAN run lets the next attempt accept whatever's at the IP fresh.
+
+    ``path`` defaults to :func:`get_known_hosts_path`. Pass an explicit
+    path for tests.
+
+    paramiko's ``HostKeys`` mapping handles both plaintext and hashed
+    ``HashKnownHosts``-style entries transparently, so this helper covers
+    either format. Falls back to a no-op (returns ``False``) when paramiko
+    isn't importable or the file is malformed — never raises.
+    """
+    try:
+        import paramiko
+    except Exception:
+        return False
+    kh_path = Path(path) if path is not None else get_known_hosts_path()
+    if not kh_path.exists():
+        return False
+    try:
+        # Pre-scrub: HostKeys.load() aborts on the first bad line, which
+        # would leave us unable to look up the IP. scrub_known_hosts is
+        # already idempotent so calling it first is safe.
+        scrub_known_hosts(kh_path)
+        kh = paramiko.HostKeys(filename=str(kh_path))
+        if ip not in kh:
+            return False
+        del kh[ip]
+        kh.save(str(kh_path))
+        return True
+    except Exception:
+        logging.debug(
+            "Failed to clear known_hosts entry for %s", ip, exc_info=True
+        )
+        return False
+
+
 def scrub_known_hosts(path: Optional[Union[str, Path]] = None) -> Tuple[int, int]:
     """Drop unparseable entries from the known_hosts file at *path*.
 

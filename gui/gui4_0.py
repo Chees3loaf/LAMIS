@@ -862,6 +862,27 @@ class InventoryGUI:
                 self.device_family_by_ip[context["target_id"]] = self._family_for_script(manual_script)
                 self.task_queue.put((context["target_id"], manual_script))
                 self.process_task_queue(queue)
+                # LAN-mode cleanup: the same management IP (e.g. 10.0.0.1)
+                # frequently maps to a different physical device between
+                # runs in a lab/test workflow, so the TOFU-stored host
+                # key would block the next attempt with a mismatch error.
+                # Clear our known_hosts entry for this IP after every LAN
+                # run so the next pull TOFU-accepts whatever's there now.
+                # Serial mode doesn't use SSH so it's skipped.
+                if context.get("connection_mode") == "LAN":
+                    try:
+                        from utils.helpers import clear_known_host_entry
+                        ip = context.get("target_id")
+                        if ip and clear_known_host_entry(ip):
+                            queue.put((
+                                "log",
+                                f"[{ip}] Cleared stored SSH host key "
+                                f"(LAN-mode reset — next run will TOFU-accept fresh)",
+                            ))
+                    except Exception:
+                        logging.exception(
+                            "Failed to clear known_hosts after LAN run"
+                        )
                 queue.put(("inventory_complete", True))
                 return
 

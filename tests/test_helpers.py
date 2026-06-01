@@ -1,9 +1,16 @@
 """Unit tests for utils/helpers.py"""
 
+import os
+import tempfile
 import unittest
 from pathlib import Path
 
-from utils.helpers import extract_ip_sort_key, get_database_path, get_project_root
+from utils.helpers import (
+    clear_known_host_entry,
+    extract_ip_sort_key,
+    get_database_path,
+    get_project_root,
+)
 
 
 class TestExtractIpSortKey(unittest.TestCase):
@@ -117,6 +124,80 @@ class TestGetDatabasePath(unittest.TestCase):
             str(db).startswith(str(Path(app_data).resolve())),
             f"Expected DB under {app_data}, got {db}",
         )
+
+
+class TestClearKnownHostEntry(unittest.TestCase):
+    """``clear_known_host_entry`` powers the LAN-mode auto-reset: same
+    management IP often maps to different physical devices between runs,
+    so stale TOFU keys would block the next pull. The helper deletes the
+    matching line(s) from the ATLAS known_hosts file and returns whether
+    anything changed."""
+
+    def _temp_known_hosts(self) -> Path:
+        fd, name = tempfile.mkstemp(suffix="_known_hosts")
+        os.close(fd)
+        p = Path(name)
+        self.addCleanup(lambda: p.exists() and p.unlink())
+        return p
+
+    def _seed(self, path: Path, hostnames: list) -> None:
+        """Populate *path* with real paramiko-valid RSA host keys for
+        each name in *hostnames*. Avoids hand-crafting key blobs that
+        paramiko's strict parser would reject."""
+        import paramiko
+        kh = paramiko.HostKeys()
+        for i, host in enumerate(hostnames):
+            # Fresh 2048-bit RSA key per host — paramiko accepts these
+            # and the keys are distinct so dedupe behaviour is exercised.
+            key = paramiko.RSAKey.generate(2048)
+            kh.add(host, "ssh-rsa", key)
+        kh.save(str(path))
+
+    def test_returns_false_when_file_missing(self):
+        missing = Path(tempfile.gettempdir()) / "atlas_no_such_known_hosts"
+        if missing.exists():
+            missing.unlink()
+        self.assertFalse(clear_known_host_entry("10.0.0.1", missing))
+
+    def test_returns_false_when_ip_not_present(self):
+        p = self._temp_known_hosts()
+        self._seed(p, ["10.9.100.5"])
+        self.assertFalse(clear_known_host_entry("10.0.0.1", p))
+        # File untouched.
+        self.assertIn("10.9.100.5", p.read_text(encoding="utf-8"))
+
+    def test_removes_matching_ip_returns_true(self):
+        p = self._temp_known_hosts()
+        self._seed(p, ["10.0.0.1", "10.9.100.5"])
+        self.assertTrue(clear_known_host_entry("10.0.0.1", p))
+        text = p.read_text(encoding="utf-8")
+        # The 10.0.0.1 line is gone, 10.9.100.5 is preserved.
+        self.assertNotIn("10.0.0.1", text)
+        self.assertIn("10.9.100.5", text)
+
+    def test_calling_twice_is_idempotent(self):
+        """The user might double-click run; the second call should be a
+        clean no-op rather than raising."""
+        p = self._temp_known_hosts()
+        self._seed(p, ["10.0.0.1"])
+        self.assertTrue(clear_known_host_entry("10.0.0.1", p))
+        self.assertFalse(clear_known_host_entry("10.0.0.1", p))
+
+
+class TestLanModeClearsKnownHostsAfterRun(unittest.TestCase):
+    """Source-level guard: the LAN branch of ``run_inventory_worker``
+    must call ``clear_known_host_entry`` after the task queue drains.
+    Without this the user keeps hitting host-key mismatch errors every
+    time the device behind 10.0.0.1 changes."""
+
+    def test_lan_branch_calls_clear_known_host_entry(self):
+        import inspect
+        from gui.gui4_0 import InventoryGUI
+        src = inspect.getsource(InventoryGUI.run_inventory_worker)
+        # Must import and call the helper.
+        self.assertIn("clear_known_host_entry", src)
+        # Must guard so Serial mode (no SSH, no host key) doesn't try it.
+        self.assertIn('context.get("connection_mode") == "LAN"', src)
 
 
 if __name__ == "__main__":
