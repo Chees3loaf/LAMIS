@@ -12,7 +12,7 @@ and easier to customize across different environments.
 # Keep this in lockstep with ATLAS.nsi `ProductVersion` so the installer and
 # the running app agree on what's currently installed. The updater compares
 # this against the latest GitHub release tag.
-APP_VERSION = "2.0.7.0"
+APP_VERSION = "2.0.7.1"
 
 # GitHub release feed used by utils.update.Updater when running as an
 # installed (frozen) build. Overridable via the LAMIS_UPDATE_REPO env var.

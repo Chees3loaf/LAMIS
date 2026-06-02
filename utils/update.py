@@ -420,16 +420,76 @@ class Updater:
         The polling loop wakes every 200 ms — fast enough that the user
         perceives the installer as launching "immediately" after ATLAS
         closes, slow enough that idle CPU is negligible.
+
+        Diagnostics: every watcher writes a transcript to
+        ``%APPDATA%\\ATLAS\\logs\\update_watcher.log`` covering parent
+        PID, target installer, loop completion, and the outcome of the
+        launch attempt. Update-flow regressions previously went silent
+        because the watcher ran in a detached process with no stdio —
+        if a future operator reports "installer didn't launch", that
+        log file is the first place to look.
+
+        Launch resilience: ``Start-Process`` is the primary launcher,
+        but if it throws (UAC denied, ShellExecute returns a bad code
+        in the post-parent-exit desktop state, etc.) the watcher falls
+        back to ``cmd /c start`` which uses a different ShellExecute
+        code path and has been more reliable in similar field reports.
         """
         # Escape any single quotes in the path; PowerShell's
         # single-quoted strings don't expand variables but do treat ''
         # as an escaped single quote.
         safe_path = installer_path.replace("'", "''")
+        # Watcher log lives next to ATLAS's own run logs so the
+        # operator (and Help → Open Logs Folder) can reach it without
+        # having to know %TEMP%.
+        try:
+            app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
+            log_dir = os.path.join(app_data, "ATLAS", "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_path = os.path.join(log_dir, "update_watcher.log")
+        except OSError:
+            # Last-resort: write next to the installer so we still get
+            # SOMETHING if APPDATA is unwritable.
+            log_path = installer_path + ".watcher.log"
+        safe_log = log_path.replace("'", "''")
+        parent_pid = os.getpid()
         ps_cmd = (
-            f"$id = {os.getpid()}; "
+            f"$ErrorActionPreference = 'Continue'; "
+            f"$log = '{safe_log}'; "
+            f"$id = {parent_pid}; "
+            f"$path = '{safe_path}'; "
+            f"function _w($m) {{ "
+            f"  $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff'); "
+            f"  Add-Content -LiteralPath $log -Value \"[$ts] $m\" "
+            f"   -ErrorAction SilentlyContinue "
+            f"}}; "
+            f"_w \"watcher start: pid=$id installer=$path\"; "
             f"while (Get-Process -Id $id -ErrorAction SilentlyContinue) "
             f"{{ Start-Sleep -Milliseconds 200 }}; "
-            f"Start-Process -FilePath '{safe_path}'"
+            f"_w 'parent exited; launching installer'; "
+            # Primary launcher — Start-Process. Wrap in try/catch so
+            # we can record the actual exception text instead of
+            # losing it to a hidden detached process.
+            f"$launched = $false; "
+            f"try {{ "
+            f"  Start-Process -FilePath $path -ErrorAction Stop; "
+            f"  $launched = $true; "
+            f"  _w 'Start-Process OK' "
+            f"}} catch {{ "
+            f"  _w \"Start-Process FAILED: $($_.Exception.Message)\" "
+            f"}}; "
+            # Fallback: cmd.exe's `start` builtin uses a different
+            # ShellExecute path that's tended to survive desktop-state
+            # edge cases. Run unconditionally on Start-Process failure.
+            f"if (-not $launched) {{ "
+            f"  try {{ "
+            f"    & cmd.exe /c start \"\" \"$path\"; "
+            f"    _w 'cmd-start fallback issued' "
+            f"  }} catch {{ "
+            f"    _w \"cmd-start FAILED: $($_.Exception.Message)\" "
+            f"  }} "
+            f"}}; "
+            f"_w 'watcher exit'"
         )
         try:
             subprocess.Popen(

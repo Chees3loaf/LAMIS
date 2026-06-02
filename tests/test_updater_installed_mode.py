@@ -189,6 +189,76 @@ class TestApplyUpdateInstalled(unittest.TestCase):
             if os.path.exists(fake_path):
                 os.unlink(fake_path)
 
+    def test_watcher_writes_diagnostic_log(self):
+        """The first cut of the watcher had no logging — when it
+        failed silently in the field (v2.0.7.0 release), there was no
+        trail to follow. Every watcher now logs to
+        ``%APPDATA%\\ATLAS\\logs\\update_watcher.log`` covering parent
+        PID, target installer, loop exit, and Start-Process outcome.
+        Source-level check because the watcher runs detached after
+        os._exit; we can't hook its stdout in a real test."""
+        up = _make_installed_updater("2.0.0")
+        up._latest_release = {
+            "tag_name": "v2.0.1", "body": "",
+            "assets": [{
+                "name": "ATLAS_Setup.exe",
+                "browser_download_url": "https://example.com/ATLAS_Setup.exe",
+                "size": 4,
+            }],
+        }
+        up.set_confirmation_callback(lambda _msg: True)
+        fake_path = os.path.abspath("_fake_installer_log.exe")
+        with open(fake_path, "wb") as f:
+            f.write(b"data")
+        try:
+            with patch.object(up, "_download_installer",
+                              return_value=(fake_path, None)), \
+                 patch.object(upd.subprocess, "Popen") as popen:
+                up.apply_update()
+            cmd_arg = " ".join(popen.call_args[0][0])
+            # Log path is constructed in the watcher itself.
+            self.assertIn("update_watcher.log", cmd_arg)
+            # Diagnostic transcript covers all four key transitions.
+            self.assertIn("watcher start", cmd_arg)
+            self.assertIn("parent exited", cmd_arg)
+            self.assertIn("Start-Process OK", cmd_arg)
+            self.assertIn("watcher exit", cmd_arg)
+        finally:
+            if os.path.exists(fake_path):
+                os.unlink(fake_path)
+
+    def test_watcher_includes_cmd_start_fallback(self):
+        """When Start-Process throws in the post-parent-exit desktop
+        state, the watcher falls back to ``cmd /c start "" "<path>"``
+        — different ShellExecute code path that's tended to be more
+        reliable in equivalent field reports. Source-level check."""
+        up = _make_installed_updater("2.0.0")
+        up._latest_release = {
+            "tag_name": "v2.0.1", "body": "",
+            "assets": [{
+                "name": "ATLAS_Setup.exe",
+                "browser_download_url": "https://example.com/ATLAS_Setup.exe",
+                "size": 4,
+            }],
+        }
+        up.set_confirmation_callback(lambda _msg: True)
+        fake_path = os.path.abspath("_fake_installer_fb.exe")
+        with open(fake_path, "wb") as f:
+            f.write(b"data")
+        try:
+            with patch.object(up, "_download_installer",
+                              return_value=(fake_path, None)), \
+                 patch.object(upd.subprocess, "Popen") as popen:
+                up.apply_update()
+            cmd_arg = " ".join(popen.call_args[0][0])
+            # The cmd-start fallback runs inside a `try/catch` guard
+            # gated on Start-Process having failed.
+            self.assertIn("cmd.exe /c start", cmd_arg)
+            self.assertIn("-not $launched", cmd_arg)
+        finally:
+            if os.path.exists(fake_path):
+                os.unlink(fake_path)
+
     def test_approved_spawns_watcher_not_direct_installer(self):
         """The installer must NOT be launched directly. Operator
         previously reported the NSIS UI popping up over a still-visible
