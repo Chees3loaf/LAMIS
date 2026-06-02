@@ -165,6 +165,21 @@ def get_database_path() -> Path:
     return dest
 
 
+def get_logs_dir() -> Path:
+    """Return the directory ATLAS writes rotating run logs into.
+
+    Lives at ``%APPDATA%\\ATLAS\\logs`` so it's writable when ATLAS is
+    installed under ``Program Files`` (which is read-only for standard
+    users). The directory is created on demand so callers can rely on
+    it existing even before the file logger has written its first line.
+    """
+    import os
+    app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
+    log_dir = Path(app_data) / "ATLAS" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return log_dir.resolve()
+
+
 def get_known_hosts_path() -> Path:
     """Return the path to the ATLAS SSH known_hosts file, creating it if needed.
 

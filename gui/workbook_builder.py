@@ -31,26 +31,58 @@ from utils.helpers import extract_ip_sort_key
 # rls / rls_2 / rls_3.
 _FACTORY_DEFAULT_HOSTNAMES: Dict[str, str] = {
     "rls": "RLS",
+    # Waveserver 5: ATLAS's upgrade flow hard-codes the post-provision
+    # hostname to ``WS5_1`` and the bare un-provisioned device reports
+    # ``Waveserver-5`` — without disambiguation, two of either kind in
+    # one workbook collapse onto the same tab. The chassis-serial
+    # rewrite gives each its own ``WS5-<serial>`` identity in the tab
+    # strip, BoM column, and Summary row.
+    "waveserver-5": "WS5",
+    "ws5_1": "WS5",
 }
 
 
 def _chassis_serial_from_df(df: pd.DataFrame) -> str:
     """Return the chassis serial number from *df*, or "" if not found.
 
-    The chassis row is identified by Type == "Shelf" (Ciena RLS / Nokia
-    1830) or "Chassis" (Nokia SAR / IXR). We take the first matching
-    row with a non-empty Serial Number.
+    The chassis row is identified by either:
+
+    * ``Type == "Shelf"`` / ``Type == "Chassis"`` — RLS / Nokia 1830 /
+      Nokia SAR / IXR put the generic classifier here.
+    * ``Information Type == "Shelf"`` / ``"Chassis"`` — newer scripts
+      (Waveserver 5) put the descriptive model name in ``Type`` (so
+      column C of the device tab reads e.g. ``"Waveserver 5 Chassis"``
+      rather than the bare classifier) and the BoM classifier in
+      ``Information Type``. Checking both keeps the helper compatible
+      with old and new script shapes.
+
+    We take the first matching row with a non-empty Serial Number.
     """
     if df is None or df.empty:
         return ""
-    type_col = df.get("Type")
     serial_col = df.get("Serial Number")
-    if type_col is None or serial_col is None:
+    if serial_col is None:
         return ""
-    for tval, sval in zip(type_col, serial_col):
-        tlow = str(tval).strip().lower() if tval is not None else ""
+    type_col = df.get("Type")
+    info_type_col = df.get("Information Type")
+
+    def _is_chassis_row(idx: int) -> bool:
+        for col in (type_col, info_type_col):
+            if col is None:
+                continue
+            val = col.iloc[idx]
+            if val is None:
+                continue
+            if str(val).strip().lower() in ("shelf", "chassis"):
+                return True
+        return False
+
+    for idx in range(len(df)):
+        sval = serial_col.iloc[idx]
         ser = str(sval).strip() if sval is not None else ""
-        if tlow in ("shelf", "chassis") and ser:
+        if not ser:
+            continue
+        if _is_chassis_row(idx):
             return ser
     return ""
 
@@ -1735,12 +1767,14 @@ class WorkbookBuilder:
                     _default_prefix = _FACTORY_DEFAULT_HOSTNAMES.get(
                         system_name.strip().lower()
                     )
+                    factory_default_rewrite_applied = False
                     if _default_prefix:
                         chassis_serial = _chassis_serial_from_df(combined_df)
                         if chassis_serial:
                             system_name = (
                                 f"{_default_prefix}-{chassis_serial}"
                             )[:31].replace(":", "_").replace("/", "_")
+                            factory_default_rewrite_applied = True
                             logging.info(
                                 f"Bare default hostname detected for IP {ip}; "
                                 f"using chassis serial fallback '{system_name}'."
@@ -1759,13 +1793,23 @@ class WorkbookBuilder:
                         if hit:
                             _prior_ip, prior_sheet_title = hit
                             summary_index.pop(prior_sheet_title, None)
-                        else:
+                        elif not factory_default_rewrite_applied:
                             # Fallback: same IP, no hostname match. Only safe to
                             # treat as a "rescan of this device" when exactly one
                             # prior entry has that IP — otherwise this is a
                             # second device sharing the IP and we leave the
                             # prior entry alone (Bug-3 fix: don't overwrite
                             # legitimate distinct devices keyed by the same IP).
+                            #
+                            # The IP-fallback is also wrong whenever the rewrite
+                            # above ran: a factory-default rewrite produces a
+                            # ``<prefix>-<chassis-serial>`` name, so a name miss
+                            # in name_index is GUARANTEED to be a different
+                            # chassis (different serial). For those devices we
+                            # always create a new tab even if the IP/COM port
+                            # collides — gated on the
+                            # ``factory_default_rewrite_applied`` flag set just
+                            # above.
                             ip_hits = [
                                 st for st, (rip, _) in summary_index.items()
                                 if rip == ip_key

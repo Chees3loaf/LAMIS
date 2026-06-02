@@ -5,12 +5,52 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from unittest.mock import patch
+
 from utils.helpers import (
     clear_known_host_entry,
     extract_ip_sort_key,
     get_database_path,
+    get_logs_dir,
     get_project_root,
 )
+
+
+class TestGetLogsDir(unittest.TestCase):
+    """get_logs_dir() must place logs at %APPDATA%\\ATLAS\\logs (writable
+    by standard users when installed under Program Files) and create the
+    directory on demand so the file handler in main.py doesn't race the
+    very first run."""
+
+    def test_returns_appdata_subpath_when_envvar_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"APPDATA": tmp}, clear=False):
+                p = get_logs_dir()
+                self.assertEqual(p.name, "logs")
+                self.assertEqual(p.parent.name, "ATLAS")
+                self.assertTrue(p.exists() and p.is_dir())
+
+    def test_falls_back_to_home_when_appdata_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_without_appdata = {
+                k: v for k, v in os.environ.items() if k != "APPDATA"
+            }
+            with patch.dict(os.environ, env_without_appdata, clear=True):
+                with patch("os.path.expanduser", return_value=tmp):
+                    p = get_logs_dir()
+                    # Compare resolved paths to normalize Windows short
+                    # (8.3) form vs. long form on the temp directory.
+                    self.assertEqual(p, (Path(tmp) / "ATLAS" / "logs").resolve())
+                    self.assertTrue(p.exists())
+
+    def test_creates_directory_if_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"APPDATA": tmp}, clear=False):
+                expected = Path(tmp) / "ATLAS" / "logs"
+                self.assertFalse(expected.exists())
+                p = get_logs_dir()
+                self.assertTrue(p.exists())
+                self.assertEqual(p, expected.resolve())
 
 
 class TestExtractIpSortKey(unittest.TestCase):

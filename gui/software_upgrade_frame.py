@@ -44,6 +44,11 @@ except ImportError:
     _HAS_PSUTIL = False
 
 try:
+    from serial.tools import list_ports as _serial_list_ports
+except Exception:  # pragma: no cover — pyserial-extras absent in some envs
+    _serial_list_ports = None
+
+try:
     import win32event
     import win32process
     import win32con
@@ -75,11 +80,23 @@ _G42_NET = {"pc_ip": "169.254.0.101", "device_ip": "169.254.0.1"}
 # Nokia PSI service network — same /24, PC at .101 and PSI management at .1.
 _PSI_NET = {"pc_ip": "172.16.0.101", "device_ip": "172.16.0.1"}
 
+# Ciena Waveserver 5 — provisioned via serial first (no factory mgmt IP),
+# then SSH'd to at the address WE set. /22 subnet because that's what the
+# operator's lab playbook uses; both values flow into the upgrade script.
+_WS5_NET = {
+    "pc_ip": "10.9.49.101",
+    "device_ip": "10.9.49.36",
+    "device_ip_cidr": "10.9.49.36/22",
+    "mask": "255.255.252.0",  # /22
+}
+_WS5_HOSTNAME = "WS5_1"
+
 # Dropdown of device families that have a wired-up upgrade flow. Add a
 # new entry here (and a matching elif in `_run_upgrade`) when wiring up a
 # new device type.
 _SUPPORTED_UPGRADES = [
     "Ciena RLS",
+    "Ciena Waveserver 5",
     "Nokia G42",
     "Nokia PSI",
 ]
@@ -525,6 +542,59 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._psi_status = ttk.Label(psi_row3, text="", foreground="gray")
         self._psi_status.pack(side=tk.LEFT, padx=10)
 
+        # Row 4e — Ciena Waveserver 5 controls (shown only when
+        # device type == Ciena Waveserver 5). This one is two-phase:
+        # serial first (provision the device IP + hostname), then SSH
+        # over the DCN-1 port to drive the software download/activate.
+        self._ws5_frame = ttk.LabelFrame(self, text="Ciena Waveserver 5 Upgrade")
+
+        ttk.Label(
+            self._ws5_frame,
+            text=(
+                "Phase 1 (serial @ 9600 on console port) provisions "
+                f"{_WS5_NET['device_ip_cidr']} and gateway "
+                f"{_WS5_NET['pc_ip']}. Phase 2 (SSH over DCN-1) downloads + "
+                "activates the load. Stops at 'Activation In Progress' — "
+                "manual commit on the device required."
+            ),
+            foreground="gray", wraplength=620, justify=tk.LEFT,
+        ).pack(anchor=tk.W, padx=6, pady=(4, 0))
+
+        ws5_row1 = ttk.Frame(self._ws5_frame)
+        ws5_row1.pack(fill=tk.X, padx=4, pady=(4, 2))
+        ttk.Label(ws5_row1, text="Software File:").pack(side=tk.LEFT, padx=(4, 2))
+        self._ws5_file_var = tk.StringVar()
+        self._ws5_file_combo = ttk.Combobox(
+            ws5_row1, textvariable=self._ws5_file_var, state="readonly", width=42
+        )
+        self._ws5_file_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Button(ws5_row1, text="↺", width=2, command=self._refresh_ws5_files).pack(
+            side=tk.LEFT, padx=1
+        )
+
+        ttk.Label(ws5_row1, text="  Serial Port:").pack(side=tk.LEFT, padx=(14, 2))
+        self._ws5_serial_var = tk.StringVar()
+        self._ws5_serial_combo = ttk.Combobox(
+            ws5_row1, textvariable=self._ws5_serial_var, state="readonly", width=12
+        )
+        self._ws5_serial_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Button(ws5_row1, text="↺", width=2, command=self._refresh_ws5_serial_ports).pack(
+            side=tk.LEFT, padx=1
+        )
+
+        ws5_row2 = ttk.Frame(self._ws5_frame)
+        ws5_row2.pack(fill=tk.X, padx=4, pady=(0, 4))
+        self._ws5_run_btn = ttk.Button(
+            ws5_row2, text="▶  Run Upgrade", command=self._run_ws5_upgrade
+        )
+        self._ws5_run_btn.pack(side=tk.LEFT, padx=14)
+        self._ws5_stop_btn = ttk.Button(
+            ws5_row2, text="■  Stop", command=self._stop_ws5_upgrade, state=tk.DISABLED
+        )
+        self._ws5_stop_btn.pack(side=tk.LEFT, padx=4)
+        self._ws5_status = ttk.Label(ws5_row2, text="", foreground="gray")
+        self._ws5_status.pack(side=tk.LEFT, padx=10)
+
         # Row 5 — progress bar
         prog_frame = ttk.LabelFrame(self, text="Transfer Progress")
         prog_frame.pack(fill=tk.X, padx=5, pady=4)
@@ -554,6 +624,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
 
         # Initial state
         self._refresh_nics()
+        self._refresh_ws5_serial_ports()
         self._on_dtype_change()
         self._on_rls_ctm_change()
 
@@ -575,6 +646,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._refresh_rls_files()
         self._refresh_g42_files()
         self._refresh_psi_files()
+        self._refresh_ws5_files()
 
     def _on_dtype_change(self, _event=None) -> None:
         """Show/hide device-specific panels based on device type."""
@@ -583,6 +655,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._rls_frame.pack_forget()
         self._g42_frame.pack_forget()
         self._psi_frame.pack_forget()
+        self._ws5_frame.pack_forget()
 
         # pack_forget+pack would re-add at the end of the parent's geometry
         # list, pushing the progress + log panels around. `before=` anchors
@@ -591,6 +664,8 @@ class SoftwareUpgradeFrame(ttk.Frame):
         before = self._progress.master
         if dtype == "Ciena RLS":
             self._rls_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
+        elif dtype == "Ciena Waveserver 5":
+            self._ws5_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
         elif dtype == "Nokia G42":
             self._g42_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
         elif dtype == "Nokia PSI":
@@ -611,6 +686,34 @@ class SoftwareUpgradeFrame(ttk.Frame):
         manually.
         """
         self._populate_file_combo(self._rls_file_combo, self._rls_file_var, ".tgz")
+
+    def _refresh_ws5_files(self) -> None:
+        """Populate the Waveserver 5 software-file dropdown — filter to
+        .tar.gz, fall back to all files if none match. The activate
+        command derives the version from the filename so the operator
+        needs to pick the actual tarball, not a manifest."""
+        self._populate_file_combo(self._ws5_file_combo, self._ws5_file_var, ".tar.gz")
+
+    def _refresh_ws5_serial_ports(self) -> None:
+        """Populate the WS5 serial-port combobox from pyserial. Falls back
+        to a single ``COM1`` placeholder when pyserial isn't usable so the
+        widget never goes blank."""
+        if _serial_list_ports is None:
+            ports = ["COM1"]
+        else:
+            try:
+                ports = sorted(p.device for p in _serial_list_ports.comports())
+            except Exception as exc:
+                logging.debug(f"Could not enumerate serial ports: {exc}")
+                ports = []
+        if not ports:
+            ports = ["COM1"]
+        current = self._ws5_serial_var.get()
+        self._ws5_serial_combo["values"] = ports
+        if current in ports:
+            self._ws5_serial_var.set(current)
+        else:
+            self._ws5_serial_var.set(ports[0])
 
     def _refresh_g42_files(self) -> None:
         """Populate the manifest dropdown — filter to .manifest, fall back
@@ -1162,6 +1265,172 @@ class SoftwareUpgradeFrame(ttk.Frame):
     def _set_psi_status(self, msg: str, color: str = "gray") -> None:
         def _do() -> None:
             self._psi_status.config(text=msg, foreground=color)
+        try:
+            self.after(0, _do)
+        except Exception:
+            pass
+
+    # ── Ciena Waveserver 5 upgrade ──────────────────────────────────────────
+
+    def _run_ws5_upgrade(self) -> None:
+        if self._upgrade_thread is not None and self._upgrade_thread.is_alive():
+            messagebox.showinfo("Already running", "An upgrade is already in progress.")
+            return
+
+        # Pre-flight: WS5 is two-phase and the operator MUST have both
+        # cables connected before phase 1 even starts — serial on console
+        # for provisioning, Cat-5 on DCN-1 for the subsequent SSH.
+        if not messagebox.askokcancel(
+            "Waveserver 5 — Pre-flight",
+            "Before continuing, confirm:\n\n"
+            "  • Serial cable connected from this PC to the Waveserver "
+            "console port (9600 baud).\n"
+            "  • Cat-5 connected from this PC to the Waveserver DCN-1 "
+            "port.\n\n"
+            "The program will set your NIC to 10.9.49.101/22 (acting as "
+            "the device's gateway) and start an HTTP server on port 8000 "
+            "rooted at the selected software folder.\n\n"
+            "Click OK to begin.",
+        ):
+            return
+
+        if self._server is None:
+            if not messagebox.askyesno(
+                "HTTP server not running",
+                "The HTTP server is not running, so the Waveserver won't "
+                "be able to pull the upgrade file in phase 2. Start it now?",
+            ):
+                return
+            self._start_server()
+            if self._server is None:
+                return
+
+        filename = self._ws5_file_var.get().strip()
+        if not filename:
+            messagebox.showerror(
+                "Error", "Pick a .tar.gz software file from the dropdown."
+            )
+            return
+
+        serial_port = self._ws5_serial_var.get().strip()
+        if not serial_port:
+            messagebox.showerror(
+                "Error",
+                "Select the serial port wired to the Waveserver console. "
+                "Click ↺ next to the Serial Port dropdown to refresh.",
+            )
+            return
+
+        pc_ip = _WS5_NET["pc_ip"]
+        device_ip = _WS5_NET["device_ip"]
+        device_ip_cidr = _WS5_NET["device_ip_cidr"]
+        mask = _WS5_NET["mask"]
+        self._pc_ip_var.set(pc_ip)
+
+        nic = self._nic_var.get().strip()
+        if not nic:
+            messagebox.showerror(
+                "Error",
+                "No network interface selected. Click ↺ in the PC Static IP "
+                "row to refresh, then pick the NIC connected to DCN-1.",
+            )
+            return
+
+        server_url = f"http://{pc_ip}:{_HTTP_PORT}/{filename}"
+
+        self._upgrade_stop = False
+        self._set_ws5_status("Running…", "blue")
+        self._ws5_run_btn.config(state=tk.DISABLED)
+        self._ws5_stop_btn.config(state=tk.NORMAL)
+        self._log(
+            f"\n──── Waveserver 5 upgrade: {device_ip_cidr} via {serial_port} "
+            f"+ SSH @ {device_ip} ← {server_url} ────"
+        )
+
+        def _worker() -> None:
+            try:
+                # Step 1 — point the NIC at 10.9.49.101/22 so the device
+                # can reach the HTTP server once phase 1 finishes.
+                self._log(f"Setting {nic} to {pc_ip}/{mask} via netsh…")
+                self._set_nic_status("Applying static IP…", "blue")
+                ok, msg = _run_netsh(
+                    ["interface", "ipv4", "set", "address",
+                     f"name={nic}", "static", pc_ip, mask]
+                )
+                if not ok:
+                    self._set_nic_status("Failed — see log", "red")
+                    self._set_ws5_status("Failed ✘", "red")
+                    self._log(f"netsh FAILED: {msg}")
+                    self._log(
+                        "Aborting upgrade — without the static IP the "
+                        "Waveserver cannot reach the HTTP server."
+                    )
+                    return
+                self._static_ip_applied_on = nic
+                self._set_nic_status(f"Static {pc_ip} on {nic}", "green")
+                self._log(f"netsh OK: {msg}")
+                time.sleep(2.0)
+
+                # Step 2 — run the two-phase upgrade script. The script
+                # handles serial provisioning, the SSH download/activate
+                # flow, and polls upgrade-status for us.
+                from scripts.Network.Ciena_Waveserver5_Upgrade import (
+                    Waveserver5UpgradeScript,
+                )
+
+                script = Waveserver5UpgradeScript(
+                    serial_port=serial_port,
+                    software_filename=filename,
+                    server_url=server_url,
+                    device_ip=device_ip,
+                    device_ip_cidr=device_ip_cidr,
+                    gateway_ip=pc_ip,
+                    hostname=_WS5_HOSTNAME,
+                    output_callback=self._log,
+                    stop_callback=lambda: self._upgrade_stop,
+                )
+                ok_run = script.run()
+                if ok_run:
+                    self._set_ws5_status("Activating ✔", "green")
+                    self._log("✔ Waveserver 5 reached 'Activation In Progress'.")
+                    self._log(
+                        "Reminder: click 'Restore DHCP' when you're done to "
+                        "return the NIC to dynamic addressing."
+                    )
+                    # Final popup matches the operator's verbatim text from
+                    # the spec — it's what they expect at end-of-run.
+                    self.after(0, lambda: messagebox.showinfo(
+                        "Waveserver 5 — Complete",
+                        "Software Activation in Progress. Manual Commit "
+                        "Required. Safe to Disconnect.",
+                    ))
+                else:
+                    self._set_ws5_status("Failed ✘", "red")
+                    self._log("✘ Waveserver 5 upgrade did not complete — see log.")
+            except Exception as exc:
+                logging.exception("Waveserver 5 upgrade worker error")
+                self._set_ws5_status("Error", "red")
+                self._log(f"[ERROR] {exc}")
+            finally:
+                self.after(0, lambda: self._ws5_run_btn.config(state=tk.NORMAL))
+                self.after(0, lambda: self._ws5_stop_btn.config(state=tk.DISABLED))
+
+        self._upgrade_thread = threading.Thread(target=_worker, daemon=True)
+        self._upgrade_thread.start()
+
+    def _stop_ws5_upgrade(self) -> None:
+        if self._upgrade_thread is None or not self._upgrade_thread.is_alive():
+            return
+        self._upgrade_stop = True
+        self._set_ws5_status("Stopping…", "orange")
+        self._log(
+            "Stop requested — local polling will halt. Once a software "
+            "download is in flight on the device it continues independently."
+        )
+
+    def _set_ws5_status(self, msg: str, color: str = "gray") -> None:
+        def _do() -> None:
+            self._ws5_status.config(text=msg, foreground=color)
         try:
             self.after(0, _do)
         except Exception:

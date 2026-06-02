@@ -14,12 +14,15 @@ import time
 from typing import Callable, List, Optional, Tuple
 
 # Match the common operational prompts at end-of-buffer:
-#   Nokia SROS: "A:hostname#"  "*A:hostname#"  "B:hostname>"
-#   Generic:    "hostname#"    "hostname>"     "hostname$"
+#   Nokia SROS:    "A:hostname#"   "*A:hostname#"  "B:hostname>"
+#   Generic:       "hostname#"     "hostname>"     "hostname$"
+#   Waveserver-5:  "Waveserver-5*#" / "WS5_1*#" — the trailing ``*`` flags
+#                  pending-but-unsaved config changes; we tolerate it so
+#                  the prompt detector doesn't stall mid-provisioning.
 # Also matches Login:/Password: prompts so callers can drive the login.
 _PROMPT_RE = re.compile(
     rb"(?:[\*]?[ABab]:[A-Za-z0-9_\-.]+[#>]\s*$)"
-    rb"|(?:[A-Za-z0-9_\-.]+\s*[#>$]\s*$)"
+    rb"|(?:[A-Za-z0-9_\-.]+\*?\s*[#>$]\s*$)"
     rb"|(?:[Ll]ogin:\s*$)"
     rb"|(?:[Uu]sername:\s*$)"
     rb"|(?:[Pp]assword:\s*$)"
@@ -27,7 +30,7 @@ _PROMPT_RE = re.compile(
 
 _LOGIN_RE = re.compile(rb"(?:[Ll]ogin|[Uu]sername):\s*$")
 _PASSWORD_RE = re.compile(rb"[Pp]assword:\s*$")
-_SHELL_RE = re.compile(rb"(?:[\*]?[ABab]:[A-Za-z0-9_\-.]+[#>]|[A-Za-z0-9_\-.]+[#>$])\s*$")
+_SHELL_RE = re.compile(rb"(?:[\*]?[ABab]:[A-Za-z0-9_\-.]+[#>]|[A-Za-z0-9_\-.]+\*?[#>$])\s*$")
 _FAIL_RE = re.compile(rb"(?:[Ll]ogin\s+(?:incorrect|failed)|[Aa]uthentication\s+fail)")
 
 
@@ -74,8 +77,15 @@ def _read_until(
             tail = bytes(buf[-512:])
             if pattern.search(tail):
                 return bytes(buf), True
-            # Page-pause handling
+            # Page-pause handling. Different vendors emit different
+            # paging banners — handle the common ones inline so callers
+            # don't have to re-implement the same loop per device.
+            #   * Nokia SROS:        "Press any key to continue"
+            #   * Ciena Waveserver:  "--more--"  (also "--More--")
+            # A single space advances all of them by one screen.
             if b"Press any key to continue" in tail:
+                ser.write(b" ")
+            elif b"--more--" in tail or b"--More--" in tail:
                 ser.write(b" ")
         else:
             time.sleep(0.05)

@@ -65,6 +65,7 @@ from utils.helpers import (
     cleanup_stale_lamis_tempfiles,
     scrub_known_hosts,
     get_known_hosts_path,
+    get_logs_dir,
 )
 
 # --- Host key cleanup on exit/crash ---
@@ -100,9 +101,9 @@ def _register_known_hosts_cleanup():
 _register_known_hosts_cleanup()
 
 # Configure logging — write to console AND a rotating, timestamped log file.
-# Use %APPDATA%\ATLAS\logs so it's writable when installed in Program Files.
-_log_dir = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "ATLAS", "logs")
-os.makedirs(_log_dir, exist_ok=True)
+# get_logs_dir() returns %APPDATA%\ATLAS\logs so it's writable when ATLAS
+# is installed under Program Files (read-only for standard users).
+_log_dir = str(get_logs_dir())
 restrict_path_to_owner(_log_dir, is_dir=True)  # F019: lock log dir to current user
 _log_file = os.path.join(_log_dir, datetime.now().strftime("ATLAS_%Y-%m-%d_%H-%M-%S.log"))
 

@@ -28,6 +28,7 @@ from utils.helpers import (
     friendly_error,
     get_data_dir,
     get_database_path,
+    get_logs_dir,
     get_project_root,
     sanitize_filename_component,
 )
@@ -53,6 +54,7 @@ class InventoryGUI:
         "Nokia PSI": "scripts.Nokia_PSI",
         "Ciena 6500": "scripts.Ciena_6500",
         "Ciena RLS": "scripts.Ciena_RLS",
+        "Ciena Waveserver 5": "scripts.Ciena_Waveserver5",
         "Ciena SAOS": "scripts.Ciena_SAOS_Inv",
         "Ciena SAOS 10": "scripts.Ciena_SAOS10_Inv",
     }
@@ -73,7 +75,7 @@ class InventoryGUI:
     }
 
     _allowed_lan_scripts = {"Nokia 1830", "Nokia PSI", "Ciena 6500", "Ciena RLS", "Ciena SAOS", "Ciena SAOS 10"}
-    _allowed_serial_scripts = {"Nokia SAR", "Nokia IXR", "Ciena RLS"}
+    _allowed_serial_scripts = {"Nokia SAR", "Nokia IXR", "Ciena RLS", "Ciena Waveserver 5"}
 
     def __init__(self, root, update_available, command_tracker, db_cache):
         self.root = root
@@ -231,6 +233,20 @@ class InventoryGUI:
             command=self._on_check_for_updates_clicked,
         )
         help_menu.add_separator()
+        # Ad-hoc part-number → description lookup against the runtime
+        # parts DB. Operators have parts in hand with no legible
+        # markings; the DB carries the description they'd otherwise
+        # have to hunt down in a separate BoM tool.
+        help_menu.add_command(
+            label="Part Lookup", command=self._open_part_lookup,
+        )
+        # Direct path to the run-log folder — needed because %APPDATA% is
+        # hidden by default in File Explorer, so non-technical operators
+        # can't locate the logs to attach to bug reports otherwise.
+        help_menu.add_command(
+            label="Open Logs Folder", command=self._open_logs_folder,
+        )
+        help_menu.add_separator()
         help_menu.add_command(label="About ATLAS", command=self._show_about)
 
         self._help_button["menu"] = help_menu
@@ -365,11 +381,68 @@ class InventoryGUI:
             lambda fut: self.root.after(0, _on_apply, fut)
         )
 
+    def _open_part_lookup(self) -> None:
+        """Open the Part Lookup dialog against the runtime parts DB.
+
+        Non-blocking — the dialog runs independently so the operator
+        can keep working in the main window while it's open.
+        """
+        try:
+            db_path = str(get_database_path())
+        except Exception as exc:
+            messagebox.showerror(
+                "Part Lookup",
+                f"Could not resolve the parts database.\n\n"
+                f"{friendly_error(exc)}",
+            )
+            return
+        try:
+            from gui.part_lookup_dialog import PartLookupDialog
+            PartLookupDialog(self.root, db_path)
+        except Exception as exc:
+            messagebox.showerror(
+                "Part Lookup",
+                f"Could not open the lookup dialog.\n\n{friendly_error(exc)}",
+            )
+
+    def _open_logs_folder(self) -> None:
+        """Open the ATLAS run-logs directory in the system file browser.
+
+        %APPDATA% is hidden by default in File Explorer, so operators
+        couldn't reliably find the logs to send with bug reports —
+        this gives them a one-click path.
+        """
+        try:
+            log_dir = get_logs_dir()
+        except Exception as exc:
+            messagebox.showerror(
+                "Open Logs Folder",
+                f"Could not resolve the ATLAS logs directory.\n\n{friendly_error(exc)}",
+            )
+            return
+        try:
+            if sys.platform.startswith("win"):
+                os.startfile(str(log_dir))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(log_dir)])
+            else:
+                subprocess.Popen(["xdg-open", str(log_dir)])
+        except Exception as exc:
+            messagebox.showerror(
+                "Open Logs Folder",
+                f"Could not open the logs folder.\n\n"
+                f"Path: {log_dir}\n\n{friendly_error(exc)}",
+            )
+
     def _show_about(self) -> None:
         version = getattr(config, "APP_VERSION", "(unknown)")
         owner = getattr(config, "GITHUB_OWNER", "")
         repo  = getattr(config, "GITHUB_REPO", "")
         repo_str = f"{owner}/{repo}" if owner and repo else "(unconfigured)"
+        try:
+            log_dir_str = str(get_logs_dir())
+        except Exception:
+            log_dir_str = "(unavailable)"
         manifesto = (
             "Let me ask you a question.\n\n"
             "Is an engineer not entitled to the hours of their own day?\n\n"
@@ -408,6 +481,7 @@ class InventoryGUI:
             f"\n\n— — —\n"
             f"Automated Toolkit for Lightriver Asset & Systems\n"
             f"Version: {version}    Update channel: {repo_str}\n"
+            f"Logs folder: {log_dir_str}\n"
             f"© Chees3loaf/LightRiver Technologies"
         )
         self._show_about_dialog(manifesto + footer)
