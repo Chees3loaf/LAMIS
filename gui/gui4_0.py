@@ -943,6 +943,12 @@ class InventoryGUI:
                 self.task_queue = Queue()
                 self.device_family_by_ip[context["target_id"]] = self._family_for_script(manual_script)
                 self.task_queue.put((context["target_id"], manual_script))
+                queue.put((
+                    "log",
+                    f"Starting {context['connection_mode']} inventory for "
+                    f"{context['target_id']} via "
+                    f"{context.get('manual_script') or 'manual script'}…",
+                ))
                 self.process_task_queue(queue)
                 # LAN-mode cleanup: the same management IP (e.g. 10.0.0.1)
                 # frequently maps to a different physical device between
@@ -965,7 +971,21 @@ class InventoryGUI:
                         logging.exception(
                             "Failed to clear known_hosts after LAN run"
                         )
-                queue.put(("inventory_complete", True))
+                # Only kick off the export when we have something to export.
+                # If the script bailed before populating self.outputs — most
+                # often a serial probe that never saw a console prompt — the
+                # downstream export worker would otherwise emit an
+                # ``export_complete`` event with the would-be output path
+                # and the GUI would print "Report saved successfully as:
+                # …" even though no file ever hit disk.
+                if self.outputs:
+                    queue.put(("inventory_complete", True))
+                else:
+                    queue.put((
+                        "log",
+                        "No inventory data collected — no report saved.",
+                    ))
+                    queue.put(("inventory_complete", False))
                 return
 
             self.failed_ips = {}
@@ -979,6 +999,15 @@ class InventoryGUI:
             total_ips = len(context["ip_list"])
             reachable_ips = []
             reachable_lock = threading.Lock()
+
+            queue.put((
+                "log",
+                f"Starting LAN inventory — {total_ips} device(s) to scan.",
+            ))
+            queue.put((
+                "log",
+                f"Phase 1/3 · Pinging {total_ips} device(s)…",
+            ))
 
             def _probe(ip):
                 return ip, script_interface.is_reachable(ip)
@@ -998,12 +1027,24 @@ class InventoryGUI:
                         self.failed_ips[ip] = "Unreachable"
                     queue.put(("progress", (idx, total_ips, f"Pinging {idx}/{total_ips}")))
 
+            unreachable_count = total_ips - len(reachable_ips)
+            queue.put((
+                "log",
+                f"Ping complete — {len(reachable_ips)} reachable, "
+                f"{unreachable_count} unreachable.",
+            ))
+
             if not reachable_ips:
                 queue.put(("log", "No reachable IPs found."))
                 queue.put(("inventory_complete", False))
                 return
 
             total_reachable = len(reachable_ips)
+            queue.put((
+                "log",
+                f"Phase 2/3 · Scanning {total_reachable} reachable device(s) "
+                f"(up to 5 in parallel)…",
+            ))
             completed_count = 0
             completed_lock = threading.Lock()
 
@@ -1044,6 +1085,14 @@ class InventoryGUI:
                     elif status:
                         self.failed_ips[ip] = status
                         queue.put(("log", f"[{ip}] Error: {status}"))
+                    else:
+                        # Surface per-device success so the operator
+                        # sees the panel update at the same rate the
+                        # progress bar ticks. Errors are logged above.
+                        queue.put((
+                            "log",
+                            f"[{ip}] Scan complete ({count}/{total_reachable}).",
+                        ))
 
             if self.pause_queue and not self.stop_threads:
                 self._drain_pause_queue(queue)
@@ -1054,7 +1103,23 @@ class InventoryGUI:
                     lines.append(f"  {ip}: {reason}")
                 queue.put(("log", "\n".join(lines)))
 
-            queue.put(("inventory_complete", True))
+            # Same guard as the LAN/Serial single-device path: only signal
+            # success when something landed in self.outputs. Otherwise the
+            # export worker's empty-data branch would falsely emit
+            # ``export_complete`` with the would-be output_file path.
+            if self.outputs:
+                queue.put((
+                    "log",
+                    f"Phase 3/3 · Building report for "
+                    f"{len(self.outputs)} device(s)…",
+                ))
+                queue.put(("inventory_complete", True))
+            else:
+                queue.put((
+                    "log",
+                    "No inventory data collected — no report saved.",
+                ))
+                queue.put(("inventory_complete", False))
         except Exception as exc:
             logging.exception("Background inventory run failed")
             queue.put(("error", friendly_error(exc)))
@@ -1091,6 +1156,17 @@ class InventoryGUI:
                 sales_order=context["sales_order"],
                 append_mode=context.get("append_mode", False),
             )
+
+            # Surface what we're about to do so the operator doesn't
+            # stare at a frozen UI during a multi-second Excel build.
+            family_summary = ", ".join(
+                f"{fam}:{len(ips)}" for fam, ips in non_empty.items()
+            )
+            self.run_queue.put((
+                "log",
+                f"Building inventory workbook ({family_summary}) → "
+                f"{os.path.basename(output_file)}…",
+            ))
 
             # Single-family scans bypass the unified builder so behavior
             # exactly matches the prior single-template path.
@@ -1221,9 +1297,50 @@ class InventoryGUI:
         self.run_context = None
         self.run_future = None
         self.export_future = None
+
+        # Surface failed devices as a popup BEFORE the "System Ready"
+        # success message. Without this, a partial run (e.g. 11 of 12
+        # chassis captured because one rejected the credential ladder)
+        # only shows the failure as a line in the scrolling output
+        # panel -- which the operator can easily miss, then trust the
+        # report and ship a packing slip that's missing a chassis.
+        # Snapshot the dict before the popup since some callers may
+        # mutate it during showwarning's modal loop.
+        failed_snapshot = dict(self.failed_ips)
+        if failed_snapshot:
+            self._show_failed_devices_popup(failed_snapshot)
+
         if success_message:
             self.stop_threads = True
             messagebox.showinfo("System Ready", "The system is ready.")
+
+    def _show_failed_devices_popup(self, failed: Dict[str, str]) -> None:
+        """Pop a warning dialog listing every device that didn't make
+        it into the inventory. Called from :py:meth:`finish_run` so
+        every run-completion path -- success, error, abort -- gets
+        the same end-of-run summary if anything failed."""
+        count = len(failed)
+        # Cap the displayed list so a 200-device LAN scan with widespread
+        # failures doesn't produce a dialog the operator can't see the
+        # bottom of. The full list is always in the file log + output
+        # panel.
+        MAX_SHOWN = 15
+        items = list(failed.items())
+        shown = items[:MAX_SHOWN]
+        rest = len(items) - len(shown)
+        lines = [f"  • {ip}: {reason}" for ip, reason in shown]
+        if rest > 0:
+            lines.append(f"  • ... plus {rest} more (see Output panel)")
+        header = (
+            f"{count} device{'s' if count != 1 else ''} did not return "
+            f"inventory data. Re-run them after fixing the cause "
+            f"(credentials, cable, reachability, etc.)."
+        )
+        body = header + "\n\n" + "\n".join(lines)
+        try:
+            messagebox.showwarning("Some Devices Failed", body)
+        except Exception:
+            logging.exception("Failed-devices popup did not display")
 
     def run_script(self):
         if (self.run_future and not self.run_future.done()) or (self.export_future and not self.export_future.done()):
@@ -1274,6 +1391,11 @@ class InventoryGUI:
                 # 1. Run normal inventory (your existing logic)
                 commands = script_instance.get_commands() or []
                 if commands:
+                    queue.put((
+                        "log",
+                        f"[{ip}] Connecting and running "
+                        f"{len(commands)} command(s)…",
+                    ))
                     outputs_list, error = script_instance.execute_commands(commands)
                     if error == "Aborted":
                         queue.put(("aborted", None))
@@ -1342,6 +1464,8 @@ class InventoryGUI:
         script_instance = None
         fam = None
 
+        queue.put(("log", f"[{ip}] Identifying device type…"))
+
         # ── Phase A: Identify ─────────────────────────────────────────────
         try:
             device_type, device_name = device_identifier.identify_device(
@@ -1362,6 +1486,8 @@ class InventoryGUI:
 
         if not device_type:
             return ip, "Identification failed", None, None
+
+        queue.put(("log", f"[{ip}] Identified as {device_type}."))
 
         # ── Phase B: Select script and optionally inject kept SSH client ───
         # Nokia 1830 now uses SSH (paramiko auth_none + two-stage shell login).
@@ -1406,6 +1532,10 @@ class InventoryGUI:
                 queue.put(("log", f"No commands for {ip}"))
                 return ip, None, script_instance, fam
 
+            queue.put((
+                "log",
+                f"[{ip}] Running {len(commands)} command(s)…",
+            ))
             outputs_list, error = script_instance.execute_commands(commands)
 
             if error == "Aborted":

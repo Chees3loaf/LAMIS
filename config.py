@@ -12,7 +12,7 @@ and easier to customize across different environments.
 # Keep this in lockstep with ATLAS.nsi `ProductVersion` so the installer and
 # the running app agree on what's currently installed. The updater compares
 # this against the latest GitHub release tag.
-APP_VERSION = "2.0.7.1"
+APP_VERSION = "2.0.8.0"
 
 # GitHub release feed used by utils.update.Updater when running as an
 # installed (frozen) build. Overridable via the LAMIS_UPDATE_REPO env var.
@@ -139,6 +139,15 @@ LOG_FORMAT = "%(asctime)s - %(levelname)s - %(message)s"
 
 # Suppress verbose library logs
 PIL_LOG_LEVEL = "WARNING"
+
+# Serial-console diagnostics. When True, raises the ``atlas.serial``
+# logger to DEBUG so every read/write through ``utils.serial_helpers``
+# leaves a per-chunk byte transcript in the run log (hex + UTF-8
+# repr). Useful when a baud probe fails or a login is silently looping.
+# Independent of LOG_LEVEL so the rest of ATLAS stays at INFO. Default
+# False — the always-on INFO-level hex dump on probe failure is
+# usually enough to diagnose cable / baud / prompt-shape issues.
+SERIAL_DEBUG = False
 
 # Rotating log handler — bound on-disk footprint.
 LOG_MAX_BYTES = 5 * 1024 * 1024  # 5 MB per file

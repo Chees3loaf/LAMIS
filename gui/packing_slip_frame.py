@@ -244,7 +244,12 @@ class PackingSlipFrame(ttk.Frame):
                 for name in wb.sheetnames:
                     if name in device_report_sheets:
                         continue
-                    if "summary" in name.lower() or name.upper() == "BOM":
+                    low = name.lower()
+                    if (
+                        "summary" in low
+                        or low == "bom"
+                        or low == "inventory by site"
+                    ):
                         continue
                     ws = wb[name]
                     b5 = ws["B5"].value

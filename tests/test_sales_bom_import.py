@@ -126,7 +126,7 @@ class TestSalesBomImportEndToEnd(unittest.TestCase):
         self._build()
         wb = openpyxl.load_workbook(self.out)
         self.assertIn("Summary", wb.sheetnames)
-        self.assertIn("BOM", wb.sheetnames)
+        self.assertIn("Inventory by Site", wb.sheetnames)
         for site in ("ALBA", "MNCR", "STJO", "Spares"):
             self.assertIn(site, wb.sheetnames, f"{site} tab missing")
         wb.close()
@@ -207,7 +207,7 @@ class TestSalesBomImportEndToEnd(unittest.TestCase):
         not the current BOM_Template's 'LightRiver Live Inventory' one."""
         self._build()
         wb = openpyxl.load_workbook(self.out)
-        ws = wb["BOM"]
+        ws = wb["Inventory by Site"]
         self.assertGreaterEqual(len(ws._images), 1,
             "BOM tab should carry a banner image")
         # Compare image bytes against both banner files.
@@ -294,7 +294,7 @@ class TestBomAggregateVisibleTotalColumn(unittest.TestCase):
 
     def test_bom_tab_has_total_ordered_header_at_d7(self):
         wb = openpyxl.load_workbook(self.out)
-        ws = wb["BOM"]
+        ws = wb["Inventory by Site"]
         self.assertEqual(ws.cell(7, 4).value, "Total Ordered")
         self.assertEqual(ws.cell(8, 4).value, "Qty")
         wb.close()
@@ -307,7 +307,7 @@ class TestBomAggregateVisibleTotalColumn(unittest.TestCase):
           3HE04823AA: 8+4+4 + 2 = 18
         """
         wb = openpyxl.load_workbook(self.out)
-        ws = wb["BOM"]
+        ws = wb["Inventory by Site"]
         # Locate the row for each part (find by PN in col B).
         wanted = {"3HE11278AA": 4, "3HE11279AA": 5, "3HE04823AA": 18}
         for r in range(10, ws.max_row + 1):
@@ -324,7 +324,7 @@ class TestBomAggregateVisibleTotalColumn(unittest.TestCase):
         """The template's SUM formula is replaced with a plain int so
         Excel doesn't need to re-evaluate the workbook on open."""
         wb = openpyxl.load_workbook(self.out)
-        ws = wb["BOM"]
+        ws = wb["Inventory by Site"]
         for r in range(10, ws.max_row + 1):
             pn = ws.cell(r, 2).value
             v = ws.cell(r, 4).value
@@ -345,7 +345,7 @@ class TestBomAggregateVisibleTotalColumn(unittest.TestCase):
         column gets deleted — verify by scanning row 7 for any column
         with header 'Total' OTHER than D7."""
         wb = openpyxl.load_workbook(self.out)
-        ws = wb["BOM"]
+        ws = wb["Inventory by Site"]
         total_cols = [
             c for c in range(1, ws.max_column + 1)
             if str(ws.cell(7, c).value or "").strip().lower() in ("total", "total ordered")
@@ -359,7 +359,7 @@ class TestBomAggregateVisibleTotalColumn(unittest.TestCase):
         inserted at D, freeze must extend to E9 so A-D all stay visible
         while scrolling through site columns."""
         wb = openpyxl.load_workbook(self.out)
-        ws = wb["BOM"]
+        ws = wb["Inventory by Site"]
         self.assertEqual(ws.freeze_panes, "E9")
         wb.close()
 

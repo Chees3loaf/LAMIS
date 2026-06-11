@@ -199,6 +199,97 @@ def get_known_hosts_path() -> Path:
     return known_hosts.resolve()
 
 
+def get_user_prefs_path() -> Path:
+    """Return the path to the JSON file ATLAS uses for per-user UI
+    preferences (last-used directories, window layout, etc.).
+
+    Stored alongside the database / logs / known_hosts under
+    ``%APPDATA%\\ATLAS`` so it survives upgrades and is writable
+    without elevated privileges. The file itself is *not* created here
+    -- callers use :func:`load_user_prefs` / :func:`save_user_prefs`.
+    """
+    import os
+    app_data = os.environ.get("APPDATA", os.path.expanduser("~"))
+    atlas_dir = Path(app_data) / "ATLAS"
+    atlas_dir.mkdir(parents=True, exist_ok=True)
+    return (atlas_dir / "prefs.json").resolve()
+
+
+def load_user_prefs() -> dict:
+    """Return ATLAS user preferences as a dict, or an empty dict if the
+    file is missing / unreadable. Never raises; callers can rely on a
+    dict always coming back so the first-run path is the same as the
+    file-corrupt path."""
+    import json
+    import logging as _logging
+    path = get_user_prefs_path()
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        pass
+    except Exception as exc:  # JSONDecodeError, OSError, permission, etc.
+        _logging.warning(f"[PREFS] Could not read {path}: {exc}")
+    return {}
+
+
+def save_user_prefs(prefs: dict) -> bool:
+    """Atomically persist *prefs* to the user-prefs JSON file. Returns
+    True on success, False if the write failed (callers should keep
+    running -- a failed pref save is never fatal)."""
+    import json
+    import logging as _logging
+    import os
+    path = get_user_prefs_path()
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(prefs, handle, indent=2, sort_keys=True)
+        # os.replace is atomic on Windows (same volume) and POSIX -- the
+        # consumer either sees the old file or the new one, never a
+        # half-written one.
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        _logging.warning(f"[PREFS] Could not write {path}: {exc}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
+def get_desktop_dir() -> Path:
+    """Return the OS Desktop directory for the current user.
+
+    Falls back to ``~/Desktop`` if the registry-style ``USERPROFILE``
+    layout isn't usable (e.g. test envs with no Desktop). Never raises
+    -- callers can rely on a writable Path being returned even if the
+    real desktop has been redirected by an enterprise GPO.
+    """
+    import os
+    candidates = []
+    userprofile = os.environ.get("USERPROFILE")
+    if userprofile:
+        candidates.append(Path(userprofile) / "Desktop")
+    # OneDrive-redirected Desktop is what most enterprise Windows users
+    # actually see; try it second so an explicit USERPROFILE/Desktop
+    # wins when it's there, but we still land somewhere usable when
+    # the local Desktop was redirected.
+    onedrive = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer")
+    if onedrive:
+        candidates.append(Path(onedrive) / "Desktop")
+    candidates.append(Path.home() / "Desktop")
+    for cand in candidates:
+        if cand.exists() and cand.is_dir():
+            return cand.resolve()
+    # Last-resort: return ~/Desktop even if it doesn't exist; the
+    # caller can choose to mkdir or fall through to ~.
+    return (Path.home() / "Desktop").resolve()
+
+
 def clear_known_host_entry(
     ip: str,
     path: Optional[Union[str, Path]] = None,
@@ -1128,39 +1219,57 @@ def cleanup_stale_lamis_tempfiles(max_age_hours: float = 24.0) -> int:
 def extract_ip_sort_key(value: Union[str, None]) -> Tuple:
     """
     Extract IP address from a value and return a sortable tuple.
-    
+
     Enables IP-based sorting by parsing the IP octets numerically.
-    Non-IP values sort after valid IPs.
-    
+    Non-IP values sort after valid IPs and use a **natural** sort —
+    digit runs in the string compare numerically rather than
+    lexically, so ``CON PALLET 10`` lands between 9 and 11, not
+    between 1 and 2.
+
     Args:
         value: String that may contain an IP address
-        
+
     Returns:
         Tuple for sorting:
         - (0, octet1, octet2, octet3, octet4, lowercase_string) for valid IPs
-        - (1, lowercase_string) for non-IP values
-        
+        - (1, natural_key_list) for non-IP values, where natural_key_list
+          alternates lowercased text fragments and integer digit runs
+
     Example:
         >>> extract_ip_sort_key("10.9.100.5")
         (0, 10, 9, 100, 5, "10.9.100.5")
-        >>> extract_ip_sort_key("device_name")
-        (1, "device_name")
+        >>> extract_ip_sort_key("CON PALLET 10")
+        (1, ['con pallet ', 10, ''])
     """
     s = str(value or "").strip()
     match = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", s)
     if not match:
-        return (1, s.lower())
+        return (1, _natural_sort_key(s))
 
     ip = match.group(1)
     try:
         octets = [int(x) for x in ip.split(".")]
     except ValueError:
-        return (1, s.lower())
+        return (1, _natural_sort_key(s))
 
     if len(octets) != 4 or any(o < 0 or o > 255 for o in octets):
-        return (1, s.lower())
+        return (1, _natural_sort_key(s))
 
     return (0, octets[0], octets[1], octets[2], octets[3], s.lower())
+
+
+def _natural_sort_key(s: str) -> list:
+    """Split *s* into alternating text/integer chunks for natural sort.
+
+    Digit runs become ``int`` so ``"PALLET 10"`` sorts after
+    ``"PALLET 9"`` instead of between ``"PALLET 1"`` and ``"PALLET 2"``.
+    Text fragments are lowercased so the sort stays case-insensitive
+    — preserves the case behaviour of the previous ``s.lower()`` key.
+    """
+    return [
+        int(token) if token.isdigit() else token.lower()
+        for token in re.split(r"(\d+)", s)
+    ]
 
 
 def get_credentials(service: str = "ATLAS") -> Tuple[Optional[str], Optional[str]]:
@@ -1358,7 +1467,52 @@ def get_host_key_policy():
     return PromptingHostKeyPolicy()
 
 
-def ensure_host_key_known(host: str, port: int = 22, timeout: float = 10.0) -> bool:
+# Windows socket error codes that indicate a transient routing problem
+# rather than a real connection refusal. Common after netsh sets a
+# static IP — the interface needs a beat before sockets can route to
+# the new subnet.
+_TRANSIENT_NETWORK_ERRNOS = {
+    10051,  # WSAENETUNREACH — network unreachable (the Nokia G42 case)
+    10065,  # WSAEHOSTUNREACH — host unreachable
+    10060,  # WSAETIMEDOUT — connection timed out
+    10061,  # WSAECONNREFUSED — refused (device booting / SSH not up yet)
+    10050,  # WSAENETDOWN — network down
+    10064,  # WSAEHOSTDOWN — host down
+    # POSIX equivalents for cross-platform safety
+    101,    # ENETUNREACH
+    113,    # EHOSTUNREACH
+    111,    # ECONNREFUSED
+    110,    # ETIMEDOUT
+    100,    # ENETDOWN
+}
+
+
+def _is_transient_network_error(exc: BaseException) -> bool:
+    """True when *exc* is a connection failure that may succeed if retried.
+
+    OSError/socket.error subclasses with a recognized errno are
+    transient; SSHException-style refusals are NOT. We use this to
+    decide whether ``ensure_host_key_known`` should retry vs. give up
+    immediately on a pre-verify connect failure.
+    """
+    if isinstance(exc, OSError):
+        errno = getattr(exc, "errno", None) or getattr(exc, "winerror", None)
+        if errno in _TRANSIENT_NETWORK_ERRNOS:
+            return True
+    # Catch ConnectionRefusedError, ConnectionResetError, TimeoutError, etc.
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    return False
+
+
+def ensure_host_key_known(
+    host: str,
+    port: int = 22,
+    timeout: float = 10.0,
+    *,
+    max_retries: int = 3,
+    retry_delay: float = 1.5,
+) -> bool:
     """Ensure *host*'s SSH host key is recorded in the LAMIS known_hosts file.
 
     Used by the spawn-based scripts (Nokia_1830, Nokia_PSI, Ciena_6500,
@@ -1374,9 +1528,18 @@ def ensure_host_key_known(host: str, port: int = 22, timeout: float = 10.0) -> b
       * Otherwise performs a one-shot paramiko Transport handshake, runs the
         configured ``MissingHostKeyPolicy`` (Tk prompt by default), and on
         accept persists the key to known_hosts.
-      * Returns False if the user rejects the key, the host is unreachable,
-        or paramiko isn't available. Never raises — callers decide whether
-        a False return aborts the connection.
+      * On transient network errors (``WSAENETUNREACH`` / ``ETIMEDOUT`` /
+        connection refused / etc. — see ``_TRANSIENT_NETWORK_ERRNOS``)
+        retries up to ``max_retries`` times with ``retry_delay`` seconds
+        between attempts. This is the post-netsh-settle case: an
+        operator just set a static IP via ``Software Upgrades`` and the
+        OS hasn't fully brought up the interface yet.
+      * Returns False if the user rejects the key, the host stays
+        unreachable across retries, or paramiko isn't available. Never
+        raises — callers decide whether a False return aborts the
+        connection. A False return is also accompanied by an INFO-level
+        log line that distinguishes "host key issue" from "network
+        unreachable" so the operator gets an actionable signal.
 
     Honors ``LAMIS_AUTO_ACCEPT_HOSTKEYS=1`` for headless contexts.
     """
@@ -1388,69 +1551,116 @@ def ensure_host_key_known(host: str, port: int = 22, timeout: float = 10.0) -> b
         return False
 
     kh_path = str(get_known_hosts_path())
-    try:
-        client = paramiko.SSHClient()
-        safe_load_host_keys(client, kh_path)
+    target = host if port == 22 else f"[{host}]:{port}"
+    last_transient_err: Optional[BaseException] = None
 
-        # Fast-path: already trusted
-        host_keys = client.get_host_keys()
-        target = host if port == 22 else f"[{host}]:{port}"
-        if host_keys.lookup(target):
-            client.close()
-            return True
-
-        client.set_missing_host_key_policy(get_host_key_policy())
+    for attempt in range(1, max_retries + 1):
         try:
-            # Use a non-existent user with no auth methods so the connection
-            # terminates right after host-key verification, before any auth
-            # round-trip. We only care that missing_host_key() ran.
-            client.connect(
-                host,
-                port=port,
-                username="__lamis_hostkey_probe__",
-                password="",
-                timeout=timeout,
-                banner_timeout=timeout,
-                auth_timeout=timeout,
-                look_for_keys=False,
-                allow_agent=False,
-            )
-        except paramiko.SSHException as e:
-            msg = str(e).lower()
-            # "rejected by user" / "verification failed" → real refusal
-            if "rejected" in msg or "verification failed" in msg:
-                logging.warning("[HOSTKEY] Verification refused for %s: %s", host, e)
+            client = paramiko.SSHClient()
+            safe_load_host_keys(client, kh_path)
+
+            # Fast-path: already trusted (re-checked each iteration in
+            # case a prior retry persisted the key partway through).
+            host_keys = client.get_host_keys()
+            if host_keys.lookup(target):
+                client.close()
+                return True
+
+            client.set_missing_host_key_policy(get_host_key_policy())
+            try:
+                # Use a non-existent user with no auth methods so the connection
+                # terminates right after host-key verification, before any auth
+                # round-trip. We only care that missing_host_key() ran.
+                client.connect(
+                    host,
+                    port=port,
+                    username="__lamis_hostkey_probe__",
+                    password="",
+                    timeout=timeout,
+                    banner_timeout=timeout,
+                    auth_timeout=timeout,
+                    look_for_keys=False,
+                    allow_agent=False,
+                )
+            except paramiko.SSHException as e:
+                msg = str(e).lower()
+                # "rejected by user" / "verification failed" → real refusal
+                if "rejected" in msg or "verification failed" in msg:
+                    logging.warning("[HOSTKEY] Verification refused for %s: %s", host, e)
+                    client.close()
+                    return False
+                # Auth failures are EXPECTED — the key was accepted first.
+            except paramiko.AuthenticationException:
+                pass  # expected — host key already verified
+            except Exception as e:
+                if _is_transient_network_error(e):
+                    last_transient_err = e
+                    client.close()
+                    if attempt < max_retries:
+                        logging.info(
+                            "[HOSTKEY] %s unreachable on attempt %d/%d "
+                            "(%s); retrying in %.1fs — likely interface "
+                            "still coming up after netsh.",
+                            host, attempt, max_retries,
+                            _short_socket_error(e), retry_delay,
+                        )
+                        time.sleep(retry_delay)
+                        continue
+                    # Final attempt failed with a network error — log
+                    # the actionable variant so the operator knows to
+                    # check cable / interface, not host keys.
+                    logging.warning(
+                        "[HOSTKEY] %s remained unreachable across "
+                        "%d attempt(s) (%s). Check the Ethernet cable, "
+                        "confirm the static IP was applied to the right "
+                        "adapter, and that the device is powered on.",
+                        host, max_retries, _short_socket_error(e),
+                    )
+                    return False
+                # Non-transient: log + bail without retrying.
+                logging.warning(
+                    "[HOSTKEY] Could not pre-verify host key for %s: %s",
+                    host, friendly_error(e) if "friendly_error" in globals() else e,
+                )
                 client.close()
                 return False
-            # Auth failures are EXPECTED — the key was accepted first.
-        except paramiko.AuthenticationException:
-            pass  # expected — host key already verified
-        except Exception as e:
-            logging.warning(
-                "[HOSTKEY] Could not pre-verify host key for %s: %s",
-                host, friendly_error(e) if "friendly_error" in globals() else e,
-            )
+
+            safe_save_host_keys(client, kh_path)
+
+            # Re-check that the key actually landed in known_hosts
+            verified = client.get_host_keys().lookup(target) is not None
             client.close()
+
+            if verified:
+                try:
+                    restrict_path_to_owner(kh_path)
+                except Exception:
+                    pass
+                logging.info("[HOSTKEY] Host key for %s recorded in known_hosts", host)
+            else:
+                logging.warning(
+                    "[HOSTKEY] Host key probe for %s completed but key not found in known_hosts",
+                    host,
+                )
+            return verified
+        except Exception as e:
+            # Outermost catch — shouldn't fire in practice since we
+            # handle the connect-time errors above, but stay safe.
+            if _is_transient_network_error(e) and attempt < max_retries:
+                last_transient_err = e
+                time.sleep(retry_delay)
+                continue
+            logging.warning("[HOSTKEY] Unexpected error pre-verifying %s: %s", host, e)
             return False
 
-        safe_save_host_keys(client, kh_path)
+    # Should not reach here — loop returns or continues — but guard
+    # anyway so the function always has an explicit return.
+    return False
 
-        # Re-check that the key actually landed in known_hosts
-        verified = client.get_host_keys().lookup(target) is not None
-        client.close()
 
-        if verified:
-            try:
-                restrict_path_to_owner(kh_path)
-            except Exception:
-                pass
-            logging.info("[HOSTKEY] Host key for %s recorded in known_hosts", host)
-        else:
-            logging.warning(
-                "[HOSTKEY] Host key probe for %s completed but key not found in known_hosts",
-                host,
-            )
-        return verified
-    except Exception as e:
-        logging.warning("[HOSTKEY] Unexpected error pre-verifying %s: %s", host, e)
-        return False
+def _short_socket_error(exc: BaseException) -> str:
+    """Compact one-line description of a socket error for log lines."""
+    errno = getattr(exc, "errno", None) or getattr(exc, "winerror", None)
+    if errno is not None:
+        return f"errno {errno}: {exc.__class__.__name__}"
+    return f"{exc.__class__.__name__}: {exc}"

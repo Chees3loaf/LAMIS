@@ -45,8 +45,11 @@ _BUILTIN_DEFAULT_SEED: List[Tuple[str, str]] = [
     # Once authenticated, the Nokia_1830 script performs the secondary
     # interactive cli -> admin -> admin sequence (see scripts/Nokia_1830.py).
     ("cli", "admin"),
-    # Ciena 6500 / RLS default: su / Ciena123.
+    # Ciena 6500 / RLS shell login: su / Ciena123.
     ("su", "Ciena123"),
+    # Ciena RLS RESTCONF login -- distinct from the shell user. The REST
+    # API requires the diaguser account; ``su`` works for SSH only.
+    ("diaguser", "Ciena123"),
     # Some older / case-sensitive devices use ADMIN/ADMIN — tried last so
     # we don't pre-empt the more common admin/admin lowercase variant.
     ("ADMIN", "ADMIN"),
@@ -335,11 +338,15 @@ def get_default_credential(username: str) -> Optional[Tuple[str, str]]:
 # instead of hardcoding the username — keeps the username convention in one
 # place if the seed list is ever reordered or renamed.
 _VENDOR_DEFAULT_USERNAME: Dict[str, str] = {
-    "ciena": "su",        # Ciena 6500 / RLS — su / Ciena123
+    "ciena": "su",        # Ciena 6500 / RLS shell — su / Ciena123
     "ciena-rls": "su",
     "ciena-6500": "su",
     "rls": "su",
     "6500": "su",
+    # RESTCONF on RLS uses a separate diagnostic account; shell user
+    # ``su`` doesn't have REST API access.
+    "ciena-rls-rest": "diaguser",
+    "rls-rest": "diaguser",
     "nokia": "admin",     # Nokia SAR / IXR / Smartoptics — admin / admin
     "nokia-1830": "cli",  # Nokia 1830 SSH bootstrap — cli / admin
     "1830": "cli",

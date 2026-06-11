@@ -17,6 +17,12 @@ from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 import openpyxl
 
+from gui.workbook_builder import (
+    INVENTORY_TAB_NAME,
+    _LEGACY_INVENTORY_TAB_NAME,
+    find_inventory_sheet_name,
+)
+
 
 _HYPERLINK_TARGET_RE = re.compile(r"^#?'?([^'!]+?)'?!")
 
@@ -199,6 +205,24 @@ class BomFrame(ttk.Frame):
 
         sheetname_set = set(wb.sheetnames)
         summary_items, display_to_tab = self._extract_summary(wb["Summary"], sheetname_set)
+
+        # Heal a truncated Summary: when the workbook has device tabs
+        # that the Summary table doesn't list (this happens after a
+        # multi-run LAN scan where the inventory builder dropped prior
+        # Summary rows — see the matching fix in
+        # build_psi_report_workbook), pull those orphan tabs in and
+        # rewrite the Summary sheet so the rest of this build sees the
+        # full site list. Without this, the BoM only carries a column
+        # for the single device the Summary happens to list.
+        if not synthesized_summary:
+            added = self._augment_summary_from_device_tabs(
+                wb, builder, summary_items, display_to_tab,
+            )
+            if added:
+                self._append_log(
+                    f"Summary healed: +{added} device tab(s) added from "
+                    f"orphaned sheets"
+                )
         self._append_log(f"Summary sites: {len(summary_items)}")
 
         # Expand any "N/A QTY:N" rows in-place on every inventory tab so the
@@ -237,7 +261,7 @@ class BomFrame(ttk.Frame):
                 continue
             ws = wb[tab]
             try:
-                builder.ensure_return_link_in_a1(ws, target_sheet="BOM")
+                builder.ensure_return_link_in_a1(ws)
                 builder.apply_device_data_borders(ws)
                 ws.freeze_panes = "A15"
             except Exception as exc:
@@ -274,11 +298,16 @@ class BomFrame(ttk.Frame):
         # _build_bom_sheet runs the same salvage internally but only fills
         # missing sites; doing it here lets normalize_long_part_numbers see
         # the salvaged rows.
-        if "BOM" in wb.sheetnames:
+        existing_inventory_name = find_inventory_sheet_name(wb)
+        if existing_inventory_name is not None:
             try:
-                salvaged = builder._scan_existing_bom(wb["BOM"])
+                salvaged = builder._scan_existing_bom(
+                    wb[existing_inventory_name]
+                )
             except Exception as exc:
-                self._append_log(f"  existing BOM salvage failed: {exc}")
+                self._append_log(
+                    f"  existing {existing_inventory_name!r} salvage failed: {exc}"
+                )
                 salvaged = {}
             for st, entries in salvaged.items():
                 if st not in bom_data or not bom_data[st]:
@@ -300,17 +329,24 @@ class BomFrame(ttk.Frame):
         builder._append_summary_timestamp(wb["Summary"], "BoM Updated")
 
         # When the Summary was synthesized, drop template/aggregate tabs
-        # from the output — operators have asked that the BOM workbook not
-        # carry the Customer-project template or the Task Order roll-up
-        # sheet (T##/TO##) the BOM is meant to replace. Never delete the
-        # Summary or BOM tabs themselves.
+        # from the output — operators have asked that the inventory
+        # workbook not carry the Customer-project template or the Task
+        # Order roll-up sheet (T##/TO##) the inventory aggregate is
+        # meant to replace. Never delete the Summary or inventory tabs
+        # themselves; accept both new and legacy inventory names so
+        # workbooks built before the rename keep their BOM sheet.
         if synthesized_summary:
             for name in list(wb.sheetnames):
-                if name in ("Summary", "BOM"):
+                if name in (
+                    "Summary", INVENTORY_TAB_NAME, _LEGACY_INVENTORY_TAB_NAME,
+                ):
                     continue
                 if _is_non_inventory_tab(name):
                     del wb[name]
-                    self._append_log(f"Dropped template/aggregate tab '{name}' from BOM workbook")
+                    self._append_log(
+                        f"Dropped template/aggregate tab '{name}' from "
+                        f"inventory workbook"
+                    )
 
         out_path = self._derive_out_path(src_path)
         wb.save(out_path)
@@ -378,6 +414,88 @@ class BomFrame(ttk.Frame):
         summary_items = [("", tab, tab) for tab in inventory_tabs]
         builder._populate_summary_table(summary_sheet, summary_items, start_row=10)
         return len(inventory_tabs)
+
+    def _augment_summary_from_device_tabs(
+        self,
+        wb: Any,
+        builder: Any,
+        summary_items: List[Tuple[str, str, str]],
+        display_to_tab: Dict[str, str],
+    ) -> int:
+        """Heal a truncated Summary by adding any device tabs that
+        aren't represented in *summary_items*.
+
+        Mutates ``summary_items`` and ``display_to_tab`` in place; also
+        rewrites the workbook's Summary sheet so the on-disk record
+        reflects every device tab. Returns the count of rows added —
+        0 if Summary was already complete.
+
+        Discovery rule: any sheet that yields BOM entries via the
+        standard parser AND isn't tagged as a template/aggregate tab
+        counts as a device tab. The new row's IP/Name come from the
+        device tab's ``F5``/``F6`` metadata when present, falling
+        back to the tab name itself (which is what
+        ``_synthesize_summary`` does for Spares-style workbooks).
+        """
+        # Display titles already covered by the existing Summary —
+        # using the canonical tab name (display_to_tab values) as the
+        # key so the comparison ignores dotted-vs-underscored
+        # discrepancies between Summary's Device Name and the actual
+        # sheet name.
+        already_covered = {
+            display_to_tab.get(disp, disp).strip().lower()
+            for (_ip, _name, disp) in summary_items
+        }
+        orphan_tabs: List[str] = []
+        for tab_name in wb.sheetnames:
+            if tab_name in (
+                "Summary", INVENTORY_TAB_NAME, _LEGACY_INVENTORY_TAB_NAME,
+            ):
+                continue
+            if _is_non_inventory_tab(tab_name):
+                continue
+            if tab_name.strip().lower() in already_covered:
+                continue
+            ws = wb[tab_name]
+            try:
+                entries = builder._collect_bom_entries_from_sheet(ws)
+            except Exception as exc:
+                self._append_log(f"  scan failed for '{tab_name}': {exc}")
+                continue
+            if not entries:
+                continue
+            orphan_tabs.append(tab_name)
+
+        if not orphan_tabs:
+            return 0
+
+        # Build the new summary_items entries from F5/F6 when
+        # available, falling back to tab-name-as-name with no IP.
+        for tab_name in orphan_tabs:
+            ws = wb[tab_name]
+            ip_val = ws["F5"].value if ws["F5"].value is not None else ""
+            name_val = ws["F6"].value if ws["F6"].value is not None else ""
+            ip = str(ip_val).strip()
+            display = str(name_val).strip() or tab_name
+            summary_items.append((ip or display, display, display))
+            display_to_tab[display] = tab_name
+
+        # Rewrite the Summary sheet so the healed workbook carries the
+        # full site list on disk going forward. Uses the same
+        # _populate_summary_table the regular inventory build uses so
+        # the layout stays consistent.
+        summary_sheet = wb["Summary"]
+        # Clear the prior data rows (10..end) before repopulating, so
+        # stale rows from a partial run don't bleed through.
+        for row in range(10, (summary_sheet.max_row or 10) + 1):
+            for col_letter in ("B", "C", "D", "E"):
+                cell = summary_sheet[f"{col_letter}{row}"]
+                cell.value = None
+                cell.hyperlink = None
+        builder._populate_summary_table(
+            summary_sheet, summary_items, start_row=10,
+        )
+        return len(orphan_tabs)
 
     @staticmethod
     def _extract_header_metadata(wb: Any) -> Tuple[str, str]:

@@ -28,6 +28,7 @@ import os
 import socket
 import socketserver
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -121,12 +122,23 @@ def _run_netsh(args: list[str], timeout: float = 30.0) -> Tuple[bool, str]:
     """Run `netsh <args>`. If ATLAS isn't elevated, prompt UAC via
     ShellExecuteEx and wait for the elevated child to exit.
 
-    Returns ``(success, message)``. Output of the elevated child is not
-    captured (no easy way without temp-file redirection); success is
-    inferred from the process exit code.
+    Returns ``(success, message)``. The elevated path captures
+    stdout+stderr via a cmd.exe redirect into a temp file so the
+    operator sees netsh's actual error message (e.g. "The system
+    cannot find the file specified" when the NIC name doesn't match
+    a real interface) instead of a bare ``netsh exit code 1``.
     """
     if os.name != "nt":
         return False, "netsh is only available on Windows."
+
+    # Log the exact command we're about to run -- if netsh rejects the
+    # invocation, the operator's first question will be "what did you
+    # actually pass to it?", and this answers it without needing to
+    # repro under a debugger.
+    logging.info(
+        "[NETSH] running: netsh %s",
+        subprocess.list2cmdline(args),
+    )
 
     if _is_admin():
         try:
@@ -151,45 +163,184 @@ def _run_netsh(args: list[str], timeout: float = 30.0) -> Tuple[bool, str]:
             "auto-elevation."
         )
 
+    # ShellExecuteEx-launched processes don't inherit our stdout/stderr
+    # pipes, so a direct ``netsh.exe`` invocation gives us nothing to
+    # display beyond the exit code. Workaround: launch ``cmd.exe /c
+    # netsh <args> > <tmp> 2>&1`` so the elevated cmd writes both
+    # streams to a file we can read after the child exits.
+    tmp_log_path = ""
     try:
-        se = ShellExecuteEx(
-            nShow=win32con.SW_HIDE,
-            fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
-            lpVerb="runas",
-            lpFile="netsh.exe",
-            lpParameters=subprocess.list2cmdline(args),
-        )
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".log", prefix="atlas_netsh_",
+            delete=False, encoding="utf-8",
+        ) as _tmp:
+            tmp_log_path = _tmp.name
+    except Exception as exc:
+        # Fall through to no-capture path if /tmp is borked -- better
+        # than refusing to elevate at all.
+        logging.warning(f"[NETSH] could not create capture tempfile: {exc}")
+
+    try:
+        if tmp_log_path:
+            cmd_line = (
+                f'/c netsh {subprocess.list2cmdline(args)} > '
+                f'"{tmp_log_path}" 2>&1'
+            )
+            se = ShellExecuteEx(
+                nShow=win32con.SW_HIDE,
+                fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
+                lpVerb="runas",
+                lpFile="cmd.exe",
+                lpParameters=cmd_line,
+            )
+        else:
+            se = ShellExecuteEx(
+                nShow=win32con.SW_HIDE,
+                fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
+                lpVerb="runas",
+                lpFile="netsh.exe",
+                lpParameters=subprocess.list2cmdline(args),
+            )
         handle = se["hProcess"]
         wait_rc = win32event.WaitForSingleObject(handle, int(timeout * 1000))
         if wait_rc != 0:  # WAIT_OBJECT_0
             return False, "Elevated netsh timed out or was interrupted."
         rc = win32process.GetExitCodeProcess(handle)
-        return rc == 0, f"netsh exit code {rc}"
+
+        captured = ""
+        if tmp_log_path:
+            try:
+                with open(tmp_log_path, "r", encoding="utf-8", errors="replace") as f:
+                    captured = f.read().strip()
+            except Exception as exc:
+                captured = f"(could not read netsh output: {exc})"
+            finally:
+                try:
+                    os.unlink(tmp_log_path)
+                except Exception:
+                    pass
+
+        if rc == 0:
+            return True, captured or "OK"
+        # Non-zero exit: surface whatever netsh printed. If we have
+        # nothing (no capture / empty output), keep the bare code so
+        # at least the operator knows the elevated child ran.
+        msg = captured or f"netsh exit code {rc}"
+        return False, msg
     except Exception as exc:
         # Most common: user clicked Cancel on UAC prompt → "The operation
         # was canceled by the user." (1223).
+        if tmp_log_path:
+            try:
+                os.unlink(tmp_log_path)
+            except Exception:
+                pass
         return False, f"Elevation cancelled or failed: {exc}"
 
 
+def _set_static_ipv4(nic: str, ip: str, mask: str) -> Tuple[bool, str]:
+    """Set *nic* to a static IPv4 address, robust against stale
+    bindings from a previous run.
+
+    Why this exists: plain ``netsh interface ipv4 set address NAME
+    static IP MASK`` fails with ``The object already exists.`` when
+    *any* previous run already bound the same IP on this NIC, even
+    after a successful ``set address … source=dhcp`` to restore
+    DHCP. Windows persists the static binding in the registry and
+    DHCP-restore doesn't always clear it before the next ``set``
+    runs. The reliable pattern is:
+
+      1. Best-effort ``delete address NAME addr=IP`` to drop the
+         stale binding if it's there. Failure (e.g. "the specified
+         entry was not found") is fine -- it just means there was
+         nothing to delete.
+      2. ``set address NAME static IP MASK``.
+
+    Returns ``(success, message)`` matching :func:`_run_netsh`.
+    """
+    # Step 1: idempotent cleanup of any prior binding of this exact
+    # address. Ignore the result -- the only failure mode that
+    # matters is the subsequent ``set``.
+    del_ok, del_msg = _run_netsh(
+        ["interface", "ipv4", "delete", "address",
+         f"name={nic}", f"addr={ip}"],
+        timeout=15.0,
+    )
+    if not del_ok:
+        # Log at debug-ish level; this is expected when the address
+        # wasn't bound.
+        logging.info(
+            f"[NETSH] pre-clean delete of {ip} on {nic} returned: {del_msg}"
+        )
+
+    # Step 2: set the new static address as the primary binding.
+    return _run_netsh(
+        ["interface", "ipv4", "set", "address",
+         f"name={nic}", "static", ip, mask],
+    )
+
+
+# NIC names the operator never wants in the dropdown for a wired
+# upgrade session. Pattern-matched case-insensitively against the
+# adapter friendly name from psutil:
+#   * Wi-Fi / wireless adapters
+#   * The MS virtual "Local Area Connection* N" hotspot adapters
+#   * Bluetooth Network Connection
+#   * Hyper-V / WSL vEthernet, VMware, VirtualBox virtual switches
+#   * Loopback
+# Substring match (lowercased).
+_NIC_EXCLUDE_PATTERNS = (
+    "wi-fi",
+    "wifi",
+    "wireless",
+    "local area connection*",
+    "bluetooth",
+    "vethernet",
+    "vmware",
+    "virtualbox",
+    "loopback",
+)
+
+
 def _list_nics() -> list[str]:
-    """Return the names of usable IPv4 NICs (skips loopback)."""
+    """Return the names of usable wired Ethernet NICs for the upgrade
+    dropdown.
+
+    Filters (all must pass):
+      1. Name doesn't substring-match anything in
+         :data:`_NIC_EXCLUDE_PATTERNS` (wireless / Bluetooth /
+         virtual switches / loopback).
+      2. Interface is currently UP -- ``psutil.net_if_stats().isup``
+         is the equivalent of ``ipconfig`` reporting an actual
+         binding instead of ``Media disconnected``. This naturally
+         hides the laptop's onboard Ethernet ports when no cable is
+         plugged in (and lets ``Ethernet 4``+ remain visible the
+         instant the operator plugs into them, without us having to
+         maintain a manual allow/exclude list of numbered ports).
+      3. Adapter has at least one IPv4 address (covers APIPA /
+         static / DHCP). Pure-IPv6 doesn't work for our setup.
+    """
     if not _HAS_PSUTIL:
         return []
+
+    try:
+        stats = psutil.net_if_stats()
+    except Exception:
+        stats = {}
+
     names: list[str] = []
     for name, addrs in psutil.net_if_addrs().items():
-        if name.lower().startswith("loopback"):
+        low = name.lower()
+        if any(pat in low for pat in _NIC_EXCLUDE_PATTERNS):
+            continue
+        st = stats.get(name)
+        if st is not None and not st.isup:
             continue
         if any(a.family == socket.AF_INET for a in addrs):
             names.append(name)
-    # Sort: Ethernet first, then Wi-Fi, then everything else
-    def _rank(n: str) -> int:
-        low = n.lower()
-        if "ethernet" in low or "lan" in low:
-            return 0
-        if "wi-fi" in low or "wifi" in low or "wireless" in low:
-            return 1
-        return 2
-    names.sort(key=lambda n: (_rank(n), n.lower()))
+    # Alphabetical -- every remaining entry is a wired Ethernet the
+    # operator knows by number.
+    names.sort(key=lambda n: n.lower())
     return names
 
 
@@ -551,7 +702,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
         ttk.Label(
             self._ws5_frame,
             text=(
-                "Phase 1 (serial @ 9600 on console port) provisions "
+                "Phase 1 (serial @ 115200 on console port) provisions "
                 f"{_WS5_NET['device_ip_cidr']} and gateway "
                 f"{_WS5_NET['pc_ip']}. Phase 2 (SSH over DCN-1) downloads + "
                 "activates the load. Stops at 'Activation In Progress' — "
@@ -787,10 +938,11 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._log(f"netsh: setting {nic} to {ip}/{mask}")
 
         def _worker() -> None:
-            ok, msg = _run_netsh(
-                ["interface", "ipv4", "set", "address",
-                 f"name={nic}", "static", ip, mask]
-            )
+            # Pre-clean any stale binding of the same IP before
+            # asking netsh to set it, otherwise a previous run's
+            # leftover causes "The object already exists." even on
+            # a fresh boot.
+            ok, msg = _set_static_ipv4(nic, ip, mask)
             if ok:
                 self._static_ip_applied_on = nic
                 self._set_nic_status(f"Static {ip} on {nic}", "green")
@@ -952,12 +1104,11 @@ class SoftwareUpgradeFrame(ttk.Frame):
             try:
                 # Step 1 — set PC NIC to the CTM-internal IP. If a UAC prompt
                 # appears, the user has to approve it before SSH can start.
+                # Use the static-IP helper so a stale binding from an
+                # earlier run doesn't trip "The object already exists."
                 self._log(f"Setting {nic} to {pc_ip}/{mask} via netsh…")
                 self._set_nic_status("Applying static IP…", "blue")
-                ok, msg = _run_netsh(
-                    ["interface", "ipv4", "set", "address",
-                     f"name={nic}", "static", pc_ip, mask]
-                )
+                ok, msg = _set_static_ipv4(nic, pc_ip, mask)
                 if not ok:
                     self._set_nic_status("Failed — see log", "red")
                     self._set_rls_status("Failed ✘", "red")
@@ -1070,12 +1221,10 @@ class SoftwareUpgradeFrame(ttk.Frame):
         def _worker() -> None:
             try:
                 # Step 1 — set PC NIC to the link-local service IP.
+                # Helper handles stale-binding cleanup.
                 self._log(f"Setting {nic} to {pc_ip}/{mask} via netsh…")
                 self._set_nic_status("Applying static IP…", "blue")
-                ok, msg = _run_netsh(
-                    ["interface", "ipv4", "set", "address",
-                     f"name={nic}", "static", pc_ip, mask]
-                )
+                ok, msg = _set_static_ipv4(nic, pc_ip, mask)
                 if not ok:
                     self._set_nic_status("Failed — see log", "red")
                     self._set_g42_status("Failed ✘", "red")
@@ -1197,12 +1346,10 @@ class SoftwareUpgradeFrame(ttk.Frame):
         def _worker() -> None:
             try:
                 # Step 1 — set PC NIC to the PSI service IP.
+                # Helper handles stale-binding cleanup.
                 self._log(f"Setting {nic} to {pc_ip}/{mask} via netsh…")
                 self._set_nic_status("Applying static IP…", "blue")
-                ok, msg = _run_netsh(
-                    ["interface", "ipv4", "set", "address",
-                     f"name={nic}", "static", pc_ip, mask]
-                )
+                ok, msg = _set_static_ipv4(nic, pc_ip, mask)
                 if not ok:
                     self._set_nic_status("Failed — see log", "red")
                     self._set_psi_status("Failed ✘", "red")
@@ -1284,7 +1431,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
             "Waveserver 5 — Pre-flight",
             "Before continuing, confirm:\n\n"
             "  • Serial cable connected from this PC to the Waveserver "
-            "console port (9600 baud).\n"
+            "console port (115200 baud).\n"
             "  • Cat-5 connected from this PC to the Waveserver DCN-1 "
             "port.\n\n"
             "The program will set your NIC to 10.9.49.101/22 (acting as "
@@ -1351,12 +1498,12 @@ class SoftwareUpgradeFrame(ttk.Frame):
             try:
                 # Step 1 — point the NIC at 10.9.49.101/22 so the device
                 # can reach the HTTP server once phase 1 finishes.
+                # Use the helper that pre-deletes any stale binding of
+                # the same IP so a previous run's leftover doesn't
+                # cause ``The object already exists.``
                 self._log(f"Setting {nic} to {pc_ip}/{mask} via netsh…")
                 self._set_nic_status("Applying static IP…", "blue")
-                ok, msg = _run_netsh(
-                    ["interface", "ipv4", "set", "address",
-                     f"name={nic}", "static", pc_ip, mask]
-                )
+                ok, msg = _set_static_ipv4(nic, pc_ip, mask)
                 if not ok:
                     self._set_nic_status("Failed — see log", "red")
                     self._set_ws5_status("Failed ✘", "red")
@@ -1484,16 +1631,64 @@ class SoftwareUpgradeFrame(ttk.Frame):
             pass
 
     def _log(self, msg: str) -> None:
+        """Tee a single log line to every sink the operator might be
+        watching:
+
+          * the per-frame ``Log`` widget at the bottom of the upgrade
+            tab (timestamped),
+          * the shared bottom output panel ``controller.output_screen``
+            (same panel every other ATLAS mode logs to), so the
+            operator can leave it docked and still see progress here,
+          * Python's root logger, which writes to the rolling ATLAS
+            log file -- without this, GUI-side breadcrumbs like
+            ``Setting NIC...`` only existed inside the Tk widget and
+            disappeared the moment the window closed.
+
+        Each sink is best-effort: a failure in one (Tk widget
+        destroyed, controller missing the output_screen attr,
+        logging handler error) must not break the others.
+        """
         ts = time.strftime("%H:%M:%S")
         line = f"[{ts}] {msg}\n"
 
+        # 1) Per-frame log widget. Marshaled to the Tk main loop so
+        # worker threads can safely call this.
         def _do() -> None:
-            self._log_text.config(state=tk.NORMAL)
-            self._log_text.insert(tk.END, line)
-            self._log_text.see(tk.END)
-            self._log_text.config(state=tk.DISABLED)
+            try:
+                self._log_text.config(state=tk.NORMAL)
+                self._log_text.insert(tk.END, line)
+                self._log_text.see(tk.END)
+                self._log_text.config(state=tk.DISABLED)
+            except Exception:
+                pass
         try:
             self.after(0, _do)
+        except Exception:
+            pass
+
+        # 2) Shared bottom output panel (used by every other mode).
+        # Wrapped in try because some test contexts construct the
+        # frame with a stub controller that doesn't have the attr.
+        out = getattr(self.controller, "output_screen", None)
+        if out is not None:
+            def _do_shared() -> None:
+                try:
+                    out.insert(tk.END, line)
+                    out.see(tk.END)
+                except Exception:
+                    pass
+            try:
+                self.after(0, _do_shared)
+            except Exception:
+                pass
+
+        # 3) Python logger -> ATLAS rolling log file. INFO level so
+        # the operator can attach the file to a bug report and have
+        # the full transcript. Strip the leading newline some calls
+        # add for visual spacing in the widget -- the file logger
+        # adds its own line terminator.
+        try:
+            logging.info(msg.lstrip("\n"))
         except Exception:
             pass
 

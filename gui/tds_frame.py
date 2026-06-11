@@ -82,22 +82,7 @@ class TDSFrame(ttk.Frame):
         self.tds_filename_entry = tk.Entry(config_frame, width=25)
         self.tds_filename_entry.grid(row=1, column=1, padx=5, pady=5)
 
-        # Row 2 — optional BFS network walk (RLS only)
-        self.tds_network_walk_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            config_frame, text="Network walk (BFS, RLS only)",
-            variable=self.tds_network_walk_var,
-            command=self._on_network_walk_toggle,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=5, pady=5)
-
-        tk.Label(config_frame, text="Max hops:").grid(row=2, column=2, sticky="e", padx=(5, 2), pady=5)
-        self.tds_max_hops_var = tk.StringVar(value="3")
-        self.tds_max_hops_entry = tk.Entry(
-            config_frame, textvariable=self.tds_max_hops_var, width=5, state=tk.DISABLED,
-        )
-        self.tds_max_hops_entry.grid(row=2, column=3, sticky="w", padx=(0, 5), pady=5)
-
-        # Row 3 — credential hint (so operators know what login is being tried)
+        # Row 2 — credential hint (so operators know what login is being tried)
         # Pulls the username out of the same Fernet store every other ATLAS
         # component reads from; only the username is shown, never the secret.
         u, _ = _resolve_ciena_default()
@@ -109,7 +94,7 @@ class TDSFrame(ttk.Frame):
             config_frame, text=hint_text,
             anchor="w", foreground="#555555",
         )
-        hint.grid(row=3, column=0, columnspan=4, sticky="w", padx=5, pady=(2, 5))
+        hint.grid(row=2, column=0, columnspan=4, sticky="w", padx=5, pady=(2, 5))
 
         # Run controls
         tds_control_frame = ttk.Frame(self)
@@ -120,12 +105,6 @@ class TDSFrame(ttk.Frame):
 
         self.tds_status_label = tk.Label(tds_control_frame, text="Status: Ready", anchor="w")
         self.tds_status_label.pack(side=tk.RIGHT, padx=10)
-
-    def _on_network_walk_toggle(self) -> None:
-        """Enable/disable the Max-hops entry to match the Network-walk
-        checkbox state."""
-        state = tk.NORMAL if self.tds_network_walk_var.get() else tk.DISABLED
-        self.tds_max_hops_entry.config(state=state)
 
     # ------------------------------------------------------------------
     # Credential helpers
@@ -186,28 +165,6 @@ class TDSFrame(ttk.Frame):
             messagebox.showerror("Input Error", "Please enter a file name.")
             return
 
-        # Network walk options (RLS only).
-        network_walk = bool(self.tds_network_walk_var.get())
-        max_hops = 0
-        if network_walk:
-            if platform != "rls":
-                messagebox.showerror(
-                    "Input Error",
-                    "Network walk is RLS-only. Switch platform to 'rls' "
-                    "or uncheck Network walk.",
-                )
-                return
-            try:
-                max_hops = int(self.tds_max_hops_var.get().strip())
-            except ValueError:
-                max_hops = -1
-            if max_hops < 0 or max_hops > 20:
-                messagebox.showerror(
-                    "Input Error",
-                    "Max hops must be an integer between 0 and 20.",
-                )
-                return
-
         # F009: pre-verify the device's SSH host key in the GUI thread (where
         # the Tk prompt can run) before launching the TDS subprocess. The
         # subprocess uses RejectPolicy and will refuse if the key isn't in
@@ -239,13 +196,7 @@ class TDSFrame(ttk.Frame):
         self.tds_status_label.config(text="Status: Running...")
         self.tds_run_button.config(state=tk.DISABLED)
         out = self.controller.output_screen
-        if network_walk:
-            out.insert(
-                tk.END,
-                f"Starting RLS network walk from seed {ip} (max-hops={max_hops})...\n",
-            )
-        else:
-            out.insert(tk.END, f"Starting TDS diagnostics at {ip} (platform={platform})...\n")
+        out.insert(tk.END, f"Starting TDS diagnostics at {ip} (platform={platform})...\n")
         out.see(tk.END)
 
         root = self.controller.root
@@ -254,13 +205,6 @@ class TDSFrame(ttk.Frame):
         # run so a one-time edit to credentials_config.json takes effect
         # without restarting ATLAS.
         default_user, default_pass = _resolve_ciena_default()
-
-        if network_walk:
-            self._run_network_walk(
-                ip, default_user or "", default_pass or "",
-                file_name, max_hops, tds_cwd, out, root,
-            )
-            return
 
         # Background worker — runs the subprocess once with defaults; if the
         # subprocess fails with an auth-style error, marshals back to the
@@ -385,145 +329,6 @@ class TDSFrame(ttk.Frame):
                     messagebox.showerror(
                         "TDS Error",
                         f"Failed to run TDS script:\n{friendly_error(exc)}",
-                    )
-                root.after(0, on_error)
-
-        threading.Thread(target=_worker, daemon=True).start()
-
-    # ------------------------------------------------------------------
-    # Network walk worker (RLS only)
-    # ------------------------------------------------------------------
-
-    def _run_network_walk(self, seed_ip: str, username: str, password: str,
-                          file_name: str, max_hops: int, workdir: str,
-                          out_widget, root) -> None:
-        """Drive RLS_Network_Audit.run_audit on a background thread.
-
-        The audit imports cleanly (no Tk dependency) and internally
-        subprocesses per host using the same TDS_v6.2.py / TDS.exe entry
-        point the single-host run uses. We forward the password via
-        ``TDS_PASSWORD`` env so each subprocess picks it up, then unset
-        it once the walk completes.
-
-        If the seed host rejects the Ciena default (sourced from the
-        encrypted credentials store) we re-prompt the operator and
-        re-launch the walk with the supplied credentials.
-        """
-        def _log_to_gui(msg: str) -> None:
-            text = msg if msg.endswith("\n") else (msg + "\n")
-            def _do():
-                out_widget.insert(tk.END, text)
-                out_widget.see(tk.END)
-            try:
-                root.after(0, _do)
-            except Exception:
-                pass
-
-        def _attempt(username: str, password: str):
-            os.environ["TDS_PASSWORD"] = password
-            try:
-                from scripts.TDS.RLS_Network_Audit import run_audit
-                return run_audit(
-                    seeds=[seed_ip],
-                    username=username,
-                    max_hops=max_hops,
-                    workdir=workdir,
-                    file_name_seed=file_name,
-                    per_host_timeout=config.TDS_TIMEOUT,
-                    log=_log_to_gui,
-                )
-            finally:
-                os.environ.pop("TDS_PASSWORD", None)
-
-        def _ask_user_creds_blocking():
-            result_holder: dict = {}
-            ready = threading.Event()
-
-            def _on_main():
-                out_widget.insert(
-                    tk.END,
-                    f"[{seed_ip}] Default credentials failed — please enter credentials.\n",
-                )
-                out_widget.see(tk.END)
-                result_holder['value'] = self._prompt_user_for_credentials()
-                ready.set()
-
-            root.after(0, _on_main)
-            ready.wait()
-            return result_holder.get('value')
-
-        def _worker() -> None:
-            try:
-                if username and password:
-                    try:
-                        result_path = _attempt(username, password)
-                    except PermissionError as auth_err:
-                        # Some auth failures propagate as PermissionError
-                        # from the underlying paramiko transport — re-prompt
-                        # and retry.
-                        logging.info(
-                            f"[NETWORK-WALK] Default credentials rejected for "
-                            f"{seed_ip}: {auth_err}"
-                        )
-                        answer = _ask_user_creds_blocking()
-                        if not answer or not answer[0] or not answer[1]:
-                            raise
-                        user2, pass2 = answer
-                        result_path = _attempt(user2, pass2)
-                else:
-                    # No defaults available — prompt up-front, then attempt.
-                    answer = _ask_user_creds_blocking()
-                    if not answer or not answer[0] or not answer[1]:
-                        def on_cancel():
-                            self.tds_run_button.config(state=tk.NORMAL)
-                            self.tds_status_label.config(text="Status: Ready")
-                            messagebox.showwarning(
-                                "Network Walk Cancelled",
-                                "No credentials provided; network walk did not run.",
-                            )
-                        root.after(0, on_cancel)
-                        return
-                    user2, pass2 = answer
-                    result_path = _attempt(user2, pass2)
-
-                def on_complete():
-                    self.tds_run_button.config(state=tk.NORMAL)
-                    self.tds_status_label.config(text="Status: Ready")
-                    if result_path:
-                        out_widget.insert(
-                            tk.END,
-                            f"Network walk complete. Output: {result_path}\n",
-                        )
-                        out_widget.see(tk.END)
-                        messagebox.showinfo(
-                            "Network Walk Complete",
-                            f"Network workbook written to:\n{result_path}",
-                        )
-                    else:
-                        messagebox.showerror(
-                            "Network Walk Error",
-                            "Network walk finished but no output workbook was produced.",
-                        )
-                root.after(0, on_complete)
-
-            except ImportError as imp_err:
-                def on_imp_err():
-                    self.tds_run_button.config(state=tk.NORMAL)
-                    self.tds_status_label.config(text="Status: Error")
-                    messagebox.showerror(
-                        "Network Walk Error",
-                        f"Could not import RLS_Network_Audit:\n{friendly_error(imp_err)}",
-                    )
-                root.after(0, on_imp_err)
-
-            except Exception as exc:
-                logging.exception("Network walk worker failed")
-                def on_error():
-                    self.tds_run_button.config(state=tk.NORMAL)
-                    self.tds_status_label.config(text="Status: Error")
-                    messagebox.showerror(
-                        "Network Walk Error",
-                        f"Network walk failed:\n{friendly_error(exc)}",
                     )
                 root.after(0, on_error)
 

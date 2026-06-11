@@ -842,14 +842,16 @@ class TestScrubPasswordWidget(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Default credential seed — order: admin/admin, cli/admin, su/Ciena123
+# Default credential seed — order: admin/admin, cli/admin, su/Ciena123,
+# diaguser/Ciena123, ADMIN/ADMIN.
 # ---------------------------------------------------------------------------
 class TestDefaultCredentialSeed(unittest.TestCase):
     """The built-in seed must be admin/admin first, cli/admin (Nokia 1830)
-    second, su/Ciena123 (Ciena) third, and the seeding routine must migrate
-    pre-existing encrypted config files by appending newly-added entries
-    (without disturbing the
-    user's primary credentials or the order of existing defaults)."""
+    second, su/Ciena123 (Ciena shell) third, diaguser/Ciena123 (RLS
+    RESTCONF) fourth, ADMIN/ADMIN last; the seeding routine must
+    migrate pre-existing encrypted config files by appending newly-
+    added entries (without disturbing the user's primary credentials
+    or the order of existing defaults)."""
 
     def setUp(self):
         # Use a throwaway config path for each test to avoid touching the
@@ -866,18 +868,22 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_seed_order_includes_admin_first(self):
-        """admin/admin, cli/admin, su/Ciena123, ADMIN/ADMIN — in that order."""
+        """admin/admin, cli/admin, su/Ciena123, diaguser/Ciena123,
+        ADMIN/ADMIN — in that order. ``diaguser`` is the RLS RESTCONF
+        account (distinct from the shell user ``su``)."""
         self.assertEqual(
             self.creds_mod._BUILTIN_DEFAULT_SEED,
             [
                 ("admin", "admin"),
                 ("cli", "admin"),
                 ("su", "Ciena123"),
+                ("diaguser", "Ciena123"),
                 ("ADMIN", "ADMIN"),
             ],
         )
 
     def test_fresh_install_seeds_all_four(self):
+        # Test name is historical -- there are now 5 seeded entries.
         self.creds_mod._seed_defaults_into_config()
         pairs = self.creds_mod.get_default_credentials_to_try()
         self.assertEqual(
@@ -886,6 +892,7 @@ class TestDefaultCredentialSeed(unittest.TestCase):
                 ("admin", "admin"),
                 ("cli", "admin"),
                 ("su", "Ciena123"),
+                ("diaguser", "Ciena123"),
                 ("ADMIN", "ADMIN"),
             ],
         )
@@ -916,7 +923,8 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         pairs = self.creds_mod.get_default_credentials_to_try()
         self.assertEqual(
             pairs,
-            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123"), ("ADMIN", "ADMIN")],
+            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123"),
+             ("diaguser", "Ciena123"), ("ADMIN", "ADMIN")],
         )
         # Legacy user-credentials block must be removed by the migration.
         cfg = json.loads(self._tmppath.read_text())
@@ -949,7 +957,9 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         pairs = self.creds_mod.get_default_credentials_to_try()
         self.assertEqual(
             pairs,
-            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123"), ("ADMIN", "ADMIN"), ("operator", "custom")],
+            [("admin", "admin"), ("cli", "admin"), ("su", "Ciena123"),
+             ("diaguser", "Ciena123"), ("ADMIN", "ADMIN"),
+             ("operator", "custom")],
         )
 
     def test_re_seed_is_noop_when_all_present(self):
@@ -957,7 +967,7 @@ class TestDefaultCredentialSeed(unittest.TestCase):
         self.creds_mod._seed_defaults_into_config()
         self.creds_mod._seed_defaults_into_config()
         pairs = self.creds_mod.get_default_credentials_to_try()
-        self.assertEqual(len(pairs), 4)
+        self.assertEqual(len(pairs), len(self.creds_mod._BUILTIN_DEFAULT_SEED))
 
 
 # ---------------------------------------------------------------------------

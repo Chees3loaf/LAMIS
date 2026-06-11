@@ -73,7 +73,7 @@ class TestSynthesizeSummary(unittest.TestCase):
         try:
             wb = openpyxl.load_workbook(out, read_only=True)
             self.assertIn("Summary", wb.sheetnames)
-            self.assertIn("BOM", wb.sheetnames)
+            self.assertIn("Inventory by Site", wb.sheetnames)
             summary = wb["Summary"]
             # Three inventory tabs were created; the Customer-project tab
             # has no parts and must be skipped.
@@ -173,7 +173,7 @@ class TestTemplateAndAggregateTabsDropped(unittest.TestCase):
             self.assertNotIn("Customer-project", wb.sheetnames)
             self.assertNotIn("T03", wb.sheetnames)
             self.assertIn("Summary", wb.sheetnames)
-            self.assertIn("BOM", wb.sheetnames)
+            self.assertIn("Inventory by Site", wb.sheetnames)
             self.assertIn("CON PALLET 1", wb.sheetnames)
             self.assertIn("CON PALLET 2", wb.sheetnames)
             wb.close()
@@ -191,7 +191,7 @@ class TestTemplateAndAggregateTabsDropped(unittest.TestCase):
             self.assertIn("Customer-project", wb.sheetnames)
             self.assertIn("T03", wb.sheetnames)
             self.assertIn("Summary", wb.sheetnames)
-            self.assertIn("BOM", wb.sheetnames)
+            self.assertIn("Inventory by Site", wb.sheetnames)
             wb.close()
         finally:
             try: os.unlink(out)
@@ -214,7 +214,7 @@ class TestNonInventoryTabPatterns(unittest.TestCase):
 
     def test_real_inventory_tabs_not_matched(self):
         from gui.bom_frame import _is_non_inventory_tab
-        for name in ("CON PALLET 1", "Pallet A", "Summary", "BOM",
+        for name in ("CON PALLET 1", "Pallet A", "Summary", "Inventory by Site",
                      "MNCR001_7250", "Site_T03_North"):
             self.assertFalse(_is_non_inventory_tab(name), name)
 
@@ -360,7 +360,7 @@ class TestReturnLinkAndBorders(unittest.TestCase):
     def test_ensure_return_link_creates_when_missing(self):
         builder = _make_builder()
         wb = openpyxl.Workbook(); ws = wb.active
-        self.assertTrue(builder.ensure_return_link_in_a1(ws, target_sheet="BOM"))
+        self.assertTrue(builder.ensure_return_link_in_a1(ws, target_sheet="Inventory by Site"))
         self.assertEqual(ws["A1"].value, "Return")
         self.assertIsNotNone(ws["A1"].hyperlink)
         wb.close()
@@ -368,9 +368,9 @@ class TestReturnLinkAndBorders(unittest.TestCase):
     def test_ensure_return_link_idempotent(self):
         builder = _make_builder()
         wb = openpyxl.Workbook(); ws = wb.active
-        builder.ensure_return_link_in_a1(ws, target_sheet="BOM")
+        builder.ensure_return_link_in_a1(ws, target_sheet="Inventory by Site")
         # Second call should be a no-op (returns False).
-        self.assertFalse(builder.ensure_return_link_in_a1(ws, target_sheet="BOM"))
+        self.assertFalse(builder.ensure_return_link_in_a1(ws, target_sheet="Inventory by Site"))
         wb.close()
 
     def test_apply_borders_only_to_populated_rows(self):

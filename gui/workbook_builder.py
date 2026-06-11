@@ -23,6 +23,32 @@ import pandas as pd
 from utils.helpers import extract_ip_sort_key
 
 
+# Canonical name of the aggregate-inventory sheet on every ATLAS-built
+# inventory workbook. Was ``"BOM"`` historically; renamed to
+# ``"Inventory by Site"`` for customer clarity (the sheet reads like
+# an inventory listing, not a manufacturing BoM).
+#
+# ``_LEGACY_INVENTORY_TAB_NAME`` is the old label kept for
+# backwards-compat reads only — ATLAS-built workbooks from before the
+# rename are still parseable. New writes always use the new name.
+INVENTORY_TAB_NAME = "Inventory by Site"
+_LEGACY_INVENTORY_TAB_NAME = "BOM"
+
+
+def find_inventory_sheet_name(wb: Any) -> Optional[str]:
+    """Return the inventory-aggregate sheet's name in *wb*, or ``None``.
+
+    Prefers the new name (``"Inventory by Site"``); falls back to the
+    legacy ``"BOM"`` for workbooks built before the rename so the
+    operator's existing files keep loading without a manual fix.
+    """
+    if INVENTORY_TAB_NAME in wb.sheetnames:
+        return INVENTORY_TAB_NAME
+    if _LEGACY_INVENTORY_TAB_NAME in wb.sheetnames:
+        return _LEGACY_INVENTORY_TAB_NAME
+    return None
+
+
 # Hostnames a device reports when it has not been provisioned. Map each
 # default to a short human-readable prefix; when a scan hits one of
 # these, the workbook label falls back to "<prefix>-<chassis-serial>"
@@ -85,6 +111,51 @@ def _chassis_serial_from_df(df: pd.DataFrame) -> str:
         if _is_chassis_row(idx):
             return ser
     return ""
+
+
+def _clean_nan(v: Any) -> str:
+    """Mirror of the local ``clean_str`` builders use — module-level so
+    helper utilities can share the same NaN-handling rule."""
+    if v is None:
+        return ""
+    s = str(v).strip()
+    return "" if s.lower() == "nan" else s
+
+
+def device_name_with_serial_fallback(
+    primary_name: Any,
+    chassis_serial: str,
+    ip: str,
+    *,
+    serial_prefix: str = "Device",
+    ip_prefix: str = "System",
+) -> str:
+    """Pick a unique device-tab name with three-tier fallback.
+
+    Priority:
+
+    1. ``primary_name`` if it cleans to non-empty — the device's
+       reported hostname / TID. This is the normal case.
+    2. ``"<serial_prefix>-<chassis_serial>"`` when the device gave us
+       no TID but reported a chassis serial. Without this, multiple
+       un-provisioned shelves behind the same management IP
+       (factory-default 10.0.0.1 case) collapse onto a single shared
+       ``System_<ip>`` tab — losing all but one of them.
+    3. ``"<ip_prefix>_<ip-with-dots-as-underscores>"`` as a last
+       resort. Truly anonymous device — no name, no serial. Rare in
+       practice but keeps the code branch-complete.
+
+    Result is NOT length-truncated or sheet-name-sanitized — caller
+    handles those after applying their own canonical-name overrides
+    (e.g., factory-default rewrite, ``make_unique_sheet_title``).
+    """
+    name = _clean_nan(primary_name)
+    if name:
+        return name
+    ser = (chassis_serial or "").strip()
+    if ser:
+        return f"{serial_prefix}-{ser}"
+    return f"{ip_prefix}_{str(ip).replace('.', '_')}"
 
 
 class WorkbookBuilder:
@@ -737,8 +808,52 @@ class WorkbookBuilder:
                 break
         if target is None:
             target = start_row
-        ws.cell(row=target, column=self._ASSET_TAG_COL_ON_DEVICE_TAB).value = asset_tag
+        cell = ws.cell(row=target, column=self._ASSET_TAG_COL_ON_DEVICE_TAB)
+        # Don't clobber a live XLOOKUP-from-Summary formula with a
+        # literal value. Newer builds write the formula at
+        # workbook-build time (see ``write_asset_tag_formula_to_chassis_row``);
+        # propagating literals over it would freeze the link and break
+        # the "edit Summary E once, every device tab follows" workflow.
+        existing = cell.value
+        if isinstance(existing, str) and existing.startswith("="):
+            return target
+        cell.value = asset_tag
         return target
+
+    def write_asset_tag_formula_to_chassis_row(
+        self,
+        ws: Any,
+        chassis_row: int = 15,
+        force: bool = False,
+    ) -> bool:
+        """Plant the live Asset Tag lookup on a device tab's chassis row.
+
+        Sets ``G<chassis_row>`` to
+        ``=XLOOKUP(F6, Summary!$D:$D, Summary!$E:$E, "", 0, 1)`` so the
+        device tab's Asset Tag cell auto-reflects whatever the operator
+        types into Summary's E column. The lookup keys on the device's
+        hostname (F6) against Summary's Device Name column (D); when
+        the operator hasn't typed a tag yet the formula returns blank
+        instead of ``#N/A``.
+
+        Idempotent by default — if the cell already carries a formula
+        (any string starting with ``=``) we leave it alone. Pass
+        ``force=True`` to overwrite. A pre-existing LITERAL value
+        (e.g., from a manual edit on the device tab before this method
+        existed) IS overwritten by the formula on a fresh build —
+        operators are expected to type into Summary, not the device
+        tab directly.
+
+        Returns True when the cell was written.
+        """
+        cell = ws.cell(
+            row=chassis_row, column=self._ASSET_TAG_COL_ON_DEVICE_TAB,
+        )
+        existing = cell.value
+        if not force and isinstance(existing, str) and existing.startswith("="):
+            return False
+        cell.value = '=XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)'
+        return True
 
     def propagate_asset_tags_to_tabs(
         self,
@@ -772,7 +887,9 @@ class WorkbookBuilder:
                 )
         return updated
 
-    def ensure_return_link_in_a1(self, ws: Any, target_sheet: str = "BOM") -> bool:
+    def ensure_return_link_in_a1(
+        self, ws: Any, target_sheet: str = INVENTORY_TAB_NAME,
+    ) -> bool:
         """Add (or refresh) a ``Return`` hyperlink in A1 pointing at
         *target_sheet* if the cell isn't already wired up that way.
 
@@ -948,7 +1065,9 @@ class WorkbookBuilder:
     def normalize_device_tab_part_numbers(
         self,
         wb: Any,
-        skip_sheets: Tuple[str, ...] = ("Summary", "BOM"),
+        skip_sheets: Tuple[str, ...] = (
+            "Summary", INVENTORY_TAB_NAME, _LEGACY_INVENTORY_TAB_NAME,
+        ),
     ) -> int:
         """Apply the same 1P/P-strip + DB-lookup pipeline to every device tab.
 
@@ -1033,18 +1152,23 @@ class WorkbookBuilder:
     @staticmethod
     def retarget_return_links_to_bom(
         wb: Any,
-        skip_sheets: Tuple[str, ...] = ("Summary", "BOM"),
+        skip_sheets: Tuple[str, ...] = (
+            "Summary", INVENTORY_TAB_NAME, _LEGACY_INVENTORY_TAB_NAME,
+        ),
     ) -> int:
-        """Rewrite any Summary-targeted hyperlink on device tabs to point at BOM.
+        """Rewrite any Summary-targeted hyperlink on device tabs to point
+        at the inventory-aggregate sheet.
 
         Inventory workbooks built before the BOM existed leave each
         device tab with a "Return" hyperlink to ``Summary``. After we
-        add a BOM the more useful jump is to BOM, so we walk the first
-        few cells of each non-skipped sheet and retarget hyperlinks
-        whose location resolves to the Summary sheet. Returns the
-        number of links rewritten.
+        add the inventory aggregate the more useful jump is to it, so
+        we walk the first few cells of each non-skipped sheet and
+        retarget hyperlinks whose location resolves to the Summary
+        sheet. Returns the number of links rewritten. No-op when the
+        workbook has no inventory aggregate.
         """
-        if "BOM" not in wb.sheetnames:
+        target_sheet = find_inventory_sheet_name(wb)
+        if target_sheet is None:
             return 0
         retargeted = 0
         for sname in wb.sheetnames:
@@ -1064,7 +1188,7 @@ class WorkbookBuilder:
                     raw = link.location or link.target or ""
                     if "summary" not in str(raw).lower():
                         continue
-                    cell.hyperlink = "#'BOM'!A1"
+                    cell.hyperlink = f"#'{target_sheet}'!A1"
                     cell.style = "Hyperlink"
                     retargeted += 1
         return retargeted
@@ -1255,19 +1379,25 @@ class WorkbookBuilder:
         a rollup column summing their quantities. Quantity cells link the
         BOM to the underlying device tab via the column header hyperlink.
         """
-        # Merge-in-place: salvage entries from a previously-built BOM for
-        # sites whose device tabs are missing from the current run, then
-        # replace the sheet.
-        if "BOM" in wb.sheetnames:
+        # Merge-in-place: salvage entries from a previously-built
+        # aggregate sheet for sites whose device tabs are missing from
+        # the current run, then replace the sheet. Backwards-compat
+        # reads the old ``"BOM"`` name too so workbooks built before
+        # the rename still get salvaged correctly.
+        existing_inventory_name = find_inventory_sheet_name(wb)
+        if existing_inventory_name is not None:
             try:
-                salvaged = self._scan_existing_bom(wb["BOM"])
+                salvaged = self._scan_existing_bom(wb[existing_inventory_name])
             except Exception as exc:
-                logging.debug(f"[BOM] could not scan existing BOM for merge: {exc}")
+                logging.debug(
+                    f"[INVENTORY] could not scan existing "
+                    f"{existing_inventory_name!r} for merge: {exc}"
+                )
                 salvaged = {}
             for st, entries in salvaged.items():
                 if st not in bom_data or not bom_data[st]:
                     bom_data[st] = entries
-            del wb["BOM"]
+            del wb[existing_inventory_name]
 
         # Per-site kit folding: when a site lists all components of a
         # known kit, collapse them into kit instances. See
@@ -1287,20 +1417,23 @@ class WorkbookBuilder:
                 tpl_wb = openpyxl.load_workbook(self.bom_template)
                 try:
                     tpl_ws = tpl_wb.active
-                    bom_sheet = self.copy_sheet(tpl_ws, wb, "BOM")
+                    bom_sheet = self.copy_sheet(tpl_ws, wb, INVENTORY_TAB_NAME)
                     template_used = True
                 finally:
                     tpl_wb.close()
             except Exception as exc:
-                logging.warning(f"[BOM] Failed to load template {self.bom_template}: {exc}")
+                logging.warning(
+                    f"[INVENTORY] Failed to load template "
+                    f"{self.bom_template}: {exc}"
+                )
 
         if bom_sheet is None:
-            bom_sheet = wb.create_sheet(title="BOM", index=1)
+            bom_sheet = wb.create_sheet(title=INVENTORY_TAB_NAME, index=1)
 
-        # Move BOM to index 1 (right after Summary) regardless of where copy_sheet
-        # appended it.
-        if wb.sheetnames.index("BOM") != 1:
-            idx = wb.sheetnames.index("BOM")
+        # Move the inventory aggregate to index 1 (right after Summary)
+        # regardless of where copy_sheet appended it.
+        if wb.sheetnames.index(INVENTORY_TAB_NAME) != 1:
+            idx = wb.sheetnames.index(INVENTORY_TAB_NAME)
             wb._sheets.insert(1, wb._sheets.pop(idx))
 
         ordered_sites = sorted(
@@ -1748,10 +1881,31 @@ class WorkbookBuilder:
                         logging.warning(f"No data to write for IP {ip}")
                         continue
 
-                    system_name = clean_str(first_nonempty(
-                        combined_df.get("System Name"),
-                        f"System_{ip.replace('.', '_')}"
-                    ))[:31].replace(":", "_").replace("/", "_")
+                    # Three-tier name fallback: reported hostname →
+                    # chassis-serial-derived name → IP-derived name.
+                    # The middle tier matters when a device reports NO
+                    # hostname at all (firmware bug, brand-new chassis
+                    # mid-provisioning); without it, multiple anonymous
+                    # devices share the same ``System_<ip>`` tab and
+                    # only the last one survives. Factory-default
+                    # rewrite below handles the "device reports a
+                    # KNOWN-default hostname" case separately.
+                    reported_name = first_nonempty(
+                        combined_df.get("System Name"), ""
+                    )
+                    if not clean_str(reported_name):
+                        chassis_for_name = _chassis_serial_from_df(combined_df)
+                        if chassis_for_name:
+                            logging.info(
+                                f"[EXCEL] No TID reported for IP {ip}; "
+                                f"using chassis serial '{chassis_for_name}' "
+                                f"as device-tab name."
+                            )
+                    else:
+                        chassis_for_name = ""
+                    system_name = device_name_with_serial_fallback(
+                        reported_name, chassis_for_name, ip,
+                    )[:31].replace(":", "_").replace("/", "_")
 
                     system_type = clean_str(first_nonempty(combined_df.get("System Type"), ""))
                     if not system_type:
@@ -1824,7 +1978,7 @@ class WorkbookBuilder:
                     # Quick navigation back to the BOM (one click from any
                     # device tab into the aggregate view).
                     new_sheet["A1"] = "Return"
-                    new_sheet["A1"].hyperlink = "#'BOM'!A1"
+                    new_sheet["A1"].hyperlink = f"#'{INVENTORY_TAB_NAME}'!A1"
                     new_sheet["A1"].style = "Hyperlink"
 
                     new_sheet["C5"] = customer
@@ -1900,6 +2054,10 @@ class WorkbookBuilder:
                     # Borders around every populated data row so the
                     # equipment list reads as a table rather than free text.
                     self.apply_device_data_borders(new_sheet)
+                    # Plant the live XLOOKUP that pulls Asset Tag from
+                    # Summary E. Operator types into Summary once and
+                    # every device tab follows — no BoM rebuild needed.
+                    self.write_asset_tag_formula_to_chassis_row(new_sheet)
 
                     if prior_sheet_title and prior_sheet_title in wb.sheetnames and prior_sheet_title != summary_sheet.title:
                         del wb[prior_sheet_title]
@@ -1953,10 +2111,14 @@ class WorkbookBuilder:
             if new_ips and pre_existing_ips:
                 self._append_summary_timestamp(summary_sheet, "Additional Capture")
 
-            # Keep tabs ordered by IP sequence, with Summary first, BOM second.
+            # Keep tabs ordered by IP sequence — Summary first,
+            # then the inventory aggregate, then device tabs.
             ordered_summary_items = sorted(summary_items, key=lambda item: extract_ip_sort_key(item[0]))
             ordered_device_tabs = [sheet_title for (_, _, sheet_title) in ordered_summary_items if sheet_title in wb.sheetnames]
-            pinned_tabs = [summary_sheet.title, "BOM"] + ordered_device_tabs
+            inventory_name = find_inventory_sheet_name(wb)
+            pinned_tabs = [summary_sheet.title] + (
+                [inventory_name] if inventory_name else []
+            ) + ordered_device_tabs
             remaining_tabs = [name for name in wb.sheetnames if name not in pinned_tabs]
             ordered_tabs = pinned_tabs + remaining_tabs
             wb._sheets = [wb[name] for name in ordered_tabs]
@@ -2158,6 +2320,45 @@ class WorkbookBuilder:
         summary_index: Dict[str, Tuple[str, str]] = {}
         bom_data: Dict[str, List[Tuple[str, str, str]]] = {}
 
+        # Append-mode: rebuild summary_index from EVERY pre-existing
+        # device sheet so the Summary table accumulates across runs
+        # instead of dropping to just the new devices. Without this
+        # rebuild ``_populate_summary_table`` only sees the current
+        # run's outputs, overwrites row 10+ with those, and the prior
+        # devices' Summary rows are lost even though their tabs and
+        # data survive. ``build_report_workbook`` already does this
+        # — Ciena RLS / Ciena 6500 / Nokia PSI scans route through
+        # *this* builder, and operators were seeing only the last
+        # device they scanned listed on Summary while F7=1.
+        #
+        # ``name_index`` (hostname → (ip, sheet_title)) lets a rescan
+        # of the same device REPLACE its prior sheet/Summary row
+        # instead of stacking a ``_2`` duplicate. Same shape as the
+        # build_report_workbook dedup path.
+        name_index: Dict[str, Tuple[str, str]] = {}
+        if append_mode:
+            for sname in wb.sheetnames:
+                if sname == "Summary":
+                    continue
+                try:
+                    ws = wb[sname]
+                    ip_val = ws["F5"].value
+                    name_val = ws["F6"].value
+                    if ip_val is None or name_val is None:
+                        continue
+                    ip_str = str(ip_val).strip()
+                    name_str = str(name_val).strip()
+                    if not ip_str or ip_str.lower() == "nan":
+                        continue
+                    summary_index[sname] = (ip_str, name_str)
+                    if name_str:
+                        name_index[name_str.lower()] = (ip_str, sname)
+                except Exception as _exc:
+                    logging.debug(
+                        f"[PSI] Could not read device info from sheet "
+                        f"{sname!r}: {_exc}"
+                    )
+
         def _unique_title(base):
             clean = re.sub(r"[^a-zA-Z0-9_]", "_", str(base).strip())[:31] or "Device"
             if clean not in wb.sheetnames:
@@ -2187,7 +2388,28 @@ class WorkbookBuilder:
                     if system_name:
                         break
                 if not system_name:
-                    system_name = f"PSI_{ip.replace('.', '_')}"
+                    # Three-tier fallback: no TID → try chassis serial
+                    # from any of the inventory DataFrames before
+                    # giving up to the IP-based name. See
+                    # ``device_name_with_serial_fallback``.
+                    chassis_for_name = ""
+                    for key in (
+                        "shelf_inventory", "shelf_detail", "card_inventory",
+                    ):
+                        chassis_for_name = _chassis_serial_from_df(
+                            _df(data_dict.get(key))
+                        )
+                        if chassis_for_name:
+                            break
+                    if chassis_for_name:
+                        logging.info(
+                            f"[PSI] No TID reported for IP {ip}; using "
+                            f"chassis serial '{chassis_for_name}' as "
+                            f"device-tab name."
+                        )
+                    system_name = device_name_with_serial_fallback(
+                        "", chassis_for_name, ip, ip_prefix="PSI",
+                    )
                 if not source_val:
                     source_val = str(ip)
 
@@ -2210,6 +2432,25 @@ class WorkbookBuilder:
                             f"using chassis serial fallback '{system_name}'."
                         )
 
+                # Rescan-same-device: if a prior sheet already covers
+                # this (post-rewrite) hostname, drop it so the new
+                # write replaces it in place. Without this, repeated
+                # appends pile up ``<host>_2``/``_3`` duplicate tabs.
+                if append_mode:
+                    prior = name_index.get(system_name.strip().lower())
+                    if prior:
+                        _prior_ip, prior_sheet_title = prior
+                        summary_index.pop(prior_sheet_title, None)
+                        name_index.pop(system_name.strip().lower(), None)
+                        if (
+                            prior_sheet_title in wb.sheetnames
+                            and prior_sheet_title != "Summary"
+                        ):
+                            try:
+                                del wb[prior_sheet_title]
+                            except KeyError:
+                                pass
+
                 title = _unique_title(system_name)
                 if append_mode:
                     ns = self.copy_sheet(template_sheet, wb, title)
@@ -2218,7 +2459,7 @@ class WorkbookBuilder:
                     ns.title = title
 
                 ns["A1"] = "Return"
-                ns["A1"].hyperlink = "#'BOM'!A1"
+                ns["A1"].hyperlink = f"#'{INVENTORY_TAB_NAME}'!A1"
                 ns["A1"].style = "Hyperlink"
                 ns["C5"] = customer
                 ns["C6"] = project
@@ -2265,6 +2506,10 @@ class WorkbookBuilder:
                 # Borders around every populated data row so the equipment
                 # list reads as a table rather than free text.
                 self.apply_device_data_borders(ns)
+                # Live XLOOKUP for Asset Tag — Summary E feeds every
+                # device tab's G15 with no rebuild step. See
+                # ``write_asset_tag_formula_to_chassis_row``.
+                self.write_asset_tag_formula_to_chassis_row(ns)
                 summary_index[title] = (str(ip), system_name)
                 processed_data[ip] = pd.DataFrame()
                 bom_data[title] = self._collect_bom_entries_from_psi_data(data_dict)
@@ -2294,7 +2539,10 @@ class WorkbookBuilder:
 
         self._build_bom_sheet(wb, items, bom_data)
 
-        ordered = [summary_sheet.title, "BOM"] + [
+        inventory_name = find_inventory_sheet_name(wb)
+        ordered = [summary_sheet.title] + (
+            [inventory_name] if inventory_name else []
+        ) + [
             t for _, _, t in sorted(items, key=lambda x: extract_ip_sort_key(x[0]))
             if t in wb.sheetnames
         ]
@@ -2394,10 +2642,14 @@ class WorkbookBuilder:
             else:
                 wb = openpyxl.load_workbook(base_path)
 
-            # The base family wb carries its own BOM tab; drop it so we can
-            # build a single unified one covering devices across all families.
-            if "BOM" in wb.sheetnames:
-                del wb["BOM"]
+            # The base family wb carries its own inventory aggregate tab;
+            # drop it so we can build a single unified one covering
+            # devices across all families. Accepts either canonical or
+            # legacy name so workbooks built before the rename still
+            # pick up the cleanup.
+            for legacy in (INVENTORY_TAB_NAME, _LEGACY_INVENTORY_TAB_NAME):
+                if legacy in wb.sheetnames:
+                    del wb[legacy]
 
             # Collect (ip, device_name, sheet_title) entries from each family
             # by scanning each family wb's Summary sheet.
@@ -2466,7 +2718,7 @@ class WorkbookBuilder:
                         # unified build).
                         try:
                             if new_sheet["A1"].value == "Return":
-                                new_sheet["A1"].hyperlink = "#'BOM'!A1"
+                                new_sheet["A1"].hyperlink = f"#'{INVENTORY_TAB_NAME}'!A1"
                         except Exception:
                             pass
                         unified_summary.append((ip_s, name_s, new_title))
@@ -2526,9 +2778,11 @@ class WorkbookBuilder:
 
             self._build_bom_sheet(wb, unified_summary, unified_bom_data)
 
-            # Order device sheets by IP for predictable layout (BOM pinned 2nd).
+            # Order device sheets by IP for predictable layout — Summary
+            # first, the inventory aggregate second (when present).
             ordered_titles = [t for _, _, t in sorted(unified_summary, key=lambda x: extract_ip_sort_key(x[0])) if t in wb.sheetnames]
-            pinned = ["Summary"] + (["BOM"] if "BOM" in wb.sheetnames else [])
+            inv = find_inventory_sheet_name(wb)
+            pinned = ["Summary"] + ([inv] if inv else [])
             remaining = [n for n in wb.sheetnames if n not in pinned and n not in ordered_titles]
             wb._sheets = [wb[n] for n in pinned] + [wb[t] for t in ordered_titles] + [wb[n] for n in remaining]
 
@@ -2855,11 +3109,13 @@ class WorkbookBuilder:
         # and extend the freeze pane so it stays visible while
         # scrolling horizontally.
         try:
-            if "BOM" in out_wb.sheetnames:
-                self._add_visible_total_column_to_bom(out_wb["BOM"])
+            inv_name = find_inventory_sheet_name(out_wb)
+            if inv_name is not None:
+                self._add_visible_total_column_to_bom(out_wb[inv_name])
         except Exception:
             logging.exception(
-                "[SalesBoM] Could not insert visible Total column on BoM tab"
+                "[SalesBoM] Could not insert visible Total column on "
+                "the inventory aggregate tab"
             )
 
         # --- Per-site tabs ---
@@ -2884,7 +3140,8 @@ class WorkbookBuilder:
         )
 
         # --- Tab ordering ---
-        pinned = ["Summary"] + (["BOM"] if "BOM" in out_wb.sheetnames else [])
+        inv_name = find_inventory_sheet_name(out_wb)
+        pinned = ["Summary"] + ([inv_name] if inv_name else [])
         per_site_tabs = [s for s in sites if s in out_wb.sheetnames]
         ordered = pinned + per_site_tabs
         remaining = [n for n in out_wb.sheetnames if n not in ordered]

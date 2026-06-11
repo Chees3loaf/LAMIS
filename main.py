@@ -131,6 +131,18 @@ logging.getLogger("PIL").setLevel(config.PIL_LOG_LEVEL)
 # Suppress paramiko internal debug logs (kex handshake, cipher negotiation, etc.)
 logging.getLogger("paramiko").setLevel(logging.WARNING)
 
+# Serial diagnostics: when config.SERIAL_DEBUG is True, raise the
+# atlas.serial logger to DEBUG so utils.serial_helpers writes a
+# per-chunk byte transcript. Independent of LOG_LEVEL so a field
+# operator can turn it on without flooding the rest of the log.
+if getattr(config, "SERIAL_DEBUG", False):
+    try:
+        from utils.serial_helpers import enable_serial_debug
+        enable_serial_debug(True)
+        logging.info("[SERIAL] DEBUG transcript enabled via config.SERIAL_DEBUG")
+    except Exception as _serial_dbg_err:
+        logging.debug(f"Could not enable serial debug: {_serial_dbg_err}")
+
 # F023: sweep stale temp files left behind by prior crashed runs (best-effort).
 try:
     cleanup_stale_lamis_tempfiles(max_age_hours=24)

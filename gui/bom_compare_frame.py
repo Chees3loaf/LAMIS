@@ -973,12 +973,19 @@ class BomCompareFrame(ttk.Frame):
 
     @classmethod
     def _find_bom_sheet(cls, wb: Any, required: bool = True) -> Any:
-        # Exact "BOM" match wins regardless of position.
+        # Exact name match wins regardless of position — accepts the
+        # current ``Inventory by Site`` canonical name as well as the
+        # legacy ``BOM`` form so workbooks built before the rename
+        # still compare cleanly.
         for name in wb.sheetnames:
-            if name.strip().lower() == "bom":
+            low = name.strip().lower()
+            if low in ("inventory by site", "bom"):
                 return wb[name]
         if required:
-            raise RuntimeError("Workbook has no 'BOM' sheet — cannot compare.")
+            raise RuntimeError(
+                "Workbook has no 'Inventory by Site' (or legacy 'BOM') "
+                "sheet — cannot compare."
+            )
         # Sales workbooks frequently lead with Summary/Notes tabs and put the
         # actual BOM grid on a sheet the engineer named themselves (e.g.
         # "CBR v1"). Probe each sheet for a Part-Number + Total/Qty header

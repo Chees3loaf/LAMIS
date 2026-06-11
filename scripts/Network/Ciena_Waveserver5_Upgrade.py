@@ -5,7 +5,7 @@ management IP, so we can't reach it over LAN until WE provision one. The
 flow is two-phase:
 
 **Phase 1 — Serial console** (operator plugs into the console port at
-9600 baud and DCN-1 over Cat-5 to the laptop):
+115200 baud and DCN-1 over Cat-5 to the laptop):
 
   1. Wake the prompt, login as ``su`` (no password).
   2. Send the provisioning batch one command at a time —
@@ -54,9 +54,12 @@ from utils.serial_helpers import (
 
 logger = logging.getLogger(__name__)
 
-# Serial defaults — Waveserver 5 console is always 9600 8N1 per the
-# vendor docs; no auto-probing fallback is needed.
-_SERIAL_BAUD = 9600
+# Serial defaults — Waveserver 5 console runs at 115200 8N1 (field-
+# confirmed on production WS5 hardware; an earlier comment in this
+# file claimed 9600 per vendor docs, but the device times out at
+# that baud and only locks onto a prompt at 115200). No auto-probing
+# fallback is needed.
+_SERIAL_BAUD = 115200
 _SERIAL_PROMPT_TIMEOUT = 10.0
 _SERIAL_CMD_TIMEOUT = 15.0
 # `configuration save` writes the running-config and flushes the change

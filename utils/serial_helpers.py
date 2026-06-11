@@ -5,6 +5,16 @@ were polling `in_waiting` and breaking on the first momentary gap,
 which truncated multi-screen `show` output, and because no script was
 authenticating against the serial console — commands were blasted at a
 `Login:` prompt and silently ignored.
+
+Diagnostics
+-----------
+Every public helper logs through the ``atlas.serial`` logger so its
+level can be raised independently of the rest of ATLAS. Set
+``config.SERIAL_DEBUG = True`` (or call :func:`enable_serial_debug`) to
+turn on a per-chunk byte transcript without touching the global log
+level. Probe-failure byte dumps are always logged at INFO so the
+operator can tell wrong-baud garbage from a prompt-shape we don't
+recognize without flipping anything.
 """
 from __future__ import annotations
 
@@ -12,6 +22,40 @@ import logging
 import re
 import time
 from typing import Callable, List, Optional, Tuple
+
+logger = logging.getLogger("atlas.serial")
+
+
+def enable_serial_debug(enabled: bool = True) -> None:
+    """Raise the serial helpers' logger to DEBUG (or back to default).
+
+    DEBUG turns on a per-chunk byte transcript inside :func:`_read_until`
+    plus state-transition logs in :func:`serial_login` and
+    :func:`capture_until_prompt`. Without this the helpers stay at the
+    root logger's level so they don't drown out other lines.
+    """
+    logger.setLevel(logging.DEBUG if enabled else logging.NOTSET)
+
+
+def _format_byte_dump(data: bytes, max_bytes: int = 200) -> str:
+    """Render *data* as a single human-readable line.
+
+    Format: ``len=N hex=AA BB CC… repr='...'``. Hex is the literal
+    bytes (always safe to log); ``repr`` is the Python repr of the
+    decoded UTF-8 (errors=replace) so printable banner text is
+    instantly readable. Both sides are capped at *max_bytes* so we
+    don't blow up the log on a captured multi-screen dump.
+    """
+    if not data:
+        return "len=0 hex=<empty>"
+    head = bytes(data[:max_bytes])
+    hex_part = " ".join(f"{b:02X}" for b in head)
+    repr_part = head.decode("utf-8", errors="replace")
+    ellipsis = "…" if len(data) > max_bytes else ""
+    return (
+        f"len={len(data)} hex={hex_part}{ellipsis} "
+        f"repr={repr_part!r}{ellipsis}"
+    )
 
 # Match the common operational prompts at end-of-buffer:
 #   Nokia SROS:    "A:hostname#"   "*A:hostname#"  "B:hostname>"
@@ -65,17 +109,39 @@ def _read_until(
     """Read bytes from *ser* until *pattern* matches the tail or *timeout*.
 
     Returns (buffer, matched). Buffer is the raw bytes read so far.
+
+    Per-chunk byte transcript is emitted at DEBUG so an operator
+    chasing "got 6 bytes but no prompt" can see exactly which bytes
+    showed up and when. Enable via :func:`enable_serial_debug` or
+    ``config.SERIAL_DEBUG = True``.
     """
     deadline = time.time() + timeout
     buf = bytearray()
+    start = time.time()
+    debug_on = logger.isEnabledFor(logging.DEBUG)
+    chunk_idx = 0
     while time.time() < deadline:
         if should_stop and should_stop():
             return bytes(buf), False
         n = ser.in_waiting
         if n:
-            buf.extend(ser.read(n))
+            chunk = ser.read(n)
+            buf.extend(chunk)
+            chunk_idx += 1
+            if debug_on:
+                logger.debug(
+                    "[SERIAL][read] +%.0fms chunk#%d %s",
+                    (time.time() - start) * 1000.0,
+                    chunk_idx,
+                    _format_byte_dump(chunk, max_bytes=120),
+                )
             tail = bytes(buf[-512:])
             if pattern.search(tail):
+                if debug_on:
+                    logger.debug(
+                        "[SERIAL][read] pattern matched after %.0fms / %d bytes",
+                        (time.time() - start) * 1000.0, len(buf),
+                    )
                 return bytes(buf), True
             # Page-pause handling. Different vendors emit different
             # paging banners — handle the common ones inline so callers
@@ -85,10 +151,19 @@ def _read_until(
             # A single space advances all of them by one screen.
             if b"Press any key to continue" in tail:
                 ser.write(b" ")
+                if debug_on:
+                    logger.debug("[SERIAL][read] sent SPACE for 'Press any key' pager")
             elif b"--more--" in tail or b"--More--" in tail:
                 ser.write(b" ")
+                if debug_on:
+                    logger.debug("[SERIAL][read] sent SPACE for --more-- pager")
         else:
             time.sleep(0.05)
+    if debug_on:
+        logger.debug(
+            "[SERIAL][read] TIMEOUT after %.1fs / %d bytes (tail=%s)",
+            timeout, len(buf), _format_byte_dump(bytes(buf[-120:]), max_bytes=120),
+        )
     return bytes(buf), False
 
 
@@ -147,10 +222,19 @@ def open_serial_with_baud_probe(
         # Empty buffer = no response (cable issue or really wrong speed);
         # non-empty = bytes arrived but didn't match a prompt (likely the
         # wrong baud emitting garbage). Either way, close and try next.
+        # Dump the captured bytes at INFO so the operator can tell which
+        # case they're in WITHOUT flipping DEBUG: wrong-baud garbage
+        # shows as high-bit non-printables, a missing-CR/LF device shows
+        # as readable banner text without a trailing prompt, etc.
         logging.info(
             f"[SERIAL] {port}@{baud} did not yield a prompt "
             f"(got {len(buf)} bytes); trying next baud"
         )
+        if buf:
+            logging.info(
+                f"[SERIAL] {port}@{baud} captured bytes: "
+                f"{_format_byte_dump(buf, max_bytes=200)}"
+            )
         try:
             ser.close()
         except Exception:
@@ -179,11 +263,16 @@ def serial_login(
     except Exception:
         pass
     ser.write(b"\r")
+    logger.debug("[SERIAL][login] wake-up CR sent; waiting for prompt")
     buf, matched = _read_until(ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop)
     tail = buf[-512:]
 
     if _SHELL_RE.search(tail):
         logging.info("[SERIAL] Already at shell prompt; no auth needed.")
+        logger.debug(
+            "[SERIAL][login] shell prompt at tail: %s",
+            _format_byte_dump(tail, max_bytes=80),
+        )
         return True, None
 
     if not (_LOGIN_RE.search(tail) or _PASSWORD_RE.search(tail)):
@@ -194,6 +283,7 @@ def serial_login(
 
     for user, pw in defaults:
         logging.info(f"[SERIAL] Trying credentials user={user!r}")
+        logger.debug("[SERIAL][login] sending username %r", user)
         # Wait for the line to go quiet so the device's banner finishes
         # before we send the username. Without this the first iteration
         # consumes residual banner bytes and never actually waits for the
@@ -207,6 +297,7 @@ def serial_login(
         buf, matched = _read_until(ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop)
         tail = buf[-512:]
         if _PASSWORD_RE.search(tail):
+            logger.debug("[SERIAL][login] saw Password: prompt; sending password")
             ser.write((pw + "\r").encode("utf-8", errors="replace"))
             buf, matched = _read_until(ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop)
             tail = buf[-512:]
@@ -244,13 +335,21 @@ def capture_until_prompt(
         ser.reset_input_buffer()
     except Exception:
         pass
+    logger.debug("[SERIAL][cmd] sending %r (timeout=%.1fs)", command, timeout)
+    started = time.time()
     ser.write((command + "\r").encode("utf-8", errors="replace"))
     buf, matched = _read_until(ser, _SHELL_RE, timeout=timeout, should_stop=should_stop)
     if should_stop and should_stop():
         return None
+    elapsed = time.time() - started
     if not matched:
         logging.warning(
             f"[SERIAL] No prompt within {timeout}s for command {command!r}; "
             f"returning {len(buf)} bytes captured so far."
+        )
+    else:
+        logger.debug(
+            "[SERIAL][cmd] %r completed in %.0fms / %d bytes",
+            command, elapsed * 1000.0, len(buf),
         )
     return buf.decode("utf-8", errors="replace")

@@ -103,8 +103,43 @@ class TestExtractIpSortKey(unittest.TestCase):
         self.assertEqual(key[0], 1)
 
     def test_plain_string_lowercase_in_key(self):
+        # Non-IP keys are now natural-sort lists; a plain alphabetic
+        # string with no digits produces a single lowercased fragment.
         key = extract_ip_sort_key("DeviceName")
-        self.assertEqual(key[1], "devicename")
+        self.assertEqual(key[1], ["devicename"])
+
+    def test_non_ip_sorts_naturally_across_numeric_suffix(self):
+        """Real bug from a TO3 BPA BoM workbook: ``CON PALLET *``
+        sheet/column names were sorting lexically so ``CON PALLET 10``
+        ended up between ``CON PALLET 1`` and ``CON PALLET 2``. The
+        operator scanning left-to-right thought tab 10 was missing."""
+        values = [
+            "CON PALLET 1", "CON PALLET 2", "CON PALLET 3", "CON PALLET 4",
+            "CON PALLET 5", "CON PALLET 6", "CON PALLET 7", "CON PALLET 8",
+            "CON PALLET 9", "CON PALLET 10",
+        ]
+        # Pre-shuffle to make sure the assertion really exercises the
+        # sort and isn't passing by accident on already-ordered input.
+        scrambled = ["CON PALLET 10"] + values[:-1]
+        sorted_values = sorted(scrambled, key=extract_ip_sort_key)
+        self.assertEqual(sorted_values, values)
+
+    def test_non_ip_natural_sort_handles_mixed_text_runs(self):
+        values = ["WS5_2", "WS5_10", "WS5_1"]
+        self.assertEqual(
+            sorted(values, key=extract_ip_sort_key),
+            ["WS5_1", "WS5_2", "WS5_10"],
+        )
+
+    def test_non_ip_natural_sort_is_case_insensitive(self):
+        # The previous key lowercased on the way in; the natural-sort
+        # key must preserve that so e.g. ``Pallet 1`` and ``PALLET 2``
+        # interleave by number rather than by case bucket.
+        values = ["Pallet 2", "PALLET 1", "pallet 3"]
+        self.assertEqual(
+            sorted(values, key=extract_ip_sort_key),
+            ["PALLET 1", "Pallet 2", "pallet 3"],
+        )
 
     def test_none_returns_one_prefix(self):
         key = extract_ip_sort_key(None)
@@ -238,6 +273,49 @@ class TestLanModeClearsKnownHostsAfterRun(unittest.TestCase):
         self.assertIn("clear_known_host_entry", src)
         # Must guard so Serial mode (no SSH, no host key) doesn't try it.
         self.assertIn('context.get("connection_mode") == "LAN"', src)
+
+
+class TestInventoryCompleteReflectsCollectedData(unittest.TestCase):
+    """Source-level guard against the v2.0.7.1-era bug where a failed
+    serial probe (no console prompt detected) still printed
+    "Report saved successfully as: <path>" to the output panel,
+    pointing at a path that was never actually written.
+
+    Root cause: ``run_inventory_worker`` emitted ``("inventory_complete",
+    True)`` unconditionally — even when ``self.outputs`` was empty —
+    which triggered ``start_export_worker``, which hit its empty-data
+    early-return and emitted ``("export_complete", {output_file: …})``,
+    which the GUI handler treats as success.
+
+    The fix branches both the LAN/Serial single-device path AND the
+    multi-IP scan path on ``bool(self.outputs)`` so a no-data run
+    finishes cleanly with a "no report saved" log line instead.
+    """
+
+    def test_inventory_worker_branches_on_self_outputs(self):
+        import inspect
+        from gui.gui4_0 import InventoryGUI
+        src = inspect.getsource(InventoryGUI.run_inventory_worker)
+        # Both completion arms must gate the True payload on whether
+        # anything actually landed in self.outputs.
+        self.assertEqual(
+            src.count("if self.outputs:"), 2,
+            "Both completion paths in run_inventory_worker must guard "
+            "the inventory_complete True payload on bool(self.outputs); "
+            "found {} guard(s).".format(src.count("if self.outputs:")),
+        )
+        # And the empty branch emits a clear log + inventory_complete=False
+        # rather than letting the export worker fake a success.
+        self.assertIn(
+            "No inventory data collected", src,
+            "Empty-output branch must surface a log line explaining "
+            "why no report was saved.",
+        )
+        self.assertIn(
+            '("inventory_complete", False)', src,
+            "Empty-output branch must emit inventory_complete=False so "
+            "the GUI calls finish_run() without claiming success.",
+        )
 
 
 if __name__ == "__main__":
