@@ -409,104 +409,87 @@ class Updater:
 
     @staticmethod
     def _spawn_post_exit_installer_watcher(installer_path: str) -> bool:
-        """Spawn a hidden PowerShell process that waits for THIS process
-        to exit, then launches *installer_path*.
+        """Spawn a hidden ``cmd.exe`` process that sleeps briefly, then
+        launches *installer_path*.
 
         Returns ``True`` on successful spawn (no guarantee about the
-        downstream installer launch — that happens after we've already
-        called ``os._exit``). Returns ``False`` if PowerShell couldn't
-        be located or the spawn itself failed.
+        downstream installer launch -- that happens after we've already
+        called ``os._exit``). Returns ``False`` if the spawn itself
+        failed.
 
-        The polling loop wakes every 200 ms — fast enough that the user
-        perceives the installer as launching "immediately" after ATLAS
-        closes, slow enough that idle CPU is negligible.
+        Why ``cmd.exe`` and not PowerShell anymore: the previous
+        implementation used ``powershell.exe -Command <inline script>``
+        to wait for ATLAS's PID to vanish and then launch the
+        installer. That stopped working in the field -- corporate
+        Defender / EDR configurations silently kill ``powershell.exe
+        -Command`` invocations (AMSI flags them), so ``Popen``
+        returned success but the watcher process died milliseconds
+        later, before writing even one diagnostic line. ``cmd.exe`` +
+        ``start`` is the standard Windows fire-and-forget idiom and
+        is almost never AV-flagged.
 
-        Diagnostics: every watcher writes a transcript to
-        ``%APPDATA%\\ATLAS\\logs\\update_watcher.log`` covering parent
-        PID, target installer, loop completion, and the outcome of the
-        launch attempt. Update-flow regressions previously went silent
-        because the watcher ran in a detached process with no stdio —
-        if a future operator reports "installer didn't launch", that
-        log file is the first place to look.
+        Mechanism:
+          1. ``echo`` a "watcher start" line to the diagnostic log so
+             we can confirm in the field whether the watcher actually
+             ran (the absence of this line proved AV was killing the
+             old PowerShell variant).
+          2. ``ping 127.0.0.1 -n 4 >nul`` -- ~3 second delay. ATLAS
+             exits in milliseconds, so a fixed delay is plenty in
+             place of the previous PID-poll loop.
+          3. ``start "" "<installer>"`` -- detached GUI launch via
+             ShellExecute. The empty ``""`` first arg is the window
+             title (mandatory for ``start`` when the second arg is
+             quoted).
+          4. ``echo`` a "launch issued" line so the log reflects how
+             far the watcher got.
 
-        Launch resilience: ``Start-Process`` is the primary launcher,
-        but if it throws (UAC denied, ShellExecute returns a bad code
-        in the post-parent-exit desktop state, etc.) the watcher falls
-        back to ``cmd /c start`` which uses a different ShellExecute
-        code path and has been more reliable in similar field reports.
+        Diagnostics live at ``%APPDATA%\\ATLAS\\logs\\update_watcher
+        .log`` so the operator (and Help → Open Logs Folder) can
+        reach them without having to know ``%TEMP%``.
         """
-        # Escape any single quotes in the path; PowerShell's
-        # single-quoted strings don't expand variables but do treat ''
-        # as an escaped single quote.
-        safe_path = installer_path.replace("'", "''")
-        # Watcher log lives next to ATLAS's own run logs so the
-        # operator (and Help → Open Logs Folder) can reach it without
-        # having to know %TEMP%.
+        # Watcher log lives next to ATLAS's own run logs.
         try:
             app_data = os.environ.get("APPDATA") or os.path.expanduser("~")
             log_dir = os.path.join(app_data, "ATLAS", "logs")
             os.makedirs(log_dir, exist_ok=True)
             log_path = os.path.join(log_dir, "update_watcher.log")
         except OSError:
-            # Last-resort: write next to the installer so we still get
-            # SOMETHING if APPDATA is unwritable.
+            # Last-resort: write next to the installer so we still
+            # get SOMETHING if APPDATA is unwritable.
             log_path = installer_path + ".watcher.log"
-        safe_log = log_path.replace("'", "''")
-        parent_pid = os.getpid()
-        ps_cmd = (
-            f"$ErrorActionPreference = 'Continue'; "
-            f"$log = '{safe_log}'; "
-            f"$id = {parent_pid}; "
-            f"$path = '{safe_path}'; "
-            f"function _w($m) {{ "
-            f"  $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss.fff'); "
-            f"  Add-Content -LiteralPath $log -Value \"[$ts] $m\" "
-            f"   -ErrorAction SilentlyContinue "
-            f"}}; "
-            f"_w \"watcher start: pid=$id installer=$path\"; "
-            f"while (Get-Process -Id $id -ErrorAction SilentlyContinue) "
-            f"{{ Start-Sleep -Milliseconds 200 }}; "
-            f"_w 'parent exited; launching installer'; "
-            # Primary launcher — Start-Process. Wrap in try/catch so
-            # we can record the actual exception text instead of
-            # losing it to a hidden detached process.
-            f"$launched = $false; "
-            f"try {{ "
-            f"  Start-Process -FilePath $path -ErrorAction Stop; "
-            f"  $launched = $true; "
-            f"  _w 'Start-Process OK' "
-            f"}} catch {{ "
-            f"  _w \"Start-Process FAILED: $($_.Exception.Message)\" "
-            f"}}; "
-            # Fallback: cmd.exe's `start` builtin uses a different
-            # ShellExecute path that's tended to survive desktop-state
-            # edge cases. Run unconditionally on Start-Process failure.
-            f"if (-not $launched) {{ "
-            f"  try {{ "
-            f"    & cmd.exe /c start \"\" \"$path\"; "
-            f"    _w 'cmd-start fallback issued' "
-            f"  }} catch {{ "
-            f"    _w \"cmd-start FAILED: $($_.Exception.Message)\" "
-            f"  }} "
-            f"}}; "
-            f"_w 'watcher exit'"
+
+        # Build the cmd.exe one-liner. Quoting rules:
+        #   * Each ``cmd`` redirection (``>>``) needs its output path
+        #     in quotes if it contains spaces.
+        #   * ``start "" "..."`` -- the empty ``""`` is the window
+        #     title (cmd's ``start`` builtin requires it when the
+        #     program path is quoted).
+        #   * ``&`` chains commands sequentially regardless of exit
+        #     code (vs ``&&`` which short-circuits on failure).
+        # We deliberately tolerate failures in each step (log write
+        # to read-only profile, ping unavailable, etc.) -- the
+        # installer launch itself is the only step that has to
+        # succeed.
+        cmd_line = (
+            f'echo [%date% %time%] watcher start: installer="{installer_path}"'
+            f' >> "{log_path}" 2>&1'
+            f' & ping -n 4 127.0.0.1 >nul'
+            f' & echo [%date% %time%] launching installer'
+            f' >> "{log_path}" 2>&1'
+            f' & start "" "{installer_path}"'
+            f' & echo [%date% %time%] start issued'
+            f' >> "{log_path}" 2>&1'
         )
         try:
             subprocess.Popen(
-                [
-                    "powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-WindowStyle", "Hidden",
-                    "-Command", ps_cmd,
-                ],
+                ["cmd.exe", "/c", cmd_line],
                 close_fds=True,
                 creationflags=_DETACHED,
             )
             return True
         except (OSError, FileNotFoundError) as e:
             logging.warning(
-                f"[UPDATE] Could not spawn PowerShell installer watcher: {e}. "
+                f"[UPDATE] Could not spawn cmd.exe installer watcher: {e}. "
                 f"Falling back to direct launch (NSIS UI may briefly "
                 f"overlap ATLAS)."
             )

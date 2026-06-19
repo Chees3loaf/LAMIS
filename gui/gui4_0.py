@@ -934,7 +934,22 @@ class InventoryGUI:
         # app session doesn't skip commands marked "already executed".
         script_interface.get_tracker().reset()
 
-
+        # Stale-state reset for EVERY run (LAN/Serial Direct Connection AND
+        # multi-host queue). The reset used to live only on the multi-host
+        # path further down, so a Direct Connection run would inherit
+        # ``failed_ips`` from the previous run -- the end-of-run popup then
+        # listed devices from prior runs (e.g. a Serial COM11 failure
+        # showing up after a successful LAN run on a different IP).
+        self.failed_ips = {}
+        self.pause_queue = []
+        # Drain stale credential responses left over from a prior run that
+        # was aborted mid-prompt -- otherwise the next prompt resolves
+        # immediately with the wrong answer.
+        while not self._creds_response_queue.empty():
+            try:
+                self._creds_response_queue.get_nowait()
+            except Empty:
+                break
 
         try:
             if context.get("connection_mode") in ("LAN", "Serial"):
@@ -988,14 +1003,10 @@ class InventoryGUI:
                     queue.put(("inventory_complete", False))
                 return
 
-            self.failed_ips = {}
-            self.pause_queue = []
-            # Drain stale credential responses left over from a prior run.
-            while not self._creds_response_queue.empty():
-                try:
-                    self._creds_response_queue.get_nowait()
-                except Empty:
-                    break
+            # ``failed_ips`` / ``pause_queue`` / credential-response queue
+            # are reset at the top of ``run_inventory_worker`` so both the
+            # Direct Connection path and this multi-host LAN-scan path
+            # start clean. No reset needed here.
             total_ips = len(context["ip_list"])
             reachable_ips = []
             reachable_lock = threading.Lock()

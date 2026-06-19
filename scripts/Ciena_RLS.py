@@ -469,10 +469,17 @@ class Script(BaseScript):
             else list(self._SERIAL_DEFAULT_BAUDS)
         )
 
+        # 10s probe timeout (was 2.0s): RLS R4 echoes the wake-CR within
+        # milliseconds but can take 3-6 seconds to actually render the
+        # prompt -- field-confirmed via captured-bytes logging showing
+        # ``hex=0D repr='\r'`` (clean CR echo, no garbage) followed by
+        # silence until the 2s deadline fired. A healthy device only
+        # pays the extra latency once because the probe locks onto the
+        # prompt the moment it arrives.
         ser = open_serial_with_baud_probe(
             self.serial_port,
             bauds,
-            timeout=2.0,
+            timeout=10.0,
             should_stop=self.should_stop,
         )
         if ser is None:
@@ -620,8 +627,22 @@ class Script(BaseScript):
 
     @staticmethod
     def _extract_hostname(output: str) -> str:
-        """Pick the device hostname out of a CLI-prompt line if present."""
-        m = re.search(r'^([A-Za-z0-9][\w.\-]*)[#>]\s', output, re.MULTILINE)
+        """Pick the device hostname out of a CLI-prompt line if present.
+
+        Matches both the leading command-echo prompt
+        (``hostname# show shelf``) AND the trailing prompt
+        (``hostname#`` at end of buffer with no trailing whitespace)
+        so the TID is recoverable even when the serial capture
+        stripped the leading echo line.
+        """
+        # ``(?:\s|$)`` -- whitespace OR end-of-line. ``re.MULTILINE``
+        # makes ``$`` match line boundaries, so a bare
+        # ``hostname#`` at end-of-buffer still anchors.
+        m = re.search(
+            r'^([A-Za-z0-9][\w.\-]*)[#>](?:\s|$)',
+            output,
+            re.MULTILINE,
+        )
         return m.group(1) if m else ""
 
     @classmethod
@@ -705,12 +726,74 @@ class Script(BaseScript):
             serial_number = grab("serial-number")
             ui_name = grab("ui-name")
             product = grab("product")
+            # ``node-name`` is present on some RLS firmware builds even
+            # when the CLI prompt didn't carry a TID (early boot,
+            # partial provisioning, factory-default reset). Treat it
+            # as a higher-confidence identifier than the operator-set
+            # ``ui-name`` because it's the device's own hostname.
+            node_name = grab("node-name")
 
+            # Some firmwares populate ``ui-name`` with just the device
+            # model (e.g. ``ui-name: 6500-R4`` on a chassis where
+            # ``shelf-type: 6500-R4 8-Slot`` and ``c-type: 6500-R4
+            # 8-Slot Shelf Assembly``). That's not a real operator-set
+            # alias -- it's a default echoed back at us. Treat it as
+            # "no name" so the priority chain falls through to the
+            # serial-based form (``6500-R4_NNTMRT...``) which actually
+            # disambiguates devices in a multi-chassis workbook.
+            def _ui_name_is_just_device_model(value: str) -> bool:
+                if not value:
+                    return False
+                v = value.strip().lower()
+                if not v:
+                    return False
+                for candidate in (shelf_type, ctype, product):
+                    if candidate and v in candidate.lower():
+                        return True
+                return False
+            ui_name_is_model = _ui_name_is_just_device_model(ui_name)
+
+            # ``shelf-type: 6500-R4 8-Slot`` -- use just the first
+            # token as the model identifier for the fallback name.
+            # Keeps tab names short (``6500-R4_NNTMRT...``) and avoids
+            # spaces, which Excel's sheet-name sanitizer would
+            # otherwise have to scrub.
+            model_token = ""
+            if shelf_type:
+                model_token = shelf_type.split()[0]
+            elif ctype:
+                model_token = ctype.split()[0]
+
+            # Some chassis report ``name: 0`` for the shelf number --
+            # that's not a useful identifier (multiple un-provisioned
+            # shelves would all collapse onto a single ``Shelf 0``
+            # tab). Treat it the same as missing.
+            shelf_number_is_useful = bool(shelf_number) and shelf_number.strip() != "0"
+
+            # Priority chain for the user-facing system name -- each
+            # fall-through was added to fix a specific field case:
+            #
+            # 1. ``hostname`` (from the CLI prompt) -- normal case.
+            # 2. ``node-name`` -- partially provisioned device whose
+            #    prompt lost the hostname but whose ``show shelf``
+            #    block still carries it.
+            # 3. ``ui-name`` -- operator-set shelf alias. Skipped when
+            #    it's just the device model echoed back (see above).
+            # 4. ``<model>_<serial>`` -- the device's hardware identity.
+            #    Far better than ``Shelf 0`` / ``Shelf 1``, which
+            #    collapsed every un-named RLS onto a single tab and
+            #    made multi-device packing slips lose data.
+            # 5. ``Shelf <n>`` -- bay index when nonzero.
+            # 6. ``Unknown`` -- truly anonymous.
             if hostname:
                 system_name = hostname
-            elif ui_name:
+            elif node_name:
+                system_name = node_name
+            elif ui_name and not ui_name_is_model:
                 system_name = ui_name
-            elif shelf_number:
+            elif model_token and serial_number:
+                system_name = f"{model_token}_{serial_number}"
+            elif shelf_number_is_useful:
                 system_name = f"Shelf {shelf_number}"
             else:
                 system_name = "Unknown"

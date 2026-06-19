@@ -346,10 +346,14 @@ class Script(BaseScript):
             else list(self._SERIAL_DEFAULT_BAUDS)
         )
 
+        # 10s probe timeout (was 2.0s) -- WS5 console behaves the same
+        # as RLS R4: echoes the wake-CR fast but takes a few seconds
+        # to print the actual prompt. The upgrade flow's
+        # ``_SERIAL_PROMPT_TIMEOUT`` is already 10s; this matches.
         ser = open_serial_with_baud_probe(
             self.serial_port,
             bauds,
-            timeout=2.0,
+            timeout=10.0,
             should_stop=self.should_stop,
         )
         if ser is None:

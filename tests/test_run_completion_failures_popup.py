@@ -118,5 +118,69 @@ class TestFailedDevicesPopupShape(unittest.TestCase):
         self.assertIn("except Exception", self.popup_src)
 
 
+class TestFailedIpsResetAtRunStart(unittest.TestCase):
+    """``self.failed_ips`` must be cleared at the START of every run --
+    BOTH the single-host Direct Connection path (LAN / Serial) and the
+    multi-host LAN-scan path.
+
+    Field bug this guards: a Serial Direct Connection run failed
+    on COM11, leaving ``failed_ips["COM11"]`` in the dict. The next
+    run -- LAN Direct Connection on 10.0.0.1, completed successfully
+    via manual credentials -- still triggered the end-of-run failure
+    popup, but the popup listed COM11 from the previous run (and
+    that run's serial-probe error message), not anything from the
+    current LAN attempt.
+
+    Root cause: the reset used to live inside the multi-host branch
+    of ``run_inventory_worker``, after the single-host path had
+    already ``return``ed. Moving it ABOVE the branch fixes both.
+    """
+
+    def setUp(self):
+        from gui.gui4_0 import InventoryGUI
+        self.src = inspect.getsource(InventoryGUI.run_inventory_worker)
+
+    def test_reset_happens_before_connection_mode_branch(self):
+        # The contract: by the time we check ``connection_mode`` to
+        # split into Direct vs multi-host, ``failed_ips`` is already
+        # empty. Pin this at source level.
+        reset_idx = self.src.find("self.failed_ips = {}")
+        branch_idx = self.src.find(
+            'context.get("connection_mode") in ("LAN", "Serial")'
+        )
+        self.assertGreater(reset_idx, -1, "failed_ips reset missing")
+        self.assertGreater(branch_idx, -1, "connection_mode branch missing")
+        self.assertLess(
+            reset_idx, branch_idx,
+            "failed_ips must be reset BEFORE the Direct-Connection /"
+            " multi-host branch -- otherwise a Direct Connection run"
+            " inherits the previous run's failed_ips dict and the"
+            " end-of-run popup lists stale failures from earlier runs.",
+        )
+
+    def test_pause_queue_resets_at_same_point(self):
+        # ``pause_queue`` has the same stale-state problem as
+        # ``failed_ips`` and must reset alongside it (a parked
+        # credential-prompt entry from a prior run would otherwise
+        # re-trigger ``_drain_pause_queue`` on the next run).
+        reset_idx = self.src.find("self.pause_queue = []")
+        branch_idx = self.src.find(
+            'context.get("connection_mode") in ("LAN", "Serial")'
+        )
+        self.assertGreater(reset_idx, -1, "pause_queue reset missing")
+        self.assertLess(reset_idx, branch_idx)
+
+    def test_reset_appears_exactly_once_in_run_worker(self):
+        # The old code reset failed_ips inside the multi-host branch.
+        # After the fix there should be exactly one reset, near the
+        # top -- not duplicated. A duplicate reset is harmless but
+        # would be a refactor smell.
+        self.assertEqual(
+            self.src.count("self.failed_ips = {}"), 1,
+            "expected exactly one 'self.failed_ips = {}' line --"
+            " the previous in-branch reset should have been removed",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

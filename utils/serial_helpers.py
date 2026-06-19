@@ -182,13 +182,20 @@ def open_serial_with_baud_probe(
     when every candidate baud rate is silent or garbled. The caller is
     responsible for closing the returned object.
 
-    The probe sends a single CR to wake the console, reads briefly, and
-    looks for any of: Login:/Username:/Password:/<host>#/<host>>. A
-    wrong baud rate typically returns high-bit garbage or nothing at
-    all — neither matches the prompt patterns so we move on. Used by
-    devices where the operator may not know the console speed in
-    advance (RLS lab gear ships at 9600 OR 115200 depending on the
-    flash image).
+    The probe sends a CRLF (a real ``ENTER`` keypress) to wake the
+    console, reads briefly, and looks for any of:
+    Login:/Username:/Password:/<host>#/<host>>. A wrong baud rate
+    typically returns high-bit garbage or nothing at all -- neither
+    matches the prompt patterns so we move on. Used by devices where
+    the operator may not know the console speed in advance (RLS lab
+    gear ships at 9600 OR 115200 depending on the flash image).
+
+    Field note: an RLS R4 chassis kept echoing our bare ``\\r`` back
+    but never rendering a prompt, even with a 10s timeout. Switching
+    the wake byte to ``\\r\\n`` (matches what SecureCRT/PuTTY send
+    when the operator hits Enter) made the prompt appear within a
+    second. CR alone is interpreted by some CLI engines as "no commit
+    yet" -- the LF is what commits the line and triggers the prompt.
     """
     import serial  # local import keeps the module importable on systems
                    # without pyserial when only the regexes are needed
@@ -206,7 +213,11 @@ def open_serial_with_baud_probe(
         except Exception:
             pass
         try:
-            ser.write(b"\r")
+            # ``\r\n`` matches the byte sequence SecureCRT/PuTTY send
+            # when the operator hits Enter. Some Ciena RLS firmwares
+            # treat a bare ``\r`` as "carriage return, no commit" and
+            # only render the prompt when they see the LF.
+            ser.write(b"\r\n")
         except Exception:
             try:
                 ser.close()
@@ -262,8 +273,11 @@ def serial_login(
         ser.reset_input_buffer()
     except Exception:
         pass
-    ser.write(b"\r")
-    logger.debug("[SERIAL][login] wake-up CR sent; waiting for prompt")
+    # Send a full ENTER (CRLF) -- some Ciena CLI engines need the LF
+    # to commit; bare CR gets echoed but doesn't render the prompt.
+    # Matches the wake sequence used by ``open_serial_with_baud_probe``.
+    ser.write(b"\r\n")
+    logger.debug("[SERIAL][login] wake-up CRLF sent; waiting for prompt")
     buf, matched = _read_until(ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop)
     tail = buf[-512:]
 

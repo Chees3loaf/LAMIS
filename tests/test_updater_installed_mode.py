@@ -190,13 +190,14 @@ class TestApplyUpdateInstalled(unittest.TestCase):
                 os.unlink(fake_path)
 
     def test_watcher_writes_diagnostic_log(self):
-        """The first cut of the watcher had no logging — when it
-        failed silently in the field (v2.0.7.0 release), there was no
-        trail to follow. Every watcher now logs to
-        ``%APPDATA%\\ATLAS\\logs\\update_watcher.log`` covering parent
-        PID, target installer, loop exit, and Start-Process outcome.
-        Source-level check because the watcher runs detached after
-        os._exit; we can't hook its stdout in a real test."""
+        """The watcher writes a diagnostic transcript to
+        ``%APPDATA%\\ATLAS\\logs\\update_watcher.log`` so a future
+        "installer didn't launch" report has somewhere to look. The
+        previous PowerShell-based watcher version started writing to
+        the log but was silently killed by corporate Defender / EDR
+        AMSI hooks before the first line landed. The cmd.exe-based
+        replacement is essentially never AV-flagged and writes the
+        markers via ``echo ... >> "<log>"``."""
         up = _make_installed_updater("2.0.0")
         up._latest_release = {
             "tag_name": "v2.0.1", "body": "",
@@ -218,20 +219,21 @@ class TestApplyUpdateInstalled(unittest.TestCase):
             cmd_arg = " ".join(popen.call_args[0][0])
             # Log path is constructed in the watcher itself.
             self.assertIn("update_watcher.log", cmd_arg)
-            # Diagnostic transcript covers all four key transitions.
+            # Diagnostic markers cover each transition.
             self.assertIn("watcher start", cmd_arg)
-            self.assertIn("parent exited", cmd_arg)
-            self.assertIn("Start-Process OK", cmd_arg)
-            self.assertIn("watcher exit", cmd_arg)
+            self.assertIn("launching installer", cmd_arg)
+            self.assertIn("start issued", cmd_arg)
         finally:
             if os.path.exists(fake_path):
                 os.unlink(fake_path)
 
-    def test_watcher_includes_cmd_start_fallback(self):
-        """When Start-Process throws in the post-parent-exit desktop
-        state, the watcher falls back to ``cmd /c start "" "<path>"``
-        — different ShellExecute code path that's tended to be more
-        reliable in equivalent field reports. Source-level check."""
+    def test_watcher_uses_ping_as_delay_not_powershell(self):
+        """The previous PowerShell watcher was silently killed by AV/EDR
+        AMSI hooks in the field (Popen returned success but the
+        process never wrote its first log line). The cmd.exe-based
+        replacement uses ``ping`` as a sleep and the ``start``
+        builtin to launch the installer -- both are whitelisted on
+        virtually every Windows machine. Pin both pieces."""
         up = _make_installed_updater("2.0.0")
         up._latest_release = {
             "tag_name": "v2.0.1", "body": "",
@@ -251,10 +253,18 @@ class TestApplyUpdateInstalled(unittest.TestCase):
                  patch.object(upd.subprocess, "Popen") as popen:
                 up.apply_update()
             cmd_arg = " ".join(popen.call_args[0][0])
-            # The cmd-start fallback runs inside a `try/catch` guard
-            # gated on Start-Process having failed.
-            self.assertIn("cmd.exe /c start", cmd_arg)
-            self.assertIn("-not $launched", cmd_arg)
+            # ping-as-sleep (a Windows shell standard for delayed-
+            # launch fire-and-forget) -- ``-n 4`` => ~3 seconds.
+            self.assertIn("ping", cmd_arg)
+            self.assertIn("127.0.0.1", cmd_arg)
+            # ``start "" "<installer>"`` -- the empty ``""`` is the
+            # window title; cmd's start builtin requires it when the
+            # program path is quoted.
+            self.assertIn('start ""', cmd_arg)
+            # Explicit "no PowerShell" check -- catches a refactor
+            # that accidentally re-introduces it.
+            self.assertNotIn("powershell", cmd_arg.lower())
+            self.assertNotIn("Start-Process", cmd_arg)
         finally:
             if os.path.exists(fake_path):
                 os.unlink(fake_path)
@@ -262,9 +272,9 @@ class TestApplyUpdateInstalled(unittest.TestCase):
     def test_approved_spawns_watcher_not_direct_installer(self):
         """The installer must NOT be launched directly. Operator
         previously reported the NSIS UI popping up over a still-visible
-        ATLAS window. The fix queues a hidden PowerShell watcher that
-        starts the installer ONLY after this process exits, so Popen's
-        first arg is powershell.exe, not the installer path."""
+        ATLAS window. The fix queues a hidden ``cmd.exe`` watcher that
+        starts the installer ONLY after a brief delay, so Popen's
+        first arg is cmd.exe, not the installer path."""
         up = _make_installed_updater("2.0.0")
         up._latest_release = {
             "tag_name": "v2.0.1",
@@ -289,24 +299,23 @@ class TestApplyUpdateInstalled(unittest.TestCase):
             self.assertIn("queued", msg.lower())
             popen.assert_called_once()
             launched_args = popen.call_args[0][0]
-            # The first arg is now powershell.exe, NOT the installer path.
-            self.assertEqual(launched_args[0].lower(), "powershell.exe")
-            # The installer path must still appear inside the -Command arg.
+            # Now cmd.exe, not powershell.exe.
+            self.assertEqual(launched_args[0].lower(), "cmd.exe")
+            self.assertEqual(launched_args[1], "/c")
+            # The installer path must still appear inside the cmd line.
             cmd_arg = " ".join(launched_args)
             self.assertIn(fake_path, cmd_arg)
-            # And the watcher must wait for OUR pid before launching.
-            self.assertIn(str(os.getpid()), cmd_arg)
-            self.assertIn("Get-Process", cmd_arg)
-            self.assertIn("Start-Process", cmd_arg)
+            # And the watcher must launch via the ``start`` builtin.
+            self.assertIn("start", cmd_arg)
         finally:
             if os.path.exists(fake_path):
                 os.unlink(fake_path)
 
     def test_watcher_failure_falls_back_to_direct_launch(self):
-        """If PowerShell can't be spawned (policy / missing), the
-        installer must still get launched directly rather than the
-        update silently aborting. The fallback is the legacy direct
-        Popen path."""
+        """If the cmd.exe watcher can't be spawned (file system
+        unavailable, policy block, etc.), the installer must still
+        get launched directly rather than the update silently
+        aborting. The fallback is the legacy direct Popen path."""
         up = _make_installed_updater("2.0.0")
         up._latest_release = {
             "tag_name": "v2.0.1",
