@@ -12,7 +12,7 @@ and easier to customize across different environments.
 # Keep this in lockstep with ATLAS.nsi `ProductVersion` so the installer and
 # the running app agree on what's currently installed. The updater compares
 # this against the latest GitHub release tag.
-APP_VERSION = "2.0.8.1"
+APP_VERSION = "2.0.9.0"
 
 # GitHub release feed used by utils.update.Updater when running as an
 # installed (frozen) build. Overridable via the LAMIS_UPDATE_REPO env var.
@@ -125,6 +125,62 @@ INVENTORY_DB_FILE = "data/network_inventory.db"
 
 # Part number search settings
 PART_NUMBER_PREFIX_LENGTH = 10      # Use first N characters of part number for DB lookup
+
+# ============================================================================
+# AI DOC ASSISTANT (Phase 1: cited Q&A over vendor docs)
+# ============================================================================
+
+# Master switch. When False, ATLAS behaves exactly as before and never
+# imports the optional AI dependencies (openai, pypdf). Flip to True once
+# a key/endpoint is configured.
+AI_ASSISTANT_ENABLED = True
+
+# Provider endpoint + credential.
+#   - Personal/prototyping: leave AI_BASE_URL = None and set OPENAI_API_KEY
+#     in the environment so the key never lives in the repo or the binary.
+#   - Company rollout: point AI_BASE_URL at the server-side proxy that holds
+#     the real key; the field laptops then carry no secret at all.
+# Both are overridable at runtime via the LAMIS_AI_BASE_URL / OPENAI_API_KEY
+# environment variables (see utils/ai/provider.py).
+AI_BASE_URL = None
+
+# Models. gpt-4o-mini is the cost/quality sweet spot for grounded RAG — the
+# model only has to read the retrieved chunks, not know the docs.
+AI_CHAT_MODEL = "gpt-4o-mini"
+AI_EMBED_MODEL = "text-embedding-3-small"
+AI_EMBED_DIM = 1536  # dimensionality of text-embedding-3-small
+
+# Retrieval / chunking knobs.
+AI_CHUNK_WORDS = 220          # ~target words per chunk
+AI_CHUNK_OVERLAP_WORDS = 40   # overlap so a procedure split across a boundary survives
+AI_TOP_K = 6                  # chunks retrieved per question (ranked seeds)
+# Neighbor expansion: each retrieved chunk is widened by this many adjacent
+# chunks on each side (same doc) before being shown to the model. A single
+# ~220-word chunk often holds only part of a multi-command procedure; pulling
+# neighbors keeps prerequisite/setup steps (e.g. OSPF instance creation)
+# together with the steps that reference them. 0 disables expansion.
+AI_CONTEXT_WINDOW = 2
+# Hybrid retrieval: in addition to the vector top_k, force in up to this many
+# chunks that contain an exact salient term from the question (e.g. a
+# hyphenated token like 'network-type', an acronym like 'OSPF', a part/version
+# string). Vector similarity alone can rank an authoritative command chunk just
+# below the cut; an exact-keyword guarantee surfaces it. 0 disables.
+AI_KEYWORD_K = 8
+# HyDE (Hypothetical Document Embeddings): before retrieval, draft a throwaway
+# hypothetical answer and embed THAT alongside the question. A config/command
+# block is semantically unlike a prose question, so plain retrieval misses it;
+# a hypothetical that contains command-like text matches the real command pages.
+# The hypothetical is used ONLY to steer retrieval and is never shown, so its
+# syntax doesn't need to be correct. Costs one extra cheap LLM call per query.
+AI_HYDE_ENABLED = True
+# Fixed seed for the chat calls (HyDE draft + answer). With temperature 0 this
+# makes the same question reproduce the same retrieval and answer run-to-run
+# (best-effort — OpenAI doesn't fully guarantee seeded determinism, but it
+# removes the bulk of the variance). Set to None to allow run-to-run variety.
+AI_SEED = 7
+
+# Doc index DB lives beside the inventory DB under %APPDATA%\ATLAS.
+AI_INDEX_DB_FILE = "doc_index.db"
 
 # ============================================================================
 # LOGGING SETTINGS

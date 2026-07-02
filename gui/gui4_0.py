@@ -41,6 +41,7 @@ from gui.packing_slip_frame import PackingSlipFrame
 from gui.file_processing_frame import FileProcessingFrame
 from gui.provision_frame import ProvisionFrame
 from gui.software_upgrade_frame import SoftwareUpgradeFrame
+from gui.ai_assistant_frame import AIAssistantFrame
 
 command_tracker = script_interface.CommandTracker()
 db_cache = script_interface.get_cache()
@@ -150,7 +151,7 @@ class InventoryGUI:
         if app_version:
             title += f"  v{app_version}"
         self.root.title(title)
-        self.root.geometry('900x750')
+        self.root.geometry('1000x750')
 
         # Top frame: Mode selector with a Help menubutton anchored to the right.
         mode_frame = ttk.LabelFrame(self.root, text="Select Mode")
@@ -167,7 +168,16 @@ class InventoryGUI:
         tk.Radiobutton(mode_frame, text="File Processing", variable=self.current_mode, value="raw", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(mode_frame, text="Provisioning", variable=self.current_mode, value="provision", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
         tk.Radiobutton(mode_frame, text="Software Upgrades", variable=self.current_mode, value="software_upgrade", command=self.switch_mode).pack(side=tk.LEFT, padx=10)
-        
+        # Optional AI doc assistant — only surfaced when enabled in config.
+        # Keep a handle so the launch-time key check can gray it out when no
+        # valid API key is available.
+        self.ai_assistant_radio = None
+        if getattr(config, "AI_ASSISTANT_ENABLED", False):
+            self.ai_assistant_radio = tk.Radiobutton(
+                mode_frame, text="Doc Search", variable=self.current_mode,
+                value="ai_assistant", command=self.switch_mode)
+            self.ai_assistant_radio.pack(side=tk.LEFT, padx=10)
+
         # Container frame for all mode frames
         self.content_frame = ttk.Frame(self.root)
         self.content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
@@ -180,6 +190,10 @@ class InventoryGUI:
         self.raw_frame = self.file_processing_frame.raw_frame
         self.provision_frame = ProvisionFrame(self.content_frame, self)
         self.software_upgrade_frame = SoftwareUpgradeFrame(self.content_frame, self)
+        self.ai_assistant_frame = (
+            AIAssistantFrame(self.content_frame, self)
+            if getattr(config, "AI_ASSISTANT_ENABLED", False) else None
+        )
 
         # Show the initial frame
         self.switch_mode()
@@ -190,6 +204,12 @@ class InventoryGUI:
         # sees ATLAS load before being interrupted.
         if self.update_available:
             self.root.after(750, self._on_check_for_updates_clicked)
+
+        # Validate the AI assistant's API key shortly after launch (alongside
+        # the update check). Runs in a background thread so startup isn't
+        # blocked; disables the Doc Search tab if no valid key is provided.
+        if getattr(config, "AI_ASSISTANT_ENABLED", False) and self.ai_assistant_frame is not None:
+            self.root.after(1200, self._validate_api_key_async)
 
     # ------------------------------------------------------------------
     # Menu bar / Help
@@ -246,6 +266,12 @@ class InventoryGUI:
         help_menu.add_command(
             label="Open Logs Folder", command=self._open_logs_folder,
         )
+        # Manual API-key entry for the AI Doc Search. Stored in the Windows
+        # Credential Manager (per-user), never in the program files.
+        if getattr(config, "AI_ASSISTANT_ENABLED", False):
+            help_menu.add_command(
+                label="Set OpenAI API Key…", command=self._prompt_set_api_key,
+            )
         help_menu.add_separator()
         help_menu.add_command(label="About ATLAS", command=self._show_about)
 
@@ -253,6 +279,96 @@ class InventoryGUI:
         # Pack to the right edge of the row; mode radio buttons fill in
         # from the left after this returns.
         self._help_button.pack(side=tk.RIGHT, padx=10)
+
+    # ------------------------------------------------------------------
+    # AI Doc Search — API key validation and entry
+    # ------------------------------------------------------------------
+    def _validate_api_key_async(self) -> None:
+        """Check the AI assistant's API key in a background thread and update
+        the UI (enable / prompt / disable) on the main thread."""
+        if getattr(self, "ai_assistant_frame", None) is None:
+            return
+
+        def _worker() -> None:
+            try:
+                from utils.ai.provider import check_api_key
+                status = check_api_key()
+            except Exception:
+                status = "unreachable"
+            self.root.after(0, lambda: self._on_api_key_status(status))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_api_key_status(self, status: str) -> None:
+        """React to the launch-time key check. 'ok'/'unreachable' leave the tab
+        enabled (don't punish a transient offline state); 'no_key'/'invalid'
+        prompt for a key and disable the tab if none is provided."""
+        if status in ("ok", "unreachable"):
+            self._set_ai_enabled(True)
+            return
+        reason = ("No OpenAI API key is set for Doc Search."
+                  if status == "no_key"
+                  else "The stored OpenAI API key was rejected (invalid or expired).")
+        if not self._prompt_set_api_key(reason=reason):
+            self._set_ai_enabled(False)
+
+    def _prompt_set_api_key(self, reason: str = "") -> bool:
+        """Prompt for an API key, store it in the Windows Credential Manager,
+        and re-validate. Returns True if a usable key is now stored. Also used
+        as the Help-menu 'Set OpenAI API Key…' command."""
+        from tkinter import simpledialog
+        prompt = (reason + "\n\n" if reason else "") + (
+            "Paste your OpenAI API key. It is stored in the Windows Credential\n"
+            "Manager for this user only — never in the ATLAS program files."
+        )
+        key = simpledialog.askstring("Set OpenAI API Key", prompt,
+                                     show="*", parent=self.root)
+        if not key:
+            return False
+        try:
+            from utils.ai import keystore
+            from utils.ai.provider import check_api_key
+            keystore.store_key(key)
+        except Exception as exc:
+            messagebox.showerror("Could not save key", str(exc), parent=self.root)
+            return False
+        status = check_api_key()
+        if status == "invalid":
+            messagebox.showerror(
+                "Invalid Key",
+                "OpenAI rejected that key. Doc Search stays disabled until "
+                "a valid key is entered.", parent=self.root)
+            self._set_ai_enabled(False)
+            return False
+        if status == "unreachable":
+            messagebox.showwarning(
+                "Key saved (unverified)",
+                "Key saved, but it couldn't be verified right now (offline or API "
+                "unreachable). It will be used when you ask a question.",
+                parent=self.root)
+        else:
+            messagebox.showinfo(
+                "API Key Saved",
+                "Key saved and verified. Doc Search is enabled.",
+                parent=self.root)
+        self._set_ai_enabled(True)
+        return True
+
+    def _set_ai_enabled(self, enabled: bool) -> None:
+        """Enable or gray out the Doc Search tab (radio button + frame). When
+        disabling while it's the active tab, bounce back to Inventory."""
+        radio = getattr(self, "ai_assistant_radio", None)
+        if radio is not None:
+            try:
+                radio.config(state=(tk.NORMAL if enabled else tk.DISABLED))
+            except tk.TclError:
+                pass
+        frame = getattr(self, "ai_assistant_frame", None)
+        if frame is not None and hasattr(frame, "set_enabled"):
+            frame.set_enabled(enabled)
+        if not enabled and self.current_mode.get() == "ai_assistant":
+            self.current_mode.set("inventory")
+            self.switch_mode()
 
     def _set_update_indicator(self, available: bool) -> None:
         """Toggle the bullet markers on the Help button label and dropdown
@@ -538,6 +654,8 @@ class InventoryGUI:
             self.provision_frame.pack_forget()
         if getattr(self, "software_upgrade_frame", None):
             self.software_upgrade_frame.pack_forget()
+        if getattr(self, "ai_assistant_frame", None):
+            self.ai_assistant_frame.pack_forget()
 
         if mode == "inventory":
             self.inventory_frame.pack(fill=tk.BOTH, expand=True)
@@ -551,6 +669,8 @@ class InventoryGUI:
             self.provision_frame.pack(fill=tk.BOTH, expand=True)
         elif mode == "software_upgrade":
             self.software_upgrade_frame.pack(fill=tk.BOTH, expand=True)
+        elif mode == "ai_assistant" and getattr(self, "ai_assistant_frame", None):
+            self.ai_assistant_frame.pack(fill=tk.BOTH, expand=True)
 
     def update_status(self, message: str) -> None:
         self.inventory_frame.update_status(message)

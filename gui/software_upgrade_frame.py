@@ -1,24 +1,28 @@
 """
 gui/software_upgrade_frame.py — "Software Upgrades" mode.
 
-Stages a local folder of upgrade artifacts so a target device (Ciena RLS or
-Nokia PSI) can pull them over HTTP. Workflow:
+Stages a local folder of upgrade artifacts so a target device (Ciena
+RLS / Waveserver 5, Nokia G42 / PSI) can pull them over HTTP (PSI is
+the odd one out — it uses FTP via the on-device client). Workflow:
 
   1. User browses to the folder holding the software bundle.
-  2. User picks a device type (Ciena RLS / Nokia PSI).
-  3. User enters the IP the local PC NIC should be set to (so the device on
-     the other end of the direct-connect link is on the same subnet).
-  4. "Apply Static IP" runs `netsh interface ipv4 set address …` — auto-
-     elevates via UAC if ATLAS is not already running as admin.
-  5. "Start Server" launches an in-process ThreadingHTTPServer on
-     :8000 rooted at the selected folder. The custom handler streams files
-     in chunks and pushes byte-progress to the frame's progress bar.
-  6. "Stop Server" tears the listener down. "Restore DHCP" puts the NIC
-     back to dynamic.
+  2. User picks a device type from the dropdown — the matching
+     PC-side service IP / mask are auto-populated into the form.
+  3. User clicks "Run Upgrade". The worker thread then:
+       a. Applies the static IP via netsh (auto-elevates via UAC if
+          ATLAS is not already running as admin).
+       b. Starts an in-process ThreadingHTTPServer on :8000 rooted at
+          the selected folder, unless one is already running. The
+          custom handler streams files in chunks and pushes byte-
+          progress to the frame's progress bar. (PSI skips this step;
+          its script uses FTP.)
+       c. Runs the device-specific upgrade script.
+       d. In a finally block, stops the server (if it started one)
+          and restores DHCP on the NIC (if it applied the static IP).
 
-The actual per-device upgrade command sequence is not implemented in this
-first pass — only the HTTP staging side. Device type is captured for
-future wiring.
+The manual buttons that used to drive steps 3a / 3b / 3d directly
+are gone -- the operator only sees "Run Upgrade" and the status
+labels.
 """
 from __future__ import annotations
 
@@ -49,15 +53,6 @@ try:
 except Exception:  # pragma: no cover — pyserial-extras absent in some envs
     _serial_list_ports = None
 
-try:
-    import win32event
-    import win32process
-    import win32con
-    from win32com.shell.shell import ShellExecuteEx
-    from win32com.shell import shellcon
-    _HAS_PYWIN32 = True
-except ImportError:
-    _HAS_PYWIN32 = False
 
 
 # ── Constants ───────────────────────────────────────────────────────────────
@@ -81,6 +76,11 @@ _G42_NET = {"pc_ip": "169.254.0.101", "device_ip": "169.254.0.1"}
 # Nokia PSI service network — same /24, PC at .101 and PSI management at .1.
 _PSI_NET = {"pc_ip": "172.16.0.101", "device_ip": "172.16.0.1"}
 
+# Nokia PSS service network — same service /24 as the PSI (PC at .101,
+# PSS management at .1). The PSS flow is identical to the PSI's except the
+# upgrade script omits `config software server port 8000`.
+_PSS_NET = {"pc_ip": "172.16.0.101", "device_ip": "172.16.0.1"}
+
 # Ciena Waveserver 5 — provisioned via serial first (no factory mgmt IP),
 # then SSH'd to at the address WE set. /22 subnet because that's what the
 # operator's lab playbook uses; both values flow into the upgrade script.
@@ -100,6 +100,7 @@ _SUPPORTED_UPGRADES = [
     "Ciena Waveserver 5",
     "Nokia G42",
     "Nokia PSI",
+    "Nokia PSS",
 ]
 
 # Windows subprocess flag to suppress the brief console flash from spawning
@@ -121,20 +122,10 @@ def _is_admin() -> bool:
 def _run_netsh(args: list[str], timeout: float = 30.0) -> Tuple[bool, str]:
     """Run `netsh <args>`. If ATLAS isn't elevated, prompt UAC via
     ShellExecuteEx and wait for the elevated child to exit.
-
-    Returns ``(success, message)``. The elevated path captures
-    stdout+stderr via a cmd.exe redirect into a temp file so the
-    operator sees netsh's actual error message (e.g. "The system
-    cannot find the file specified" when the NIC name doesn't match
-    a real interface) instead of a bare ``netsh exit code 1``.
     """
     if os.name != "nt":
         return False, "netsh is only available on Windows."
 
-    # Log the exact command we're about to run -- if netsh rejects the
-    # invocation, the operator's first question will be "what did you
-    # actually pass to it?", and this answers it without needing to
-    # repro under a debugger.
     logging.info(
         "[NETSH] running: netsh %s",
         subprocess.list2cmdline(args),
@@ -156,18 +147,21 @@ def _run_netsh(args: list[str], timeout: float = 30.0) -> Tuple[bool, str]:
         except Exception as exc:
             return False, f"netsh failed: {exc}"
 
-    if not _HAS_PYWIN32:
+    # Optional pywin32 path for UAC elevation when not already admin
+    try:
+        import win32event
+        import win32process
+        import win32con
+        from win32com.shell.shell import ShellExecuteEx  # type: ignore[import-not-found]
+        from win32com.shell import shellcon  # type: ignore[import-not-found]
+    except ImportError:
         return False, (
             "Setting a static IP requires administrator privileges. "
             "Re-launch ATLAS as administrator, or install pywin32 to enable "
             "auto-elevation."
         )
 
-    # ShellExecuteEx-launched processes don't inherit our stdout/stderr
-    # pipes, so a direct ``netsh.exe`` invocation gives us nothing to
-    # display beyond the exit code. Workaround: launch ``cmd.exe /c
-    # netsh <args> > <tmp> 2>&1`` so the elevated cmd writes both
-    # streams to a file we can read after the child exits.
+    # Import only when needed (avoids Pylance errors)
     tmp_log_path = ""
     try:
         with tempfile.NamedTemporaryFile(
@@ -176,8 +170,6 @@ def _run_netsh(args: list[str], timeout: float = 30.0) -> Tuple[bool, str]:
         ) as _tmp:
             tmp_log_path = _tmp.name
     except Exception as exc:
-        # Fall through to no-capture path if /tmp is borked -- better
-        # than refusing to elevate at all.
         logging.warning(f"[NETSH] could not create capture tempfile: {exc}")
 
     try:
@@ -222,14 +214,9 @@ def _run_netsh(args: list[str], timeout: float = 30.0) -> Tuple[bool, str]:
 
         if rc == 0:
             return True, captured or "OK"
-        # Non-zero exit: surface whatever netsh printed. If we have
-        # nothing (no capture / empty output), keep the bare code so
-        # at least the operator knows the elevated child ran.
         msg = captured or f"netsh exit code {rc}"
         return False, msg
     except Exception as exc:
-        # Most common: user clicked Cancel on UAC prompt → "The operation
-        # was canceled by the user." (1223).
         if tmp_log_path:
             try:
                 os.unlink(tmp_log_path)
@@ -444,7 +431,8 @@ class SoftwareUpgradeFrame(ttk.Frame):
 
         self._server: Optional[_UpgradeHTTPServer] = None
         self._server_thread: Optional[threading.Thread] = None
-        # Track current NIC state so "Restore DHCP" knows which interface
+        # Track current NIC state so the worker's finally-block DHCP
+        # restore knows which interface
         # we last touched, and so we can revert on app shutdown.
         self._static_ip_applied_on: Optional[str] = None
 
@@ -515,33 +503,35 @@ class SoftwareUpgradeFrame(ttk.Frame):
             side=tk.LEFT, padx=2
         )
 
-        nic_btn_frame = ttk.Frame(self)
-        nic_btn_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
-        self._apply_btn = ttk.Button(
-            nic_btn_frame, text="Apply Static IP", command=self._apply_static_ip
-        )
-        self._apply_btn.pack(side=tk.LEFT, padx=6)
-        self._dhcp_btn = ttk.Button(
-            nic_btn_frame, text="Restore DHCP", command=self._restore_dhcp
-        )
-        self._dhcp_btn.pack(side=tk.LEFT, padx=6)
-        self._nic_status = ttk.Label(nic_btn_frame, text="", foreground="gray")
-        self._nic_status.pack(side=tk.LEFT, padx=10)
+        # NIC status row -- pure status, no buttons. The Run-Upgrade
+        # workers now own the full lifecycle (apply static IP -> run
+        # upgrade -> restore DHCP) so the operator doesn't have to
+        # press the right sequence in the right order. The label
+        # below shows what the worker is currently doing
+        # ("Applying static IP…", "Static 169.254.0.101 on Ethernet 8",
+        # "Failed — see log", etc.).
+        nic_status_frame = ttk.Frame(self)
+        nic_status_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
+        ttk.Label(
+            nic_status_frame, text="NIC status:", foreground="gray",
+        ).pack(side=tk.LEFT, padx=(6, 4))
+        self._nic_status = ttk.Label(nic_status_frame, text="Idle", foreground="gray")
+        self._nic_status.pack(side=tk.LEFT, padx=2)
 
-        # Row 4 — HTTP server controls
-        srv_frame = ttk.LabelFrame(self, text=f"HTTP Server (port {_HTTP_PORT})")
-        srv_frame.pack(fill=tk.X, padx=5, pady=4)
-
-        self._start_btn = ttk.Button(
-            srv_frame, text="▶  Start Server", command=self._start_server
+        # HTTP server status row -- same pattern. The worker starts /
+        # stops the server around the upgrade; the operator just sees
+        # the current state.
+        srv_status_frame = ttk.Frame(self)
+        srv_status_frame.pack(fill=tk.X, padx=5, pady=(0, 4))
+        ttk.Label(
+            srv_status_frame,
+            text=f"HTTP server (port {_HTTP_PORT}):",
+            foreground="gray",
+        ).pack(side=tk.LEFT, padx=(6, 4))
+        self._srv_status = ttk.Label(
+            srv_status_frame, text="Stopped", foreground="gray",
         )
-        self._start_btn.pack(side=tk.LEFT, padx=6, pady=4)
-        self._stop_btn = ttk.Button(
-            srv_frame, text="■  Stop Server", command=self._stop_server, state=tk.DISABLED
-        )
-        self._stop_btn.pack(side=tk.LEFT, padx=6)
-        self._srv_status = ttk.Label(srv_frame, text="Stopped", foreground="gray")
-        self._srv_status.pack(side=tk.LEFT, padx=10)
+        self._srv_status.pack(side=tk.LEFT, padx=2)
 
         # Row 4b — Ciena RLS-specific upgrade controls (shown only when
         # device type == Ciena RLS).
@@ -620,14 +610,14 @@ class SoftwareUpgradeFrame(ttk.Frame):
             side=tk.LEFT, padx=2
         )
 
-        self._g42_run_btn = ttk.Button(
+        self._run_btn = ttk.Button(
             g42_row2, text="▶  Run Upgrade", command=self._run_g42_upgrade
         )
-        self._g42_run_btn.pack(side=tk.LEFT, padx=14)
-        self._g42_stop_btn = ttk.Button(
+        self._run_btn.pack(side=tk.LEFT, padx=14)
+        self._stop_btn = ttk.Button(
             g42_row2, text="■  Stop", command=self._stop_g42_upgrade, state=tk.DISABLED
         )
-        self._g42_stop_btn.pack(side=tk.LEFT, padx=4)
+        self._stop_btn.pack(side=tk.LEFT, padx=4)
         self._g42_status = ttk.Label(g42_row2, text="", foreground="gray")
         self._g42_status.pack(side=tk.LEFT, padx=10)
 
@@ -640,14 +630,15 @@ class SoftwareUpgradeFrame(ttk.Frame):
         # so the user's selected folder needs a CC/ subdirectory.
         ttk.Label(
             self._psi_frame,
-            text="Note: the PSI fetches http://172.16.0.101:8000/CC/<file>. "
-                 "Pick a folder that contains a CC/ subdirectory.",
+            text="Note: the PSI fetches http://172.16.0.101:8000/CC/<release>. "
+                 "Pick a folder that contains a CC/ subdirectory of release "
+                 "folders.",
             foreground="gray",
         ).pack(anchor=tk.W, padx=6, pady=(4, 0))
 
         psi_row1 = ttk.Frame(self._psi_frame)
         psi_row1.pack(fill=tk.X, padx=4, pady=(4, 2))
-        ttk.Label(psi_row1, text="Software File:").pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Label(psi_row1, text="Software Release:").pack(side=tk.LEFT, padx=(4, 2))
         self._psi_file_var = tk.StringVar()
         self._psi_file_combo = ttk.Combobox(
             psi_row1, textvariable=self._psi_file_var, state="readonly", width=52
@@ -692,6 +683,67 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._psi_stop_btn.pack(side=tk.LEFT, padx=4)
         self._psi_status = ttk.Label(psi_row3, text="", foreground="gray")
         self._psi_status.pack(side=tk.LEFT, padx=10)
+
+        # Row 4d-2 — Nokia PSS-specific upgrade controls (shown only when
+        # device type == Nokia PSS). Identical to the PSI panel; the only
+        # difference lives in the upgrade script (no `server port 8000`).
+        self._pss_frame = ttk.LabelFrame(self, text="Nokia PSS Upgrade")
+
+        ttk.Label(
+            self._pss_frame,
+            text="Note: the PSS fetches http://172.16.0.101:8000/CC/<release>. "
+                 "Pick a folder that contains a CC/ subdirectory of release "
+                 "folders.",
+            foreground="gray",
+        ).pack(anchor=tk.W, padx=6, pady=(4, 0))
+
+        pss_row1 = ttk.Frame(self._pss_frame)
+        pss_row1.pack(fill=tk.X, padx=4, pady=(4, 2))
+        ttk.Label(pss_row1, text="Software Release:").pack(side=tk.LEFT, padx=(4, 2))
+        self._pss_file_var = tk.StringVar()
+        self._pss_file_combo = ttk.Combobox(
+            pss_row1, textvariable=self._pss_file_var, state="readonly", width=52
+        )
+        self._pss_file_combo.pack(side=tk.LEFT, padx=2)
+        ttk.Button(pss_row1, text="↺", width=2, command=self._refresh_pss_files).pack(
+            side=tk.LEFT, padx=1
+        )
+
+        pss_row2 = ttk.Frame(self._pss_frame)
+        pss_row2.pack(fill=tk.X, padx=4, pady=(0, 2))
+        ttk.Label(pss_row2, text="SSH User:").pack(side=tk.LEFT, padx=(4, 2))
+        self._pss_user_var = tk.StringVar(value="cli")
+        ttk.Entry(pss_row2, textvariable=self._pss_user_var, width=10).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Label(pss_row2, text="  SSH Pwd:").pack(side=tk.LEFT, padx=(8, 2))
+        self._pss_pass_var = tk.StringVar(value="admin")
+        ttk.Entry(pss_row2, textvariable=self._pss_pass_var, show="*", width=12).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Label(pss_row2, text="  Inner User:").pack(side=tk.LEFT, padx=(8, 2))
+        self._pss_inner_user_var = tk.StringVar(value="admin")
+        ttk.Entry(pss_row2, textvariable=self._pss_inner_user_var, width=10).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Label(pss_row2, text="  Inner Pwd:").pack(side=tk.LEFT, padx=(8, 2))
+        self._pss_inner_pass_var = tk.StringVar(value="admin")
+        ttk.Entry(pss_row2, textvariable=self._pss_inner_pass_var, show="*", width=12).pack(
+            side=tk.LEFT, padx=2
+        )
+
+        pss_row3 = ttk.Frame(self._pss_frame)
+        pss_row3.pack(fill=tk.X, padx=4, pady=(0, 4))
+        self._pss_run_btn = ttk.Button(
+            pss_row3, text="▶  Run Upgrade", command=self._run_pss_upgrade
+        )
+        self._pss_run_btn.pack(side=tk.LEFT, padx=4)
+        self._pss_stop_btn = ttk.Button(
+            pss_row3, text="■  Stop", command=self._stop_pss_upgrade, state=tk.DISABLED
+        )
+        self._pss_stop_btn.pack(side=tk.LEFT, padx=4)
+        self._pss_status = ttk.Label(pss_row3, text="", foreground="gray")
+        self._pss_status.pack(side=tk.LEFT, padx=10)
 
         # Row 4e — Ciena Waveserver 5 controls (shown only when
         # device type == Ciena Waveserver 5). This one is two-phase:
@@ -797,15 +849,21 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._refresh_rls_files()
         self._refresh_g42_files()
         self._refresh_psi_files()
+        self._refresh_pss_files()
         self._refresh_ws5_files()
 
     def _on_dtype_change(self, _event=None) -> None:
-        """Show/hide device-specific panels based on device type."""
+        """Show/hide device-specific panels and pre-fill the PC static
+        IP based on the selected device type. The Run-Upgrade worker
+        reads ``_pc_ip_var`` directly; the entry stays visible so the
+        operator can verify (or override) what the worker is about to
+        bind."""
         dtype = self._dtype_var.get()
         # Hide all panels first
         self._rls_frame.pack_forget()
         self._g42_frame.pack_forget()
         self._psi_frame.pack_forget()
+        self._pss_frame.pack_forget()
         self._ws5_frame.pack_forget()
 
         # pack_forget+pack would re-add at the end of the parent's geometry
@@ -815,12 +873,27 @@ class SoftwareUpgradeFrame(ttk.Frame):
         before = self._progress.master
         if dtype == "Ciena RLS":
             self._rls_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
+            self._mask_var.set(_DEFAULT_MASK)
+            # RLS pre-fill happens in ``_on_rls_ctm_change`` based on
+            # which CTM card the operator picked (CTM41 vs CTM42).
+            self._on_rls_ctm_change()
         elif dtype == "Ciena Waveserver 5":
             self._ws5_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
+            self._pc_ip_var.set(_WS5_NET["pc_ip"])
+            # WS5 lives on a /22 subnet; the others are /24.
+            self._mask_var.set(_WS5_NET["mask"])
         elif dtype == "Nokia G42":
             self._g42_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
+            self._pc_ip_var.set(_G42_NET["pc_ip"])
+            self._mask_var.set(_DEFAULT_MASK)
         elif dtype == "Nokia PSI":
             self._psi_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
+            self._pc_ip_var.set(_PSI_NET["pc_ip"])
+            self._mask_var.set(_DEFAULT_MASK)
+        elif dtype == "Nokia PSS":
+            self._pss_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
+            self._pc_ip_var.set(_PSS_NET["pc_ip"])
+            self._mask_var.set(_DEFAULT_MASK)
 
     def _on_rls_ctm_change(self) -> None:
         """When the CTM changes, auto-fill the PC IP to the matching internal
@@ -872,10 +945,14 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._populate_file_combo(self._g42_file_combo, self._g42_file_var, ".manifest")
 
     def _refresh_psi_files(self) -> None:
-        """Populate the PSI software-file dropdown. PSI loads live under a
-        CC/ subdirectory of the chosen folder; list anything that looks
-        like a load (no extension filter — PSI files are typically named
-        without a meaningful extension)."""
+        """Populate the PSI software dropdown. PSI loads live under a CC/
+        subdirectory of the chosen folder and are staged as per-release
+        *directories* (e.g. CC/R10.0.1/), so list those release folders.
+
+        Falls back to listing files directly in CC/ when there are no
+        subdirectories, preserving the older flat-file layout. No
+        extension filter either way — PSI loads are named without a
+        meaningful extension."""
         folder = self._folder_var.get().strip()
         cc_path = Path(folder) / "CC" if folder else None
         if cc_path is None or not cc_path.is_dir():
@@ -883,14 +960,36 @@ class SoftwareUpgradeFrame(ttk.Frame):
             self._psi_file_var.set("")
             return
         try:
-            entries = sorted(
-                p.name for p in cc_path.iterdir() if p.is_file()
-            )
+            dirs = sorted(p.name for p in cc_path.iterdir() if p.is_dir())
+            files = sorted(p.name for p in cc_path.iterdir() if p.is_file())
         except OSError:
-            entries = []
+            dirs, files = [], []
+        # Release folders are the normal case; only fall back to loose
+        # files when CC/ has no subdirectories at all.
+        entries = dirs or files
         self._psi_file_combo["values"] = entries
         if entries and not self._psi_file_var.get():
             self._psi_file_var.set(entries[0])
+
+    def _refresh_pss_files(self) -> None:
+        """Populate the PSS software dropdown — identical layout to the PSI:
+        release *directories* under a CC/ subdirectory of the chosen folder,
+        falling back to loose files when CC/ has no subdirectories."""
+        folder = self._folder_var.get().strip()
+        cc_path = Path(folder) / "CC" if folder else None
+        if cc_path is None or not cc_path.is_dir():
+            self._pss_file_combo["values"] = []
+            self._pss_file_var.set("")
+            return
+        try:
+            dirs = sorted(p.name for p in cc_path.iterdir() if p.is_dir())
+            files = sorted(p.name for p in cc_path.iterdir() if p.is_file())
+        except OSError:
+            dirs, files = [], []
+        entries = dirs or files
+        self._pss_file_combo["values"] = entries
+        if entries and not self._pss_file_var.get():
+            self._pss_file_var.set(entries[0])
 
     def _populate_file_combo(
         self, combo: ttk.Combobox, var: tk.StringVar, ext: str
@@ -1016,8 +1115,6 @@ class SoftwareUpgradeFrame(ttk.Frame):
         bind_ip = self._pc_ip_var.get().strip() or "<PC IP>"
         self._set_srv_status(f"Serving {Path(folder).name} on :{_HTTP_PORT}", "green")
         self._log(f"HTTP server up at http://{bind_ip}:{_HTTP_PORT}/ (root: {folder})")
-        self._start_btn.config(state=tk.DISABLED)
-        self._stop_btn.config(state=tk.NORMAL)
 
     def _stop_server(self) -> None:
         server = self._server
@@ -1037,8 +1134,6 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._server_thread = None
                 self._set_srv_status("Stopped", "gray")
                 self._log("HTTP server stopped.")
-                self.after(0, lambda: self._start_btn.config(state=tk.NORMAL))
-                self.after(0, lambda: self._stop_btn.config(state=tk.DISABLED))
 
         # server.shutdown() must run off the serving thread.
         threading.Thread(target=_shutdown, daemon=True).start()
@@ -1049,16 +1144,6 @@ class SoftwareUpgradeFrame(ttk.Frame):
         if self._upgrade_thread is not None and self._upgrade_thread.is_alive():
             messagebox.showinfo("Already running", "An upgrade is already in progress.")
             return
-        if self._server is None:
-            if not messagebox.askyesno(
-                "HTTP server not running",
-                "The HTTP server is not running, so the device will not be "
-                "able to pull the upgrade file. Start it now?",
-            ):
-                return
-            self._start_server()
-            if self._server is None:
-                return  # start failed, message already shown
 
         filename = self._rls_file_var.get().strip()
         if not filename:
@@ -1101,11 +1186,15 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._log(f"\n──── RLS upgrade ({ctm}): {device_ip} ← {server_url} ────")
 
         def _worker() -> None:
+            # Same auto-cleanup pattern as the G42 worker -- the finally
+            # block undoes the static IP + server start so the operator
+            # doesn't have to remember a manual restore step (the
+            # buttons that used to do that are gone).
+            static_ip_owned_by_us = False
+            server_started_by_us = False
             try:
                 # Step 1 — set PC NIC to the CTM-internal IP. If a UAC prompt
                 # appears, the user has to approve it before SSH can start.
-                # Use the static-IP helper so a stale binding from an
-                # earlier run doesn't trip "The object already exists."
                 self._log(f"Setting {nic} to {pc_ip}/{mask} via netsh…")
                 self._set_nic_status("Applying static IP…", "blue")
                 ok, msg = _set_static_ipv4(nic, pc_ip, mask)
@@ -1118,6 +1207,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
                         "until the static IP is in place."
                     )
                     return
+                static_ip_owned_by_us = True
                 self._static_ip_applied_on = nic
                 self._set_nic_status(f"Static {pc_ip} on {nic}", "green")
                 self._log(f"netsh OK: {msg}")
@@ -1125,7 +1215,16 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 # address before we initiate the SSH connection.
                 time.sleep(2.0)
 
-                # Step 2 — SSH + software-install + poll.
+                # Step 2 — start the HTTP server (auto, no operator gate).
+                if self._server is None:
+                    self._log(
+                        f"Starting HTTP server on {pc_ip}:{_HTTP_PORT}…"
+                    )
+                    self.after(0, self._start_server)
+                    time.sleep(1.0)
+                    server_started_by_us = True
+
+                # Step 3 — SSH + software-install + poll.
                 from scripts.Network.Ciena_RLS_Upgrade import RLSUpgradeScript
 
                 script = RLSUpgradeScript(
@@ -1140,10 +1239,6 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 if ok_run:
                     self._set_rls_status("Done ✔", "green")
                     self._log("✔ RLS upgrade reported complete.")
-                    self._log(
-                        "Reminder: click 'Restore DHCP' when you're done to "
-                        "return the NIC to dynamic addressing."
-                    )
                 else:
                     self._set_rls_status("Failed ✘", "red")
                     self._log("✘ RLS upgrade did not complete — see log.")
@@ -1152,6 +1247,12 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._set_rls_status("Error", "red")
                 self._log(f"[ERROR] {exc}")
             finally:
+                if server_started_by_us:
+                    self._log("Stopping HTTP server…")
+                    self.after(0, self._stop_server)
+                if static_ip_owned_by_us:
+                    self._log("Restoring DHCP on the NIC…")
+                    self.after(0, self._restore_dhcp)
                 self.after(0, lambda: self._rls_run_btn.config(state=tk.NORMAL))
                 self.after(0, lambda: self._rls_stop_btn.config(state=tk.DISABLED))
 
@@ -1174,16 +1275,6 @@ class SoftwareUpgradeFrame(ttk.Frame):
         if self._upgrade_thread is not None and self._upgrade_thread.is_alive():
             messagebox.showinfo("Already running", "An upgrade is already in progress.")
             return
-        if self._server is None:
-            if not messagebox.askyesno(
-                "HTTP server not running",
-                "The HTTP server is not running, so the device will not be "
-                "able to pull the upgrade file. Start it now?",
-            ):
-                return
-            self._start_server()
-            if self._server is None:
-                return
 
         manifest = self._g42_file_var.get().strip()
         if not manifest:
@@ -1195,7 +1286,10 @@ class SoftwareUpgradeFrame(ttk.Frame):
         pc_ip = _G42_NET["pc_ip"]
         device_ip = _G42_NET["device_ip"]
         # Reflect derived PC IP in the netsh frame so the user can see
-        # what the worker is about to apply.
+        # what the worker is about to apply. (The dtype-change handler
+        # already pre-fills this when G42 is selected; this assignment
+        # is belt-and-braces for the case where the operator selected
+        # G42 before the workspace was fully built.)
         self._pc_ip_var.set(pc_ip)
 
         nic = self._nic_var.get().strip()
@@ -1214,14 +1308,21 @@ class SoftwareUpgradeFrame(ttk.Frame):
 
         self._upgrade_stop = False
         self._set_g42_status("Running…", "blue")
-        self._g42_run_btn.config(state=tk.DISABLED)
-        self._g42_stop_btn.config(state=tk.NORMAL)
+        self._run_btn.config(state=tk.DISABLED)
+        self._stop_btn.config(state=tk.NORMAL)
         self._log(f"\n──── G42 upgrade: {device_ip} ← {server_url} ────")
 
         def _worker() -> None:
+            # Track whether we actually applied the static IP / started
+            # the server, so the finally block knows what to undo. A
+            # NIC that we never touched should NOT get flipped back to
+            # DHCP (the operator might already have it on something
+            # they care about).
+            static_ip_owned_by_us = False
+            server_started_by_us = False
             try:
-                # Step 1 — set PC NIC to the link-local service IP.
-                # Helper handles stale-binding cleanup.
+                # Step 1 — apply the link-local service IP. Helper
+                # pre-deletes any stale binding of the same IP.
                 self._log(f"Setting {nic} to {pc_ip}/{mask} via netsh…")
                 self._set_nic_status("Applying static IP…", "blue")
                 ok, msg = _set_static_ipv4(nic, pc_ip, mask)
@@ -1234,12 +1335,29 @@ class SoftwareUpgradeFrame(ttk.Frame):
                         "until the static IP is in place."
                     )
                     return
+                static_ip_owned_by_us = True
                 self._static_ip_applied_on = nic
                 self._set_nic_status(f"Static {pc_ip} on {nic}", "green")
                 self._log(f"netsh OK: {msg}")
                 time.sleep(2.0)
 
-                # Step 2 — multi-phase SSH upgrade.
+                # Step 2 — start the HTTP server. Skipped if the
+                # operator already started one manually (legacy
+                # workflow); otherwise we own it and we'll stop it
+                # in the finally.
+                if self._server is None:
+                    self._log(
+                        f"Starting HTTP server on {pc_ip}:{_HTTP_PORT}…"
+                    )
+                    # ``_start_server`` schedules its work via
+                    # ``self.after`` and returns immediately; give the
+                    # listener a beat to actually bind before the
+                    # script tries to download from it.
+                    self.after(0, self._start_server)
+                    time.sleep(1.0)
+                    server_started_by_us = True
+
+                # Step 3 — multi-phase SSH upgrade.
                 from scripts.Network.Nokia_G42_Upgrade import NokiaG42UpgradeScript
 
                 script = NokiaG42UpgradeScript(
@@ -1255,10 +1373,29 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 if ok_run:
                     self._set_g42_status("Done ✔", "green")
                     self._log("✔ G42 upgrade reported complete.")
-                    self._log(
-                        "Reminder: click 'Restore DHCP' when you're done to "
-                        "return the NIC to dynamic addressing."
-                    )
+                    # Two finish-up dialogs depending on what the
+                    # device reported at activate time:
+                    #
+                    # * standby_sync_warning=True -- the device's
+                    #   redundant XMM4 wasn't synced when activate
+                    #   ran, so only the primary card got the new
+                    #   load. Operator MUST repeat the upgrade
+                    #   against the second card before the chassis
+                    #   is fully cut over.
+                    # * standby_sync_warning=False (normal case) --
+                    #   both controllers got the new load; device is
+                    #   rebooting and the cable can come out.
+                    if getattr(script, "standby_sync_warning", False):
+                        self.after(0, lambda: messagebox.showinfo(
+                            "G42 — Standby Controller Not Synced",
+                            "Control Cards not Synchronized. Preform "
+                            "Upgrade Again on Second XMM4.",
+                        ))
+                    else:
+                        self.after(0, lambda: messagebox.showinfo(
+                            "G42 — Activation in Progress",
+                            "Activation in Progress. Safe to Disconnect.",
+                        ))
                 else:
                     self._set_g42_status("Failed ✘", "red")
                     self._log("✘ G42 upgrade did not complete — see log.")
@@ -1267,8 +1404,21 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._set_g42_status("Error", "red")
                 self._log(f"[ERROR] {exc}")
             finally:
-                self.after(0, lambda: self._g42_run_btn.config(state=tk.NORMAL))
-                self.after(0, lambda: self._g42_stop_btn.config(state=tk.DISABLED))
+                # Auto-cleanup: stop the server if we started it, and
+                # restore DHCP if we applied the static IP. Both run
+                # even on failure / abort so the operator doesn't have
+                # to manually unwind (the previous flow asked them to
+                # "click Restore DHCP when you're done", which was
+                # frequently forgotten -- leaving the NIC stuck on the
+                # link-local IP for the next session).
+                if server_started_by_us:
+                    self._log("Stopping HTTP server…")
+                    self.after(0, self._stop_server)
+                if static_ip_owned_by_us:
+                    self._log("Restoring DHCP on the NIC…")
+                    self.after(0, self._restore_dhcp)
+                self.after(0, lambda: self._run_btn.config(state=tk.NORMAL))
+                self.after(0, lambda: self._stop_btn.config(state=tk.DISABLED))
 
         self._upgrade_thread = threading.Thread(target=_worker, daemon=True)
         self._upgrade_thread.start()
@@ -1297,24 +1447,14 @@ class SoftwareUpgradeFrame(ttk.Frame):
         if self._upgrade_thread is not None and self._upgrade_thread.is_alive():
             messagebox.showinfo("Already running", "An upgrade is already in progress.")
             return
-        if self._server is None:
-            if not messagebox.askyesno(
-                "HTTP server not running",
-                "The HTTP server is not running, so the device will not be "
-                "able to pull the upgrade file. Start it now?",
-            ):
-                return
-            self._start_server()
-            if self._server is None:
-                return
 
         filename = self._psi_file_var.get().strip()
         if not filename:
             messagebox.showerror(
                 "Error",
-                "Pick a software file from the dropdown. The folder you "
-                "selected needs a CC/ subdirectory; we list files from "
-                "there.",
+                "Pick a software release from the dropdown. The folder you "
+                "selected needs a CC/ subdirectory; we list the release "
+                "folders inside it.",
             )
             return
 
@@ -1344,6 +1484,11 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._log(f"\n──── PSI upgrade: {device_ip} ← /CC/{filename} ────")
 
         def _worker() -> None:
+            # Auto-restore DHCP in the finally so the operator doesn't
+            # have to remember a manual step. PSI uses FTP (not the
+            # local HTTP server), so there's no server-start step
+            # here -- just the static IP lifecycle.
+            static_ip_owned_by_us = False
             try:
                 # Step 1 — set PC NIC to the PSI service IP.
                 # Helper handles stale-binding cleanup.
@@ -1359,6 +1504,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
                         "until the static IP is in place."
                     )
                     return
+                static_ip_owned_by_us = True
                 self._static_ip_applied_on = nic
                 self._set_nic_status(f"Static {pc_ip} on {nic}", "green")
                 self._log(f"netsh OK: {msg}")
@@ -1381,10 +1527,6 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 if ok_run:
                     self._set_psi_status("Done ✔", "green")
                     self._log("✔ PSI upgrade reported complete.")
-                    self._log(
-                        "Reminder: click 'Restore DHCP' when you're done to "
-                        "return the NIC to dynamic addressing."
-                    )
                 else:
                     self._set_psi_status("Failed ✘", "red")
                     self._log("✘ PSI upgrade did not complete — see log.")
@@ -1393,6 +1535,9 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._set_psi_status("Error", "red")
                 self._log(f"[ERROR] {exc}")
             finally:
+                if static_ip_owned_by_us:
+                    self._log("Restoring DHCP on the NIC…")
+                    self.after(0, self._restore_dhcp)
                 self.after(0, lambda: self._psi_run_btn.config(state=tk.NORMAL))
                 self.after(0, lambda: self._psi_stop_btn.config(state=tk.DISABLED))
 
@@ -1412,6 +1557,127 @@ class SoftwareUpgradeFrame(ttk.Frame):
     def _set_psi_status(self, msg: str, color: str = "gray") -> None:
         def _do() -> None:
             self._psi_status.config(text=msg, foreground=color)
+        try:
+            self.after(0, _do)
+        except Exception:
+            pass
+
+    # ── Nokia PSS upgrade ───────────────────────────────────────────────────
+
+    def _run_pss_upgrade(self) -> None:
+        if self._upgrade_thread is not None and self._upgrade_thread.is_alive():
+            messagebox.showinfo("Already running", "An upgrade is already in progress.")
+            return
+
+        filename = self._pss_file_var.get().strip()
+        if not filename:
+            messagebox.showerror(
+                "Error",
+                "Pick a software release from the dropdown. The folder you "
+                "selected needs a CC/ subdirectory; we list the release "
+                "folders inside it.",
+            )
+            return
+
+        pc_ip = _PSS_NET["pc_ip"]
+        device_ip = _PSS_NET["device_ip"]
+        self._pc_ip_var.set(pc_ip)
+
+        nic = self._nic_var.get().strip()
+        if not nic:
+            messagebox.showerror(
+                "Error",
+                "No network interface selected. Click ↺ in the PC Static IP "
+                "row to refresh, then pick the NIC connected to the shelf.",
+            )
+            return
+
+        mask = self._mask_var.get().strip() or _DEFAULT_MASK
+        user = self._pss_user_var.get().strip() or "cli"
+        pwd = self._pss_pass_var.get()
+        inner_user = self._pss_inner_user_var.get().strip() or "admin"
+        inner_pwd = self._pss_inner_pass_var.get()
+
+        self._upgrade_stop = False
+        self._set_pss_status("Running…", "blue")
+        self._pss_run_btn.config(state=tk.DISABLED)
+        self._pss_stop_btn.config(state=tk.NORMAL)
+        self._log(f"\n──── PSS upgrade: {device_ip} ← /CC/{filename} ────")
+
+        def _worker() -> None:
+            # Auto-restore DHCP in the finally so the operator doesn't
+            # have to remember a manual step. PSS uses FTP/HTTP (not the
+            # local HTTP server start step), so there's no server-start
+            # step here -- just the static IP lifecycle.
+            static_ip_owned_by_us = False
+            try:
+                # Step 1 — set PC NIC to the PSS service IP.
+                # Helper handles stale-binding cleanup.
+                self._log(f"Setting {nic} to {pc_ip}/{mask} via netsh…")
+                self._set_nic_status("Applying static IP…", "blue")
+                ok, msg = _set_static_ipv4(nic, pc_ip, mask)
+                if not ok:
+                    self._set_nic_status("Failed — see log", "red")
+                    self._set_pss_status("Failed ✘", "red")
+                    self._log(f"netsh FAILED: {msg}")
+                    self._log(
+                        "Aborting upgrade — the device cannot reach the PC "
+                        "until the static IP is in place."
+                    )
+                    return
+                static_ip_owned_by_us = True
+                self._static_ip_applied_on = nic
+                self._set_nic_status(f"Static {pc_ip} on {nic}", "green")
+                self._log(f"netsh OK: {msg}")
+                time.sleep(2.0)
+
+                # Step 2 — 2-phase SSH login + FTP config + audit/load/activate.
+                from scripts.Network.Nokia_PSS_Upgrade import NokiaPSSUpgradeScript
+
+                script = NokiaPSSUpgradeScript(
+                    ip_address=device_ip,
+                    username=user,
+                    password=pwd,
+                    inner_username=inner_user,
+                    inner_password=inner_pwd,
+                    software_filename=filename,
+                    output_callback=self._log,
+                    stop_callback=lambda: self._upgrade_stop,
+                )
+                ok_run = script.run()
+                if ok_run:
+                    self._set_pss_status("Done ✔", "green")
+                    self._log("✔ PSS upgrade reported complete.")
+                else:
+                    self._set_pss_status("Failed ✘", "red")
+                    self._log("✘ PSS upgrade did not complete — see log.")
+            except Exception as exc:
+                logging.exception("PSS upgrade worker error")
+                self._set_pss_status("Error", "red")
+                self._log(f"[ERROR] {exc}")
+            finally:
+                if static_ip_owned_by_us:
+                    self._log("Restoring DHCP on the NIC…")
+                    self.after(0, self._restore_dhcp)
+                self.after(0, lambda: self._pss_run_btn.config(state=tk.NORMAL))
+                self.after(0, lambda: self._pss_stop_btn.config(state=tk.DISABLED))
+
+        self._upgrade_thread = threading.Thread(target=_worker, daemon=True)
+        self._upgrade_thread.start()
+
+    def _stop_pss_upgrade(self) -> None:
+        if self._upgrade_thread is None or not self._upgrade_thread.is_alive():
+            return
+        self._upgrade_stop = True
+        self._set_pss_status("Stopping…", "orange")
+        self._log(
+            "Stop requested — local polling will halt. The load on the "
+            "device is not cancelled and will continue independently."
+        )
+
+    def _set_pss_status(self, msg: str, color: str = "gray") -> None:
+        def _do() -> None:
+            self._pss_status.config(text=msg, foreground=color)
         try:
             self.after(0, _do)
         except Exception:
@@ -1440,17 +1706,6 @@ class SoftwareUpgradeFrame(ttk.Frame):
             "Click OK to begin.",
         ):
             return
-
-        if self._server is None:
-            if not messagebox.askyesno(
-                "HTTP server not running",
-                "The HTTP server is not running, so the Waveserver won't "
-                "be able to pull the upgrade file in phase 2. Start it now?",
-            ):
-                return
-            self._start_server()
-            if self._server is None:
-                return
 
         filename = self._ws5_file_var.get().strip()
         if not filename:
@@ -1495,6 +1750,11 @@ class SoftwareUpgradeFrame(ttk.Frame):
         )
 
         def _worker() -> None:
+            # Auto-restore DHCP and auto-stop the HTTP server in the
+            # finally so the operator doesn't have to remember a manual
+            # step after a long two-phase upgrade.
+            static_ip_owned_by_us = False
+            server_started_by_us = False
             try:
                 # Step 1 — point the NIC at 10.9.49.101/22 so the device
                 # can reach the HTTP server once phase 1 finishes.
@@ -1513,10 +1773,20 @@ class SoftwareUpgradeFrame(ttk.Frame):
                         "Waveserver cannot reach the HTTP server."
                     )
                     return
+                static_ip_owned_by_us = True
                 self._static_ip_applied_on = nic
                 self._set_nic_status(f"Static {pc_ip} on {nic}", "green")
                 self._log(f"netsh OK: {msg}")
                 time.sleep(2.0)
+
+                # Step 1b — start the HTTP server if it isn't already
+                # running. Phase 2 of the upgrade has the device pull
+                # the .tar.gz from us over the static-IP route.
+                if self._server is None:
+                    self._log("Starting HTTP server…")
+                    self.after(0, self._start_server)
+                    time.sleep(1.0)
+                    server_started_by_us = True
 
                 # Step 2 — run the two-phase upgrade script. The script
                 # handles serial provisioning, the SSH download/activate
@@ -1540,10 +1810,6 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 if ok_run:
                     self._set_ws5_status("Activating ✔", "green")
                     self._log("✔ Waveserver 5 reached 'Activation In Progress'.")
-                    self._log(
-                        "Reminder: click 'Restore DHCP' when you're done to "
-                        "return the NIC to dynamic addressing."
-                    )
                     # Final popup matches the operator's verbatim text from
                     # the spec — it's what they expect at end-of-run.
                     self.after(0, lambda: messagebox.showinfo(
@@ -1559,6 +1825,12 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._set_ws5_status("Error", "red")
                 self._log(f"[ERROR] {exc}")
             finally:
+                if server_started_by_us:
+                    self._log("Stopping HTTP server…")
+                    self.after(0, self._stop_server)
+                if static_ip_owned_by_us:
+                    self._log("Restoring DHCP on the NIC…")
+                    self.after(0, self._restore_dhcp)
                 self.after(0, lambda: self._ws5_run_btn.config(state=tk.NORMAL))
                 self.after(0, lambda: self._ws5_stop_btn.config(state=tk.DISABLED))
 

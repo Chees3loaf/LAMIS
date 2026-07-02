@@ -1,8 +1,15 @@
 """
-scripts/Network/Nokia_PSI_Upgrade.py — Software upgrade flow for Nokia PSI.
+scripts/Network/Nokia_PSS_Upgrade.py — Software upgrade flow for Nokia PSS.
 
-The PSI fetches its load from the local HTTP server staged by the
-Software Upgrades GUI tab (PC at 172.16.0.101, PSI at 172.16.0.1). Login
+Identical to the Nokia PSI flow (see ``Nokia_PSI_Upgrade.py``) except the
+PSS does not accept ``config software server port 8000`` — on PSS-class
+shelves that command hangs until the prompt-wait times out, so it is
+omitted from the server-config sequence here. Everything else (the
+1830-style two-stage login, FTP/HTTP server setup, audit/load/activate)
+is the same.
+
+The PSS fetches its load from the local HTTP server staged by the
+Software Upgrades GUI tab (PC at 172.16.0.101, PSS at 172.16.0.1). Login
 mechanics mirror the Nokia 1830: SSH as ``cli`` then a second inner
 Username/Password dialog on the shell channel. Once we're in, the
 upgrade sequence is:
@@ -13,13 +20,12 @@ upgrade sequence is:
      <password prompt> → "Ftp-id#1"
   4. config software server root /CC/
   5. config software server protocol HTTP
-  6. config software server port 8000
-  7. config software upgrade manual audit <filename> nobackup
-  8. config software upgrade manual load
-  9. config software upgrade status      (poll until "complete")
-  10. config software upgrade manual activate yes
+  6. config software upgrade manual audit <filename> nobackup
+  7. config software upgrade manual load
+  8. config software upgrade status      (poll until "complete")
+  9. config software upgrade manual activate yes
 
-The PSI fetches files at ``http://172.16.0.101:8000/CC/<filename>``, so
+The PSS fetches files at ``http://172.16.0.101:8000/CC/<filename>``, so
 the operator's selected software folder needs a ``CC/`` subdirectory
 containing the load files.
 """
@@ -37,8 +43,8 @@ from utils.helpers import ensure_host_key_known
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded FTP/HTTP server credential the PSI uses for its server slot.
-# This is the literal password Nokia's procedure specifies — the PSI does
+# Hardcoded FTP/HTTP server credential the PSS uses for its server slot.
+# This is the literal password Nokia's procedure specifies — the PSS does
 # not actually authenticate against the HTTP server, but the command
 # sequence still requires it to be set.
 _FTP_PASSWORD = "Ftp-id#1"
@@ -55,7 +61,7 @@ _MIN_ELAPSED_FOR_RESET_S = 30.0
 
 _PROMPT_TIMEOUT_S = 30
 
-# 1830/PSI prompt formats. They typically end with "#" but also "$" for
+# 1830/PSS prompt formats. They typically end with "#" but also "$" for
 # certain user accounts. Allow either.
 _PROMPT_RE = re.compile(r"([A-Za-z0-9._@\-]+[#>\$])\s*$")
 _PASSWORD_RE = re.compile(r"(?i)password\s*:\s*$")
@@ -67,8 +73,8 @@ _STATUS_COMPLETE_RE = re.compile(r"(?i)\b(complete|completed|success|loaded)\b")
 _STATUS_FAILED_RE = re.compile(r"(?i)\b(fail|failed|error|aborted)\b")
 
 
-class NokiaPSIUpgradeScript:
-    """Drive a Nokia PSI software upgrade end to end over SSH."""
+class NokiaPSSUpgradeScript:
+    """Drive a Nokia PSS software upgrade end to end over SSH."""
 
     def __init__(
         self,
@@ -86,7 +92,7 @@ class NokiaPSIUpgradeScript:
         self.username = username
         self.password = password
         self.inner_username = inner_username
-        # PSI / 1830 convention: inner password defaults to the same value
+        # PSS / 1830 convention: inner password defaults to the same value
         # as the outer SSH password unless the operator overrides it.
         self.inner_password = inner_password if inner_password is not None else password
         self.software_filename = software_filename
@@ -97,12 +103,12 @@ class NokiaPSIUpgradeScript:
     # ── Public entry ────────────────────────────────────────────────────────
 
     def run(self) -> bool:
-        self._log(f"Connecting to PSI at {self.ip_address} as {self.username}…")
+        self._log(f"Connecting to PSS at {self.ip_address} as {self.username}…")
         if not ensure_host_key_known(self.ip_address, port=22):
             self._log(f"Host key verification failed for {self.ip_address}.")
             return False
 
-        # PSI is 1830-class: the outer SSH user ('cli') has no real SSH
+        # PSS is 1830-class: the outer SSH user ('cli') has no real SSH
         # password. Plain password auth is rejected outright, so we mirror
         # the working Nokia_1830 flow — auth_none, falling back to an empty
         # keyboard-interactive response. The real admin/admin credentials
@@ -123,19 +129,19 @@ class NokiaPSIUpgradeScript:
             try:
                 try:
                     transport.auth_none(self.username)
-                    logging.info("[PSI] auth_none succeeded for %s@%s",
+                    logging.info("[PSS] auth_none succeeded for %s@%s",
                                  self.username, self.ip_address)
                 except paramiko.BadAuthenticationType:
                     transport.auth_interactive(
                         self.username, lambda t, i, p: ["" for _ in p]
                     )
                     logging.info(
-                        "[PSI] keyboard-interactive auth succeeded for %s@%s",
+                        "[PSS] keyboard-interactive auth succeeded for %s@%s",
                         self.username, self.ip_address,
                     )
             except paramiko.AuthenticationException:
                 self._log(
-                    "Outer SSH auth was rejected. PSI 'cli' login expects no "
+                    "Outer SSH auth was rejected. PSS 'cli' login expects no "
                     "SSH password — check the SSH User field (should be 'cli')."
                 )
                 return False
@@ -146,7 +152,7 @@ class NokiaPSIUpgradeScript:
             session.settimeout(30)
 
             if not self._two_stage_login(session):
-                self._log("PSI two-stage login did not reach a shell prompt.")
+                self._log("PSS two-stage login did not reach a shell prompt.")
                 return False
             self._log(f"Two-stage login successful; prompt detected ({self._prompt}).")
 
@@ -178,7 +184,7 @@ class NokiaPSIUpgradeScript:
         if not _USERNAME_RE.search(banner):
             self._log(
                 "No inner Username: prompt seen after SSH auth — is this "
-                "really a PSI / 1830-class device?"
+                "really a PSS / 1830-class device?"
             )
             return False
 
@@ -279,10 +285,12 @@ class NokiaPSIUpgradeScript:
                 "may fail if the device expected one."
             )
 
+        # NOTE: unlike the PSI flow, the PSS does NOT accept
+        # ``config software server port 8000`` — on PSS-class shelves that
+        # command hangs until the prompt-wait times out, so it is omitted.
         for cmd in (
             "config software server root /CC/",
             "config software server protocol HTTP",
-            "config software server port 8000",
         ):
             if not self._send(session, cmd):
                 return False
@@ -352,7 +360,7 @@ class NokiaPSIUpgradeScript:
                     elapsed = time.monotonic() - start
                     if elapsed >= _MIN_ELAPSED_FOR_RESET_S:
                         self._log(
-                            f"SSH closed after {elapsed:.0f}s — PSI is "
+                            f"SSH closed after {elapsed:.0f}s — PSS is "
                             "rebooting into the new load. Treating as success."
                         )
                         return True
@@ -462,4 +470,4 @@ class NokiaPSIUpgradeScript:
             self.output_callback(msg)
         except Exception:
             pass
-        logger.info("[PSI-Upgrade %s] %s", self.ip_address, msg)
+        logger.info("[PSS-Upgrade %s] %s", self.ip_address, msg)
