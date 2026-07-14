@@ -12,7 +12,8 @@ The fix removes the buttons entirely and makes ``_run_<dtype>_upgrade``
 do the full lifecycle inside its worker thread:
 
   1. Apply the static IP for the device family.
-  2. Start the HTTP server (G42 / RLS / WS5 only -- PSI uses FTP).
+  2. Start the HTTP server (all device families — PSI/PSS pull over
+     HTTP too, rooted at CC's parent).
   3. Run the upgrade script.
   4. In a ``finally``, stop the server (if we started it) and
      restore DHCP (if we applied the static IP).
@@ -24,6 +25,7 @@ operator never types it.
 from __future__ import annotations
 import inspect
 import unittest
+from pathlib import Path
 
 
 class TestManualNicAndServerButtonsRemoved(unittest.TestCase):
@@ -180,11 +182,11 @@ class TestUpgradeWorkersAutoRestoreDhcp(unittest.TestCase):
 
 
 class TestServerUsingWorkersAutoStopServer(unittest.TestCase):
-    """G42, RLS, and WS5 all have the device pull the upgrade
-    artefact over HTTP from the laptop. Each worker must start the
-    server if it isn't already running and stop it in the finally if
-    *it* started it. PSI uses FTP (handled inside the script) and is
-    intentionally excluded -- its worker has no server lifecycle.
+    """G42, RLS, WS5, PSI, and PSS all have the device pull the upgrade
+    artefact over HTTP from the laptop (PSI/PSS use ``config software
+    server protocol HTTP`` — they are NOT FTP). Each worker must start
+    the server if it isn't already running and stop it in the finally
+    if *it* started it.
     """
 
     def setUp(self):
@@ -194,8 +196,9 @@ class TestServerUsingWorkersAutoStopServer(unittest.TestCase):
             "g42": inspect.getsource(self.cls._run_g42_upgrade),
             "rls": inspect.getsource(self.cls._run_rls_upgrade),
             "ws5": inspect.getsource(self.cls._run_ws5_upgrade),
+            "psi": inspect.getsource(self.cls._run_psi_upgrade),
+            "pss": inspect.getsource(self.cls._run_pss_upgrade),
         }
-        self.psi_src = inspect.getsource(self.cls._run_psi_upgrade)
 
     def test_http_workers_track_server_ownership_flag(self):
         for name, src in self.http_workers.items():
@@ -214,12 +217,15 @@ class TestServerUsingWorkersAutoStopServer(unittest.TestCase):
         for name, src in self.http_workers.items():
             with self.subTest(worker=name):
                 # The auto-start branch -- ``if self._server is None``
-                # followed by an ``self.after(0, self._start_server)``
-                # call -- replaces the old "HTTP server not running,
-                # start now?" askyesno gate.
+                # followed by an ``_start_server`` call -- replaces the
+                # old "HTTP server not running, start now?" askyesno gate.
+                # G42/RLS/WS5 serve the browsed folder directly
+                # (``self.after(0, self._start_server)``); PSI/PSS serve
+                # CC's parent (``self._start_server(str(serve_root))``).
                 self.assertIn("if self._server is None:", src)
-                self.assertIn(
-                    "self.after(0, self._start_server)", src,
+                self.assertTrue(
+                    "self.after(0, self._start_server)" in src
+                    or "self._start_server(str(serve_root))" in src,
                     f"{name} worker must auto-start the HTTP server "
                     "rather than prompting the operator",
                 )
@@ -238,22 +244,6 @@ class TestServerUsingWorkersAutoStopServer(unittest.TestCase):
                     "behind the ownership flag",
                 )
 
-    def test_psi_worker_has_no_server_lifecycle(self):
-        # PSI uses FTP (the script wires it up via the on-device FTP
-        # client) so there's no HTTP server to start or stop. Pin
-        # that the worker doesn't accidentally pick up the server
-        # ownership pattern -- it'd start a port-8000 listener for
-        # no reason and trip the next G42/RLS/WS5 run's auto-start.
-        self.assertNotIn(
-            "server_started_by_us", self.psi_src,
-            "PSI worker should not be tracking HTTP server "
-            "ownership -- PSI uses FTP, not the HTTP server",
-        )
-        self.assertNotIn(
-            "self.after(0, self._start_server)", self.psi_src,
-            "PSI worker should not be starting the HTTP server",
-        )
-
 
 class TestRunUpgradePromptsDoNotGateOnHttpServer(unittest.TestCase):
     """The pre-flight ``askokcancel`` / ``askyesno`` dialogs that
@@ -269,6 +259,8 @@ class TestRunUpgradePromptsDoNotGateOnHttpServer(unittest.TestCase):
             "g42": inspect.getsource(self.cls._run_g42_upgrade),
             "rls": inspect.getsource(self.cls._run_rls_upgrade),
             "ws5": inspect.getsource(self.cls._run_ws5_upgrade),
+            "psi": inspect.getsource(self.cls._run_psi_upgrade),
+            "pss": inspect.getsource(self.cls._run_pss_upgrade),
         }
 
     def test_run_upgrade_does_not_block_on_server_not_running_prompt(self):
@@ -282,6 +274,85 @@ class TestRunUpgradePromptsDoNotGateOnHttpServer(unittest.TestCase):
                     f"{name} Run Upgrade must not gate on a 'server "
                     "not running' dialog -- start it automatically",
                 )
+
+
+class TestCcLayoutResolution(unittest.TestCase):
+    """The PSI/PSS release dropdown was empty when the operator picked the
+    CC/ folder (or a release folder) instead of its parent. _resolve_cc_layout
+    must locate CC/ from any of those three levels and always return CC's
+    PARENT as the serve root so /CC/<release> resolves over HTTP."""
+
+    def setUp(self):
+        import tempfile
+        from gui import software_upgrade_frame
+        self.resolve = software_upgrade_frame.SoftwareUpgradeFrame._resolve_cc_layout
+        self._tmp = tempfile.TemporaryDirectory()
+        self.base = Path(self._tmp.name) / "Software Loads"
+        self.release = self.base / "CC" / "1830OLS-25.3-3"
+        self.release.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_resolves_from_parent_of_cc(self):
+        root, cc = self.resolve(str(self.base))
+        self.assertEqual(root, self.base)
+        self.assertEqual(cc, self.base / "CC")
+
+    def test_resolves_from_cc_folder_itself(self):
+        root, cc = self.resolve(str(self.base / "CC"))
+        self.assertEqual(root, self.base)          # serve root is CC's parent
+        self.assertEqual(cc, self.base / "CC")
+
+    def test_resolves_from_release_folder(self):
+        root, cc = self.resolve(str(self.release))
+        self.assertEqual(root, self.base)
+        self.assertEqual(cc, self.base / "CC")
+
+    def test_no_cc_returns_none(self):
+        root, cc = self.resolve(str(Path(self._tmp.name)))
+        self.assertIsNone(root)
+        self.assertIsNone(cc)
+
+    def test_empty_selection_returns_none(self):
+        self.assertEqual(self.resolve(""), (None, None))
+
+
+class TestCcReleaseListingIsUnzippedOnly(unittest.TestCase):
+    """PSI/PSS shelves pull individual files from an UNZIPPED release folder,
+    so the dropdown must offer only real extracted directories — never a .zip
+    archive and never a partial-download artifact (.zip_temp, .crswap, .part)."""
+
+    def setUp(self):
+        import tempfile
+        from gui import software_upgrade_frame
+        self.cls = software_upgrade_frame.SoftwareUpgradeFrame
+        self._tmp = tempfile.TemporaryDirectory()
+        self.cc = Path(self._tmp.name) / "CC"
+        self.cc.mkdir()
+        # Two good release folders + a bag of junk that must be filtered.
+        (self.cc / "1830OLS-25.3-3").mkdir()
+        (self.cc / "3KC72992AAAAPMZZA").mkdir()
+        (self.cc / "3KC73353AAAAPMZZA.zip_temp").mkdir()   # partial download dir
+        (self.cc / ".hidden").mkdir()
+        (self.cc / "1830OLS-25.3-3.zip").write_bytes(b"PK\x03\x04")   # archive
+        (self.cc / "3KC73353AAAAPMZZA.zip.1.crswap").write_bytes(b"x")
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_release_dirs_lists_only_unzipped_folders(self):
+        got = self.cls._release_dirs(self.cc)
+        self.assertEqual(got, ["1830OLS-25.3-3", "3KC72992AAAAPMZZA"])
+
+    def test_is_release_dir_rejects_artifacts(self):
+        self.assertTrue(self.cls._is_release_dir("1830OLS-25.3-3"))
+        for junk in ("foo.zip_temp", ".hidden", "x.crswap", "bar.part", "~tmp"):
+            self.assertFalse(self.cls._is_release_dir(junk), junk)
+
+    def test_cc_zip_files_detects_unextracted_archives(self):
+        # Drives the "unzip the load first" operator hint.
+        self.assertIn("1830OLS-25.3-3.zip", self.cls._cc_zip_files(self.cc))
 
 
 if __name__ == "__main__":

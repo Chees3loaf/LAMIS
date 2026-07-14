@@ -1947,23 +1947,23 @@ class WorkbookBuilder:
                         if hit:
                             _prior_ip, prior_sheet_title = hit
                             summary_index.pop(prior_sheet_title, None)
-                        elif not factory_default_rewrite_applied:
-                            # Fallback: same IP, no hostname match. Only safe to
-                            # treat as a "rescan of this device" when exactly one
-                            # prior entry has that IP — otherwise this is a
-                            # second device sharing the IP and we leave the
-                            # prior entry alone (Bug-3 fix: don't overwrite
-                            # legitimate distinct devices keyed by the same IP).
+                        elif (not factory_default_rewrite_applied
+                              and not clean_str(reported_name)
+                              and not clean_str(chassis_for_name)):
+                            # Fallback: same IP, no hostname match, AND the device
+                            # gave us NO real identity (no reported hostname and no
+                            # chassis serial). Only then is a same-IP name miss
+                            # most likely a rescan of one anonymous device, and
+                            # only when exactly one prior entry has that IP.
                             #
-                            # The IP-fallback is also wrong whenever the rewrite
-                            # above ran: a factory-default rewrite produces a
-                            # ``<prefix>-<chassis-serial>`` name, so a name miss
-                            # in name_index is GUARANTEED to be a different
-                            # chassis (different serial). For those devices we
-                            # always create a new tab even if the IP/COM port
-                            # collides — gated on the
-                            # ``factory_default_rewrite_applied`` flag set just
-                            # above.
+                            # CRITICAL (factory commissioning): when the device
+                            # DOES report a real, distinct hostname or serial, a
+                            # name miss means a DIFFERENT physical shelf — even
+                            # though many shelves are cabled to the same service
+                            # IP (e.g. 172.16.0.1). We must NOT treat that as a
+                            # rescan; doing so silently DELETED the prior shelf's
+                            # tab, leaving only the last shelf. Gating on a real
+                            # identity keeps each distinct shelf on its own tab.
                             ip_hits = [
                                 st for st, (rip, _) in summary_index.items()
                                 if rip == ip_key

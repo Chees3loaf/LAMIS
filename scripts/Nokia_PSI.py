@@ -2,13 +2,15 @@ import os
 import logging
 import re
 import ipaddress
+import socket
 import time
+import paramiko
 from tkinter import messagebox
 import pandas as pd
 from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache, NEEDS_CREDENTIALS_SENTINEL
-from utils.helpers import ensure_host_key_known, get_known_hosts_path
+from utils.helpers import ensure_host_key_known, get_known_hosts_path, nokia_ssh_authenticate
 from utils.telnet import Telnet
 
 try:
@@ -149,120 +151,129 @@ class Script(BaseScript):
         return outputs, None if all(outputs) else "Some commands failed"
 
     def execute_ssh_commands(self, commands: List[str]) -> Tuple[List[str], Optional[str]]:
+        """Connect to the Nokia PSI (1830-class) via SSH and run commands.
+
+        Uses the SAME proven two-stage login as the Nokia 1830 inventory and the
+        PSI upgrade script: SSH in as ``cli`` with ``auth_none`` (the PSI 'cli'
+        account has no SSH password), then answer the inner ``Username:`` /
+        ``Password:`` shell prompts with admin/admin (``self.username`` /
+        ``self.password``). This replaces an earlier ``ssh -l admin`` approach
+        that was NOT the cli-first model the PSI/PSS expect.
+        """
+        # Validate IP + username (injection guard) before anything else.
         try:
-            # Validate IP address format to prevent injection attacks
-            try:
-                ipaddress.ip_address(self.ip_address)
-            except ValueError:
-                return [], f"Invalid IP address format: {self.ip_address}"
-            
-            # Validate username to prevent injection (alphanumeric, dash, underscore, dot only)
-            if not re.match(r'^[a-zA-Z0-9._-]+$', self.username):
-                return [], f"Invalid username format: {self.username}"
-            
-            _kh = str(get_known_hosts_path())
-            if not ensure_host_key_known(str(self.ip_address), port=self.port):
-                return [], (
-                    f"SSH host key verification failed or rejected for "
-                    f"{self.ip_address}:{self.port}"
-                )
-            ssh_args = [
-                "-o", "StrictHostKeyChecking=yes",
-                "-o", f"UserKnownHostsFile={_kh}",
-                "-o", "HostKeyAlgorithms=+ssh-rsa",
-                "-o", "PubkeyAcceptedKeyTypes=+ssh-rsa",
-                "-o", "PreferredAuthentications=password",
-                "-p", str(self.port),
-                "-l", self.username,
-                str(self.ip_address),
-            ]
-            logging.debug(f"Spawning SSH process to {self.ip_address}:{self.port}")
-            self.child = spawn("ssh", args=ssh_args, encoding='utf-8', timeout=30)
+            ipaddress.ip_address(str(self.ip_address))
+        except ValueError:
+            return [], f"Invalid IP address format: {self.ip_address}"
+        if not re.match(r'^[a-zA-Z0-9._-]+$', self.username):
+            return [], f"Invalid username format: {self.username}"
+        if not ensure_host_key_known(str(self.ip_address), port=self.port):
+            return [], (
+                f"SSH host key verification failed or rejected for "
+                f"{self.ip_address}:{self.port}"
+            )
+
+        transport = None
+        channel = None
+        try:
+            sock = socket.create_connection((self.ip_address, self.port), timeout=30)
+            transport = paramiko.Transport(sock)
+            transport.start_client(timeout=30)
+
+            # SSH-layer auth. Identical to Nokia_1830: modern shelves accept
+            # admin/admin password auth and drop straight to the shell; legacy
+            # shelves use a passwordless 'cli' account + the inner two-stage
+            # handled below.
+            nokia_ssh_authenticate(transport, self.username, self.password)
+            logging.info(f"[PSI] SSH auth succeeded for {self.username}@{self.ip_address}")
+
+            channel = transport.open_session()
+            channel.get_pty()
+            channel.invoke_shell()
+
+            def drain(timeout=8.0, idle=1.5):
+                buf = ''
+                deadline = time.time() + timeout
+                last_recv = time.time()
+                while time.time() < deadline:
+                    if self.should_stop():
+                        return buf
+                    if channel.recv_ready():
+                        buf += channel.recv(4096).decode('utf-8', errors='replace')
+                        last_recv = time.time()
+                    elif time.time() - last_recv >= idle:
+                        break
+                    else:
+                        time.sleep(0.1)
+                return buf
+
+            # Modern shelves (admin/admin SSH) land straight at the shell; only
+            # run the inner Username:/Password: two-stage if we are NOT already
+            # at a shell prompt AND a login prompt is genuinely pending. The
+            # end-anchored match keeps the banner's "Last Login:" line from being
+            # mistaken for a login prompt.
+            post = drain(timeout=8.0, idle=1.5)
+            if not re.search(r'[#>$]\s*$', post) and \
+                    re.search(r'(?im)(username|login)\s*:\s*$', post):
+                channel.send(f"{self.username}\n")
+                pwd_banner = drain(timeout=8.0, idle=1.0)
+                if not re.search(r'(?i)password\s*:', pwd_banner):
+                    return [], f"[PSI] No password prompt (got: {pwd_banner[-200:]!r})"
+                channel.send(f"{self.password}\n")
+                post = drain(timeout=10.0, idle=1.5)
+                if re.search(r'(?i)(incorrect|invalid|fail|denied)', post):
+                    return [], NEEDS_CREDENTIALS_SENTINEL
+
+            # Auto-answer up to three Y/n EULA / session banners before the shell.
+            for _ in range(3):
+                if re.search(r'[#>$]\s*$', post):
+                    break
+                if re.search(
+                    r'(?i)\(\s*y\s*/\s*n\s*\)|\[\s*y\s*/\s*n\s*\]|continue\?|accept\?|press\s+y',
+                    post
+                ):
+                    channel.send("y\n")
+                    post += drain(timeout=8.0, idle=1.0)
+                else:
+                    break
+
+            if not re.search(r'[#>$]\s*$', post):
+                return [], f"[PSI] No shell prompt after login (got: {post[-200:]!r})"
+
             output_log = []
-
-            idx = self.expect_with_abort(
-                self.child,
-                [r"[Ll]ogin:", r"[Uu]sername:", r"[Pp]assword:", EOF, TIMEOUT],
-                timeout=30,
-            )
-            if idx is None:
-                self.child.close(force=True); self.child = None; return [], "Aborted"
-            if idx in (3, 4):
-                self.child.close(force=True); self.child = None; return [], "SSH connection failed"
-
-            if idx == 0:  # login: — Nokia CLI step
-                self.child.sendline("cli")
-                r = self.expect_with_abort(self.child, [r"[Uu]sername:", EOF, TIMEOUT], timeout=15)
-                if r is None:
-                    self.child.close(force=True); self.child = None; return [], "Aborted"
-                if r != 0:
-                    self.child.close(force=True); self.child = None; return [], "SSH login sequence failed"
-                self.child.sendline(self.username)
-            elif idx == 1:  # username:
-                self.child.sendline(self.username)
-            # idx == 2 means already at password:
-
-            if idx != 2:
-                r = self.expect_with_abort(self.child, [r"[Pp]assword:", EOF, TIMEOUT], timeout=15)
-                if r is None:
-                    self.child.close(force=True); self.child = None; return [], "Aborted"
-                if r != 0:
-                    self.child.close(force=True); self.child = None; return [], "SSH did not present password prompt"
-            self.child.sendline(self.password)
-
-            idx = self.expect_with_abort(
-                self.child, [r"[#>]", "incorrect", "invalid", EOF, TIMEOUT], timeout=30
-            )
-            if idx is None:
-                self.child.close(force=True); self.child = None; return [], "Aborted"
-            if idx in (1, 2):
-                self.child.close(force=True); self.child = None; return [], NEEDS_CREDENTIALS_SENTINEL
-            if idx in (3, 4):
-                self.child.close(force=True); self.child = None; return [], "SSH session closed unexpectedly"
-
-            prompt = self.child.after.strip()
-            logging.debug(f"Detected SSH prompt: '{prompt}'")
-
             for cmd in commands:
                 if self.should_stop():
-                    self.child.close(force=True); self.child = None; return output_log, "Aborted"
-                logging.debug(f"Sending SSH command: {cmd}")
-                self.child.sendline(cmd)
-                if self.expect_with_abort(self.child, cmd, timeout=15) is None:
-                    self.child.close(force=True); self.child = None; return output_log, "Aborted"
-                full_output = ""
-                while True:
-                    index = self.expect_with_abort(self.child, [prompt, EOF, TIMEOUT], timeout=30)
-                    if index is None:
-                        self.child.close(force=True); self.child = None; return output_log, "Aborted"
-                    full_output += self.child.before
-                    if index == 0:
-                        full_output += self.child.after
-                        break
-                    elif index in (1, 2):
-                        logging.warning(f"SSH session ended waiting for prompt (cmd: {cmd})")
-                        break
-                output_log.append(full_output.strip())
+                    return output_log, "Aborted"
+                logging.debug(f"[PSI] Sending command: {cmd}")
+                channel.send(f"{cmd}\n")
+                raw = drain(timeout=30.0, idle=2.0)
+                lines = raw.replace('\r\n', '\n').replace('\r', '\n').split('\n')
+                # Strip the command echo line and any trailing prompt line.
+                cleaned = [
+                    l for l in lines
+                    if l.strip() and cmd.strip() not in l and not re.search(r'\S+[#>]\s*$', l)
+                ]
+                output_log.append('\n'.join(cleaned).strip())
                 self.command_tracker.mark_as_executed(self.ip_address, cmd, 'ssh')
 
-            self.child.sendline("exit")
-            try:
-                self.expect_with_abort(self.child, [prompt, EOF, TIMEOUT], timeout=10)
-            except Exception:
-                pass
-            self.child.close(force=True)
-            self.child = None
+            channel.send("exit\n")
+            drain(timeout=5.0, idle=1.0)
             return output_log, None
 
         except Exception as e:
-            logging.exception("SSH execution exception")
-            if self.child:
+            logging.exception(f"[PSI] SSH execution exception for {self.ip_address}")
+            return [], str(e)
+        finally:
+            if channel:
                 try:
-                    self.child.close(force=True)
+                    channel.close()
                 except Exception:
                     pass
-                self.child = None
-            return [], str(e)
+            if transport:
+                try:
+                    transport.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Telnet helpers

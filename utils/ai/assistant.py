@@ -391,13 +391,20 @@ def render_answer(answer: "Answer") -> str:
     In extractive mode the command the tech runs is read from this verbatim block,
     never from the prose. Shows the excerpts the answer cited via [n] PLUS any
     excerpt that actually contains one of the answer's commands (so the command's
-    real source page is always present), falling back to the top 3 if neither."""
+    real source page is always present).
+
+    If the answer neither cites an excerpt ([n]) nor contains a command — i.e. it
+    is a refusal / "I don't find it" — the verbatim block and source list are
+    suppressed entirely. Dumping unrelated pages under a not-found answer reads as
+    "here's your documentation" when we just said there wasn't any."""
     parts = [answer.text]
     if answer.citations:
         cited = {int(n) for n in _CITED_RE.findall(answer.text)
                  if 1 <= int(n) <= len(answer.citations)}
         cited |= _excerpts_with_commands(answer.text, answer.excerpts)
-        cited = sorted(cited) or list(range(1, min(3, len(answer.citations)) + 1))
+        cited = sorted(cited)
+        if not cited:
+            return answer.text  # refusal / ungrounded — don't dump docs
         parts.append("\n\n=== Documentation (verbatim — copy commands from here) ===")
         for i in cited:
             hit = answer.citations[i - 1]
@@ -899,10 +906,17 @@ class DocAssistant:
         the model (robust to timestamps/AIDs/severity noise), falling back to a
         regex."""
         prompt = (
-            "You extract alarm names / error codes from raw network-equipment "
-            "output. List each DISTINCT identifier on its own line - just the "
-            "code (e.g. APRNODE, LOS-P, ALLCHANMISS-OUT-L), with no timestamps, "
-            "AIDs, severities, or descriptions. If there are none, output nothing."
+            "You extract alarms / error codes from raw network-equipment output. "
+            "List each DISTINCT alarm on its own line. Prefer the short "
+            "mnemonic/code exactly as printed (e.g. APRNODE, LOS-OUT-C, "
+            "ALLCHANMISS-OUT-L). If an alarm is given ONLY by its descriptive "
+            "text (e.g. 'Outgoing Loss of signal', 'Neighbor Mismatch'), return "
+            "that text VERBATIM - do NOT invent, guess, or normalize it into a "
+            "code, and NEVER drop a distinguishing word such as "
+            "'Outgoing'/'Incoming' or a band like 'C'/'L' (an outgoing LOS is a "
+            "different alarm from an incoming one). Omit timestamps, AIDs, "
+            "shelf/slot/port locations, and severities. If there are none, "
+            "output nothing."
         )
         alarms = []
         try:
@@ -926,9 +940,13 @@ class DocAssistant:
         prompt = (
             "This is a screenshot of network-equipment output (an EMS/NMS alarm "
             "list, a CLI session, or an alarm banner). Read it and list each "
-            "DISTINCT alarm name / error code on its own line - just the code "
-            "(e.g. APRNODE, LOS-P, ALLCHANMISS-OUT-L, Neighbor Mismatch), with no "
-            "timestamps, AIDs, severities, or descriptions. A name may be WRAPPED "
+            "DISTINCT alarm on its own line. Prefer the short mnemonic/code as "
+            "printed (e.g. APRNODE, LOS-OUT-C, ALLCHANMISS-OUT-L). If an alarm is "
+            "shown only by its descriptive text (e.g. 'Outgoing Loss of signal', "
+            "'Neighbor Mismatch'), return that text VERBATIM - do NOT guess a "
+            "code, and NEVER drop a distinguishing word such as "
+            "'Outgoing'/'Incoming' or a band 'C'/'L'. Omit timestamps, AIDs, "
+            "shelf/slot/port locations, and severities. A name may be WRAPPED "
             "across two lines in a narrow column (e.g. 'section-calibration-in-pr' "
             "+ 'ogress') - reconstruct the full name. Do not wrap your answer in a "
             "code block. If there are none, output nothing."

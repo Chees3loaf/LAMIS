@@ -450,6 +450,10 @@ class SoftwareUpgradeFrame(ttk.Frame):
         folder_frame.pack(fill=tk.X, padx=5, pady=4)
 
         self._folder_var = tk.StringVar()
+        # Re-scan every device's dropdown whenever the path changes — covers a
+        # typed/pasted path too, not just Browse… (which is why PSI could show
+        # an empty release list). Guarded so it no-ops before the combos exist.
+        self._folder_var.trace_add("write", self._on_folder_changed)
         ttk.Entry(folder_frame, textvariable=self._folder_var, width=60).pack(
             side=tk.LEFT, padx=(6, 2), pady=4
         )
@@ -631,8 +635,9 @@ class SoftwareUpgradeFrame(ttk.Frame):
         ttk.Label(
             self._psi_frame,
             text="Note: the PSI fetches http://172.16.0.101:8000/CC/<release>. "
-                 "Pick a folder that contains a CC/ subdirectory of release "
-                 "folders.",
+                 "Select the folder that contains CC/ (the CC/ folder itself "
+                 "also works). Loads must be UNZIPPED release folders inside CC/ "
+                 "— ATLAS serves them automatically during the upgrade.",
             foreground="gray",
         ).pack(anchor=tk.W, padx=6, pady=(4, 0))
 
@@ -692,8 +697,9 @@ class SoftwareUpgradeFrame(ttk.Frame):
         ttk.Label(
             self._pss_frame,
             text="Note: the PSS fetches http://172.16.0.101:8000/CC/<release>. "
-                 "Pick a folder that contains a CC/ subdirectory of release "
-                 "folders.",
+                 "Select the folder that contains CC/ (the CC/ folder itself "
+                 "also works). Loads must be UNZIPPED release folders inside CC/ "
+                 "— ATLAS serves them automatically during the upgrade.",
             foreground="gray",
         ).pack(anchor=tk.W, padx=6, pady=(4, 0))
 
@@ -852,6 +858,18 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._refresh_pss_files()
         self._refresh_ws5_files()
 
+    def _on_folder_changed(self, *_args) -> None:
+        """Folder path changed (Browse… or typed) — re-scan all device
+        dropdowns. Guarded because the trace can fire before the later combos
+        are built during __init__."""
+        if not hasattr(self, "_ws5_file_combo"):
+            return
+        self._refresh_rls_files()
+        self._refresh_g42_files()
+        self._refresh_psi_files()
+        self._refresh_pss_files()
+        self._refresh_ws5_files()
+
     def _on_dtype_change(self, _event=None) -> None:
         """Show/hide device-specific panels and pre-fill the PC static
         IP based on the selected device type. The Run-Upgrade worker
@@ -890,10 +908,12 @@ class SoftwareUpgradeFrame(ttk.Frame):
             self._psi_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
             self._pc_ip_var.set(_PSI_NET["pc_ip"])
             self._mask_var.set(_DEFAULT_MASK)
+            self._refresh_psi_files()   # re-scan CC/ for the current folder
         elif dtype == "Nokia PSS":
             self._pss_frame.pack(fill=tk.X, padx=5, pady=4, before=before)
             self._pc_ip_var.set(_PSS_NET["pc_ip"])
             self._mask_var.set(_DEFAULT_MASK)
+            self._refresh_pss_files()   # re-scan CC/ for the current folder
 
     def _on_rls_ctm_change(self) -> None:
         """When the CTM changes, auto-fill the PC IP to the matching internal
@@ -944,52 +964,102 @@ class SoftwareUpgradeFrame(ttk.Frame):
         to all files if none match."""
         self._populate_file_combo(self._g42_file_combo, self._g42_file_var, ".manifest")
 
-    def _refresh_psi_files(self) -> None:
-        """Populate the PSI software dropdown. PSI loads live under a CC/
-        subdirectory of the chosen folder and are staged as per-release
-        *directories* (e.g. CC/R10.0.1/), so list those release folders.
+    @staticmethod
+    def _resolve_cc_layout(selected: str):
+        """Locate the CC/ release directory from whatever level the operator
+        picked, and return ``(serve_root, cc_dir)`` as ``Path`` objects.
 
-        Falls back to listing files directly in CC/ when there are no
-        subdirectories, preserving the older flat-file layout. No
-        extension filter either way — PSI loads are named without a
-        meaningful extension."""
-        folder = self._folder_var.get().strip()
-        cc_path = Path(folder) / "CC" if folder else None
-        if cc_path is None or not cc_path.is_dir():
-            self._psi_file_combo["values"] = []
-            self._psi_file_var.set("")
-            return
+        The device fetches ``http://<pc>:8000/CC/<release>``, so the HTTP
+        server must be rooted at CC's PARENT (``serve_root``) for that path to
+        resolve. Three selections are tolerated:
+
+          * the folder that CONTAINS CC/  (the intended pick) -> (sel, sel/CC)
+          * the CC/ folder itself                             -> (sel.parent, sel)
+          * a release folder inside CC/                       -> (sel.parent.parent, sel.parent)
+
+        Returns ``(None, None)`` when no CC/ can be found."""
+        if not selected:
+            return None, None
+        p = Path(selected)
+        if not p.is_dir():
+            return None, None
+        if (p / "CC").is_dir():
+            return p, p / "CC"
+        if p.name.upper() == "CC":
+            return p.parent, p
+        if p.parent.name.upper() == "CC":
+            return p.parent.parent, p.parent
+        return None, None
+
+    # A PSI/PSS shelf pulls individual files from an UNZIPPED release folder, so
+    # only real extracted directories are valid — never a .zip archive, and
+    # never a partial-download / temp artifact left behind by the browser or
+    # OneDrive while a .zip was being fetched.
+    _NON_RELEASE_DIR_SUFFIXES = (
+        ".zip_temp", ".tmp", ".temp", ".part", ".crdownload", ".download",
+    )
+
+    @staticmethod
+    def _is_release_dir(name: str) -> bool:
+        """True if ``name`` looks like a real unzipped release folder (not a
+        hidden dir or an in-progress download artifact)."""
+        low = name.lower()
+        if name[:1] in (".", "~"):
+            return False
+        if low.endswith(SoftwareUpgradeFrame._NON_RELEASE_DIR_SUFFIXES):
+            return False
+        if ".crswap" in low:
+            return False
+        return True
+
+    @staticmethod
+    def _release_dirs(cc_dir: "Path") -> list:
+        """Sorted names of the unzipped release *directories* inside ``cc_dir``.
+        Archives and partial-download artifacts are filtered out."""
         try:
-            dirs = sorted(p.name for p in cc_path.iterdir() if p.is_dir())
-            files = sorted(p.name for p in cc_path.iterdir() if p.is_file())
+            names = [p.name for p in cc_dir.iterdir() if p.is_dir()]
         except OSError:
-            dirs, files = [], []
-        # Release folders are the normal case; only fall back to loose
-        # files when CC/ has no subdirectories at all.
-        entries = dirs or files
-        self._psi_file_combo["values"] = entries
-        if entries and not self._psi_file_var.get():
-            self._psi_file_var.set(entries[0])
+            return []
+        return sorted(n for n in names if SoftwareUpgradeFrame._is_release_dir(n))
+
+    @staticmethod
+    def _cc_zip_files(cc_dir: "Path") -> list:
+        """Sorted names of .zip archives sitting (un-extracted) in ``cc_dir`` —
+        used to tell the operator to unzip when no release folder is present."""
+        try:
+            return sorted(
+                p.name for p in cc_dir.iterdir()
+                if p.is_file() and p.suffix.lower() == ".zip"
+            )
+        except OSError:
+            return []
+
+    def _list_cc_releases(self, combo, var) -> None:
+        """Shared PSI/PSS dropdown fill: list only the UNZIPPED release
+        directories under the resolved CC/, tolerant of whichever folder level
+        the operator selected. Clears the selection when the new list no longer
+        contains it so a stale release name can't linger."""
+        _serve_root, cc_path = self._resolve_cc_layout(self._folder_var.get().strip())
+        if cc_path is None:
+            combo["values"] = []
+            var.set("")
+            return
+        entries = self._release_dirs(cc_path)
+        combo["values"] = entries
+        if entries and var.get() not in entries:
+            var.set(entries[0])
+        elif not entries:
+            var.set("")
+
+    def _refresh_psi_files(self) -> None:
+        """Populate the PSI software dropdown from the CC/ release folders of
+        the chosen folder. See ``_resolve_cc_layout`` for how the CC/ directory
+        is located regardless of which level the operator selected."""
+        self._list_cc_releases(self._psi_file_combo, self._psi_file_var)
 
     def _refresh_pss_files(self) -> None:
-        """Populate the PSS software dropdown — identical layout to the PSI:
-        release *directories* under a CC/ subdirectory of the chosen folder,
-        falling back to loose files when CC/ has no subdirectories."""
-        folder = self._folder_var.get().strip()
-        cc_path = Path(folder) / "CC" if folder else None
-        if cc_path is None or not cc_path.is_dir():
-            self._pss_file_combo["values"] = []
-            self._pss_file_var.set("")
-            return
-        try:
-            dirs = sorted(p.name for p in cc_path.iterdir() if p.is_dir())
-            files = sorted(p.name for p in cc_path.iterdir() if p.is_file())
-        except OSError:
-            dirs, files = [], []
-        entries = dirs or files
-        self._pss_file_combo["values"] = entries
-        if entries and not self._pss_file_var.get():
-            self._pss_file_var.set(entries[0])
+        """Populate the PSS software dropdown — identical CC/ layout to PSI."""
+        self._list_cc_releases(self._pss_file_combo, self._pss_file_var)
 
     def _populate_file_combo(
         self, combo: ttk.Combobox, var: tk.StringVar, ext: str
@@ -1081,12 +1151,15 @@ class SoftwareUpgradeFrame(ttk.Frame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _start_server(self) -> None:
+    def _start_server(self, root: Optional[str] = None) -> None:
         if self._server is not None:
             messagebox.showinfo("Already running", "HTTP server is already running.")
             return
 
-        folder = self._folder_var.get().strip()
+        # PSI/PSS pass an explicit root (CC's parent) so /CC/<release> resolves
+        # even when the operator selected the CC folder itself. Everyone else
+        # defaults to the browsed folder.
+        folder = (root if root is not None else self._folder_var.get()).strip()
         if not folder or not os.path.isdir(folder):
             messagebox.showerror("Error", "Pick a valid software folder first.")
             return
@@ -1448,14 +1521,35 @@ class SoftwareUpgradeFrame(ttk.Frame):
             messagebox.showinfo("Already running", "An upgrade is already in progress.")
             return
 
-        filename = self._psi_file_var.get().strip()
-        if not filename:
+        # The device pulls the load over HTTP from this PC, so we serve the
+        # folder that CONTAINS CC/ (serve_root) — resolved from whatever level
+        # the operator selected. No CC/ means nothing to serve.
+        serve_root, cc_dir = self._resolve_cc_layout(self._folder_var.get().strip())
+        if serve_root is None:
             messagebox.showerror(
                 "Error",
-                "Pick a software release from the dropdown. The folder you "
-                "selected needs a CC/ subdirectory; we list the release "
-                "folders inside it.",
+                "Could not find a CC/ directory. Select the software folder "
+                "that contains CC/ (or the CC/ folder itself).",
             )
+            return
+
+        filename = self._psi_file_var.get().strip()
+        if not filename:
+            zips = self._cc_zip_files(cc_dir)
+            if zips:
+                messagebox.showerror(
+                    "Unzip the load first",
+                    f"CC/ contains {len(zips)} .zip archive(s) but no unzipped "
+                    "release folder. PSI/PSS shelves pull the load from an "
+                    "UNZIPPED folder — extract each .zip into CC/ (e.g. "
+                    "CC/1830OLS-25.3-3/), then click ↺ to refresh.",
+                )
+            else:
+                messagebox.showerror(
+                    "Error",
+                    "Pick a software release from the dropdown. The CC/ folder "
+                    "needs an unzipped release subfolder.",
+                )
             return
 
         pc_ip = _PSI_NET["pc_ip"]
@@ -1484,11 +1578,13 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._log(f"\n──── PSI upgrade: {device_ip} ← /CC/{filename} ────")
 
         def _worker() -> None:
-            # Auto-restore DHCP in the finally so the operator doesn't
-            # have to remember a manual step. PSI uses FTP (not the
-            # local HTTP server), so there's no server-start step
-            # here -- just the static IP lifecycle.
+            # Auto-restore DHCP and auto-stop the HTTP server in the finally so
+            # the operator doesn't have to remember either manual step. The PSI
+            # pulls its load over HTTP from this PC (config software server
+            # protocol HTTP, port 8000), so we DO start the local server here —
+            # rooted at CC's parent so /CC/<release> resolves.
             static_ip_owned_by_us = False
+            server_started_by_us = False
             try:
                 # Step 1 — set PC NIC to the PSI service IP.
                 # Helper handles stale-binding cleanup.
@@ -1510,7 +1606,20 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._log(f"netsh OK: {msg}")
                 time.sleep(2.0)
 
-                # Step 2 — 2-phase SSH login + FTP config + audit/load/activate.
+                # Step 2 — start the HTTP server rooted at CC's parent, unless
+                # the operator already started one manually. ``_start_server``
+                # schedules via ``self.after`` and returns immediately, so give
+                # the listener a beat to bind before the device fetches.
+                if self._server is None:
+                    self._log(
+                        f"Starting HTTP server on {pc_ip}:{_HTTP_PORT} "
+                        f"(root: {serve_root})…"
+                    )
+                    self.after(0, lambda: self._start_server(str(serve_root)))
+                    time.sleep(1.0)
+                    server_started_by_us = True
+
+                # Step 3 — 2-phase SSH login + server config + audit/load/activate.
                 from scripts.Network.Nokia_PSI_Upgrade import NokiaPSIUpgradeScript
 
                 script = NokiaPSIUpgradeScript(
@@ -1535,6 +1644,9 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._set_psi_status("Error", "red")
                 self._log(f"[ERROR] {exc}")
             finally:
+                if server_started_by_us:
+                    self._log("Stopping HTTP server…")
+                    self.after(0, self._stop_server)
                 if static_ip_owned_by_us:
                     self._log("Restoring DHCP on the NIC…")
                     self.after(0, self._restore_dhcp)
@@ -1569,14 +1681,35 @@ class SoftwareUpgradeFrame(ttk.Frame):
             messagebox.showinfo("Already running", "An upgrade is already in progress.")
             return
 
-        filename = self._pss_file_var.get().strip()
-        if not filename:
+        # The device pulls the load over HTTP from this PC, so we serve the
+        # folder that CONTAINS CC/ (serve_root) — resolved from whatever level
+        # the operator selected. No CC/ means nothing to serve.
+        serve_root, cc_dir = self._resolve_cc_layout(self._folder_var.get().strip())
+        if serve_root is None:
             messagebox.showerror(
                 "Error",
-                "Pick a software release from the dropdown. The folder you "
-                "selected needs a CC/ subdirectory; we list the release "
-                "folders inside it.",
+                "Could not find a CC/ directory. Select the software folder "
+                "that contains CC/ (or the CC/ folder itself).",
             )
+            return
+
+        filename = self._pss_file_var.get().strip()
+        if not filename:
+            zips = self._cc_zip_files(cc_dir)
+            if zips:
+                messagebox.showerror(
+                    "Unzip the load first",
+                    f"CC/ contains {len(zips)} .zip archive(s) but no unzipped "
+                    "release folder. PSI/PSS shelves pull the load from an "
+                    "UNZIPPED folder — extract each .zip into CC/ (e.g. "
+                    "CC/1830OLS-25.3-3/), then click ↺ to refresh.",
+                )
+            else:
+                messagebox.showerror(
+                    "Error",
+                    "Pick a software release from the dropdown. The CC/ folder "
+                    "needs an unzipped release subfolder.",
+                )
             return
 
         pc_ip = _PSS_NET["pc_ip"]
@@ -1605,11 +1738,14 @@ class SoftwareUpgradeFrame(ttk.Frame):
         self._log(f"\n──── PSS upgrade: {device_ip} ← /CC/{filename} ────")
 
         def _worker() -> None:
-            # Auto-restore DHCP in the finally so the operator doesn't
-            # have to remember a manual step. PSS uses FTP/HTTP (not the
-            # local HTTP server start step), so there's no server-start
-            # step here -- just the static IP lifecycle.
+            # Auto-restore DHCP and auto-stop the HTTP server in the finally so
+            # the operator doesn't have to remember either manual step. The PSS
+            # pulls its load over HTTP from this PC (config software server
+            # protocol HTTP; it just omits the explicit `port 8000`), so we DO
+            # start the local server here — rooted at CC's parent so
+            # /CC/<release> resolves.
             static_ip_owned_by_us = False
+            server_started_by_us = False
             try:
                 # Step 1 — set PC NIC to the PSS service IP.
                 # Helper handles stale-binding cleanup.
@@ -1631,7 +1767,18 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._log(f"netsh OK: {msg}")
                 time.sleep(2.0)
 
-                # Step 2 — 2-phase SSH login + FTP config + audit/load/activate.
+                # Step 2 — start the HTTP server rooted at CC's parent, unless
+                # the operator already started one manually.
+                if self._server is None:
+                    self._log(
+                        f"Starting HTTP server on {pc_ip}:{_HTTP_PORT} "
+                        f"(root: {serve_root})…"
+                    )
+                    self.after(0, lambda: self._start_server(str(serve_root)))
+                    time.sleep(1.0)
+                    server_started_by_us = True
+
+                # Step 3 — 2-phase SSH login + server config + audit/load/activate.
                 from scripts.Network.Nokia_PSS_Upgrade import NokiaPSSUpgradeScript
 
                 script = NokiaPSSUpgradeScript(
@@ -1656,6 +1803,9 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._set_pss_status("Error", "red")
                 self._log(f"[ERROR] {exc}")
             finally:
+                if server_started_by_us:
+                    self._log("Stopping HTTP server…")
+                    self.after(0, self._stop_server)
                 if static_ip_owned_by_us:
                     self._log("Restoring DHCP on the NIC…")
                     self.after(0, self._restore_dhcp)

@@ -17,7 +17,7 @@ upgrade sequence is:
   1. config general ftpserver enable
   2. config software server ip 172.16.0.101
   3. config software server userid UserSWNE
-     <password prompt> → "Ftp-id#1"
+     <password prompt> → "Ftpid#1"
   4. config software server root /CC/
   5. config software server protocol HTTP
   6. config software upgrade manual audit <filename> nobackup
@@ -39,7 +39,7 @@ from typing import Callable, Optional
 
 import paramiko
 
-from utils.helpers import ensure_host_key_known
+from utils.helpers import ensure_host_key_known, nokia_ssh_authenticate
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 # This is the literal password Nokia's procedure specifies — the PSS does
 # not actually authenticate against the HTTP server, but the command
 # sequence still requires it to be set.
-_FTP_PASSWORD = "Ftp-id#1"
+_FTP_PASSWORD = "Ftpid#1"
 
 # How long to wait between `config software upgrade status` polls. Per
 # field guidance the load takes ~5 minutes, so polling every 20s gives a
@@ -127,22 +127,17 @@ class NokiaPSSUpgradeScript:
                 return False
 
             try:
-                try:
-                    transport.auth_none(self.username)
-                    logging.info("[PSS] auth_none succeeded for %s@%s",
-                                 self.username, self.ip_address)
-                except paramiko.BadAuthenticationType:
-                    transport.auth_interactive(
-                        self.username, lambda t, i, p: ["" for _ in p]
-                    )
-                    logging.info(
-                        "[PSS] keyboard-interactive auth succeeded for %s@%s",
-                        self.username, self.ip_address,
-                    )
-            except paramiko.AuthenticationException:
+                # SSH-layer auth: modern shelves accept admin/admin password auth
+                # and drop straight to the shell; legacy shelves use a passwordless
+                # 'cli' account + the inner two-stage in _two_stage_login. Try the
+                # admin (inner) creds first.
+                nokia_ssh_authenticate(transport, self.inner_username, self.inner_password)
+                logging.info("[PSS] SSH auth succeeded for %s@%s",
+                             self.inner_username, self.ip_address)
+            except (paramiko.AuthenticationException, paramiko.SSHException) as exc:
                 self._log(
-                    "Outer SSH auth was rejected. PSS 'cli' login expects no "
-                    "SSH password — check the SSH User field (should be 'cli')."
+                    f"SSH authentication was rejected ({exc}). Check the login "
+                    "credentials for this shelf (default admin/admin)."
                 )
                 return False
 
@@ -182,9 +177,19 @@ class NokiaPSSUpgradeScript:
         prompt. Mirrors ``DeviceIdentifier._do_1830_two_stage_login``."""
         banner = self._drain(session, idle_seconds=1.5, max_wait=8.0)
         if not _USERNAME_RE.search(banner):
+            # Modern shelves (admin/admin SSH auth) drop straight to the shell —
+            # no inner Username:/Password:. Accept that if a prompt is present.
+            m = _PROMPT_RE.search(banner)
+            if m:
+                self._prompt = m.group(1)
+                self._log(
+                    f"At shell prompt after SSH auth ({self._prompt}); "
+                    "no inner login needed."
+                )
+                return True
             self._log(
-                "No inner Username: prompt seen after SSH auth — is this "
-                "really a PSS / 1830-class device?"
+                "No inner Username: prompt and no shell prompt after SSH auth — "
+                "is this really a PSS / 1830-class device?"
             )
             return False
 

@@ -269,12 +269,18 @@ def test_render_shows_excerpt_containing_command_even_without_citation():
     assert "grep -A1 DOWNSTR" in out
 
 
-def test_render_answer_falls_back_when_no_inline_citation():
+def test_render_suppresses_docs_when_answer_is_ungrounded():
+    """A refusal / 'I don't find it' answer cites no [n] and contains no
+    command, so the verbatim block and source list must be suppressed — dumping
+    unrelated pages under a not-found answer reads as 'here's your docs' when we
+    just said there weren't any."""
     hits = [Hit("a.pdf", 1, "t", 0.9, 0)]
-    ans = Answer(text="No bracket citations here.", citations=hits,
-                 excerpts=["VERBATIM_A"])
+    ans = Answer(text="I don't find it in the indexed documentation.",
+                 citations=hits, excerpts=["VERBATIM_A"])
     out = render_answer(ans)
-    assert "VERBATIM_A" in out  # falls back to showing the top excerpt verbatim
+    assert out == "I don't find it in the indexed documentation."
+    assert "VERBATIM_A" not in out
+    assert "=== Documentation" not in out
 
 
 def test_detect_platform():
@@ -307,6 +313,19 @@ class _VisionProvider(_ExtractProvider):
         self.image_calls += 1
         self.last_image = image_bytes
         return "APRNODE\nLOS-P\nAPRNODE"  # duplicate, like a busy alarm banner
+
+
+class _DescriptiveExtractProvider(FakeProvider):
+    """Mimics the FIXED extractor: when the alarm is given only by descriptive
+    text, it returns that text VERBATIM (keeping the direction word) instead of
+    guessing a mnemonic like the old prompt did (which hallucinated LOS-P from
+    'Outgoing Loss of signal')."""
+    def chat(self, system, user):
+        self.chat_calls += 1
+        self.users.append(user)
+        if "extract" in system.lower():
+            return "Outgoing Loss of signal"
+        return "ANSWERED"
 
 
 def test_looks_like_alarm_dump(index):
@@ -369,6 +388,57 @@ def test_answer_routes_question_vs_alarm(index):
     assert "Interpreting:" not in q.text          # routed to Q&A
     al = a.answer("APRNODE Major raised", platform_filter=["RLS", "2051"])
     assert "Interpreting:" in al.text             # routed to interpret
+
+
+def test_interpret_descriptive_alarm_matches_correct_direction(index):
+    """A descriptive-text alarm ('Outgoing Loss of signal') must resolve to the
+    OUTGOING alarm, keeping the direction word through extraction and matching
+    the outgoing doc rather than being collapsed to a guessed mnemonic."""
+    provider = _DescriptiveExtractProvider()   # extracts "Outgoing Loss of signal"
+    outgoing = [Chunk(page=209, chunk_index=0, text=(
+        "LOS-OUT-C Outgoing Loss of signal C band OTS output channels "
+        "monitored power drops below the set threshold MAXDEV"))]
+    index.add_chunks("3KC91895_1830_OLS_Maintenance.pdf", outgoing,
+                     provider.embed([outgoing[0].text]), config.AI_EMBED_MODEL)
+    a = DocAssistant(index=index, provider=provider, use_hyde=False)
+    ans = a.interpret("1/10/OMD Out OTS Outgoing Loss of signal",
+                      platform_filter=["1830", "OLS"])
+    assert "Interpreting: Outgoing Loss of signal" in ans.text  # phrase preserved
+    assert "## Outgoing Loss of signal" in ans.text
+    assert ans.citations                       # grounded in the outgoing alarm doc
+
+
+def test_interpret_descriptive_alarm_gate_rejects_wrong_direction(index):
+    """The dangerous mislabel this guards: your OMD 'Outgoing Loss of signal'
+    was written up as the INCOMING sibling (LOS-P) because the old extractor
+    guessed a mnemonic. With the direction word preserved, if ONLY the wrong-
+    direction alarm is in the docs the gate must report 'not found' — never
+    adopt the incoming alarm under an outgoing query."""
+    provider = _DescriptiveExtractProvider()   # extracts "Outgoing Loss of signal"
+    only_incoming = [Chunk(page=210, chunk_index=0, text=(
+        "LOS-P Incoming payload LOS reported when the incoming signal power "
+        "level drops below a set threshold at the input port of the amplifier"))]
+    index.add_chunks("3KC91895_1830_OLS_Maintenance.pdf", only_incoming,
+                     provider.embed([only_incoming[0].text]), config.AI_EMBED_MODEL)
+    a = DocAssistant(index=index, provider=provider, use_hyde=False)
+    ans = a.interpret("1/10/OMD Out OTS Outgoing Loss of signal",
+                      platform_filter=["1830", "OLS"])
+    assert "Not found in the indexed documentation" in ans.text
+    assert "LOS-P" not in ans.text             # did NOT adopt the incoming sibling
+    assert "Incoming payload" not in ans.text
+    assert ans.citations == []                 # nothing grounded
+
+
+def test_extract_prompts_preserve_direction_words():
+    """Tripwire: both extractors must keep descriptive text verbatim and its
+    direction word — a revert to 'just the code' reintroduces the LOS-OUT→LOS-P
+    mislabel. Pinned on prompt source so it fails without a live model."""
+    import inspect
+    for meth in (DocAssistant.extract_alarms, DocAssistant.extract_alarms_from_image):
+        src = inspect.getsource(meth)
+        self_msg = meth.__name__
+        assert "Outgoing" in src and "Incoming" in src, self_msg
+        assert "verbatim" in src.lower(), self_msg
 
 
 def test_platform_groups_keeps_platforms_separate():

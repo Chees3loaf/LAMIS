@@ -1,5 +1,5 @@
 """
-Common helper functions for LAMIS.
+Common helper functions for ATLAS.
 """
 
 import base64
@@ -1503,6 +1503,43 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     if isinstance(exc, (ConnectionError, TimeoutError)):
         return True
     return False
+
+
+def nokia_ssh_authenticate(transport, username: str, password: str) -> None:
+    """SSH-layer authentication for a Nokia 1830 / PSS / PSI shelf.
+
+    Grounded in a real PSS (HSTQTX02): **modern shelves accept standard password
+    auth as admin/admin and drop straight to the CLI shell** (no inner login).
+    Some **legacy shelves** instead expose a passwordless ``cli`` account (SSH
+    auth method ``none`` or ``keyboard-interactive``) and then present an inner
+    ``Username:``/``Password:`` two-stage on the shell. This tries the modern
+    password auth (``username``/``password``) first, then the legacy ``cli``
+    fallbacks. The caller handles the inner two-stage only if the shell actually
+    presents it. Raises ``paramiko`` auth/SSH exceptions on genuine failure.
+    """
+    if paramiko is None:
+        raise RuntimeError("paramiko is required for SSH authentication.")
+    # Modern: password auth as the given user (e.g. admin/admin).
+    try:
+        transport.auth_password(username, password)
+        return
+    except (paramiko.AuthenticationException, paramiko.BadAuthenticationType):
+        pass
+    # Legacy: passwordless 'cli' account; the offered method varies by shelf.
+    try:
+        transport.auth_none("cli")
+        return
+    except paramiko.BadAuthenticationType as exc:
+        allowed = set(getattr(exc, "allowed_types", []) or [])
+    if "keyboard-interactive" in allowed:
+        transport.auth_interactive("cli", lambda t, i, p: ["" for _ in p])
+        return
+    if "password" in allowed:
+        transport.auth_password("cli", "")       # passwordless cli via password method
+        return
+    raise paramiko.SSHException(
+        f"No usable SSH auth for {username!r} or 'cli' (shelf offered: {sorted(allowed)})"
+    )
 
 
 def ensure_host_key_known(

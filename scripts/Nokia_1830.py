@@ -13,6 +13,7 @@ from openpyxl import load_workbook
 from typing import Callable, Dict, List, Optional, Tuple
 from script_interface import BaseScript, CommandTracker, DatabaseCache, get_inventory_db_path, get_tracker, get_cache
 from utils.telnet import Telnet
+from utils.helpers import nokia_ssh_authenticate
 
 
 # Ensure logging is configured
@@ -136,13 +137,11 @@ class Script(BaseScript):
             transport = paramiko.Transport(sock)
             transport.start_client(timeout=30)
 
-            # Nokia 1830: SSH user is 'cli' with no real SSH password (auth_none)
-            try:
-                transport.auth_none('cli')
-                logging.info(f"[1830] auth_none succeeded for cli@{self.ip_address}")
-            except paramiko.BadAuthenticationType:
-                transport.auth_interactive('cli', lambda t, i, p: ['' for _ in p])
-                logging.info(f"[1830] keyboard-interactive auth succeeded for cli@{self.ip_address}")
+            # SSH-layer auth. Modern shelves accept admin/admin password auth and
+            # drop straight to the shell; legacy shelves use a passwordless 'cli'
+            # account + an inner Username:/Password: two-stage handled below.
+            nokia_ssh_authenticate(transport, self.username, self.password)
+            logging.info(f"[1830] SSH auth succeeded for {self.username}@{self.ip_address}")
 
             channel = transport.open_session()
             channel.get_pty()
@@ -165,21 +164,22 @@ class Script(BaseScript):
                         time.sleep(0.1)
                 return buf
 
-            # Two-stage shell login: device prompts for Username: then Password:
-            banner = drain(timeout=8.0, idle=1.5)
-            if not re.search(r'(?i)(username|login)\s*:', banner):
-                return [], f"[1830] No username prompt (got: {banner[-200:]!r})"
-
-            channel.send(f"{self.username}\n")
-            pwd_banner = drain(timeout=8.0, idle=1.0)
-            if not re.search(r'(?i)password\s*:', pwd_banner):
-                return [], f"[1830] No password prompt (got: {pwd_banner[-200:]!r})"
-
-            channel.send(f"{self.password}\n")
-            post = drain(timeout=10.0, idle=1.5)
-
-            if re.search(r'(?i)(incorrect|invalid|fail|denied)', post):
-                return [], "Authentication failed"
+            # Modern shelves (admin/admin SSH) land straight at the shell; only
+            # run the inner Username:/Password: two-stage if we are NOT already
+            # at a shell prompt AND a login prompt is genuinely pending. The
+            # end-anchored match keeps the banner's "Last Login:" line from being
+            # mistaken for a login prompt.
+            post = drain(timeout=8.0, idle=1.5)
+            if not re.search(r'[#>$]\s*$', post) and \
+                    re.search(r'(?im)(username|login)\s*:\s*$', post):
+                channel.send(f"{self.username}\n")
+                pwd_banner = drain(timeout=8.0, idle=1.0)
+                if not re.search(r'(?i)password\s*:', pwd_banner):
+                    return [], f"[1830] No password prompt (got: {pwd_banner[-200:]!r})"
+                channel.send(f"{self.password}\n")
+                post = drain(timeout=10.0, idle=1.5)
+                if re.search(r'(?i)(incorrect|invalid|fail|denied)', post):
+                    return [], "Authentication failed"
 
             # Some 1830 firmware versions display a Y/n acknowledgement banner
             # (EULA / session-warning) before the shell prompt. Auto-answer up
