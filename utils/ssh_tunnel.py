@@ -28,14 +28,17 @@ compatibility with earlier audit code that did port-forwarding.
 """
 from __future__ import annotations
 
+import concurrent.futures
+import contextlib
 import logging
+import queue
 import re
 import shlex
 import socket
 import threading
 import time
 import urllib.parse
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 
 import paramiko
 
@@ -574,3 +577,106 @@ def _parse_curl_response(raw: str) -> ResponseLike:
 # channels are administratively prohibited) -- it now runs curl over
 # a persistent invoke_shell session instead.
 SshJumpTunnel = SshSeedSession
+
+
+class SshSeedSessionPool:
+    """A fixed-size pool of :class:`SshSeedSession` shells to a single
+    seed, so neighbor ``curl`` calls can run concurrently instead of
+    serializing through one shell.
+
+    Each pooled session is an independent SSH connection with its own
+    ``invoke_shell`` and its own cookie jar, so leasing a session for the
+    full duration of a node's REST sequence (login + GETs) keeps that
+    node's cookies isolated from other workers. Ciena RLS sshd allows a
+    handful of concurrent sessions; keep ``size`` modest (3-5).
+
+    Lifecycle mirrors :class:`SshSeedSession`: construct, ``open()`` (opens
+    all sessions in parallel; survivors are kept), lease sessions via the
+    :meth:`lease` context manager, then ``close()``. ``open`` raises only
+    if *no* session could be established -- a partial pool is usable and
+    logs the shortfall so the caller can proceed best-effort.
+    """
+
+    def __init__(
+        self,
+        jump_host: str,
+        username: str,
+        password: str,
+        *,
+        size: int = 3,
+        **session_kwargs: Any,
+    ) -> None:
+        self._params = (jump_host, username, password)
+        self._session_kwargs = session_kwargs
+        self.size = max(1, int(size))
+        self._all: List[SshSeedSession] = []
+        self._free: "queue.Queue[SshSeedSession]" = queue.Queue()
+        self._lock = threading.Lock()
+        self._closed = False
+
+    def open(self) -> "SshSeedSessionPool":
+        """Open up to ``size`` sessions in parallel. Keeps whichever
+        succeed; raises ``RuntimeError`` only if none do."""
+        def _make() -> SshSeedSession:
+            sess = SshSeedSession(*self._params, **self._session_kwargs)
+            sess.open()
+            return sess
+
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.size
+        ) as pool:
+            futures = [pool.submit(_make) for _ in range(self.size)]
+            for fut in concurrent.futures.as_completed(futures):
+                try:
+                    sess = fut.result()
+                except Exception as exc:  # noqa: BLE001 -- best-effort
+                    _log.warning(
+                        "[SSH-POOL] a session failed to open: %s", exc
+                    )
+                    continue
+                self._all.append(sess)
+                self._free.put(sess)
+
+        if not self._all:
+            raise RuntimeError(
+                "SshSeedSessionPool: no sessions could be opened to "
+                f"{self._params[0]}"
+            )
+        if len(self._all) < self.size:
+            _log.warning(
+                "[SSH-POOL] opened %d/%d sessions to %s (proceeding with "
+                "fewer)", len(self._all), self.size, self._params[0]
+            )
+        return self
+
+    @property
+    def opened(self) -> int:
+        """Number of sessions actually established."""
+        return len(self._all)
+
+    @property
+    def is_open(self) -> bool:
+        return not self._closed and bool(self._all)
+
+    @contextlib.contextmanager
+    def lease(self, timeout: Optional[float] = None):
+        """Check out a session for the caller's exclusive use, returning
+        it to the pool on exit. Blocks (up to *timeout*) when every
+        session is busy."""
+        sess = self._free.get(timeout=timeout)
+        try:
+            yield sess
+        finally:
+            self._free.put(sess)
+
+    def close(self) -> None:
+        """Idempotent teardown: close every pooled session."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        for sess in self._all:
+            try:
+                sess.close()
+            except Exception:  # noqa: BLE001 -- best-effort teardown
+                pass

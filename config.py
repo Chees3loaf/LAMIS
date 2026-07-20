@@ -43,6 +43,16 @@ POD_COUNT = 13                        # Number of pod options (POD_MAX - POD_MIN
 SSH_PORT = 22
 TELNET_PORT = 23
 
+# RLS Network Audit concurrency: number of SSH shells opened in parallel to
+# the seed for neighbour collection. 1 = serial (historical behaviour);
+# 3-5 fans the walk out across multiple shells so per-node REST sequences
+# overlap, cutting a large multi-node walk roughly N-fold. Bounded in
+# practice by the seed's concurrent-session limit (Ciena RLS typically
+# allows a handful) -- if the seed rejects sessions the pool opens fewer
+# and proceeds. Overridable per run via the RLS_AUDIT_SSH_POOL env var,
+# which takes precedence (e.g. set it to 1 for a one-off serial run).
+RLS_AUDIT_SSH_POOL_SIZE = 3
+
 # ============================================================================
 # AUTHENTICATION
 # ============================================================================

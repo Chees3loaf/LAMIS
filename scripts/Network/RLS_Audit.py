@@ -33,6 +33,7 @@ import subprocess
 import keyring
 import json
 import socket
+import threading
 import xlsxwriter
 from xlsxwriter.utility import xl_rowcol_to_cell
 import datetime
@@ -46,6 +47,31 @@ requests.packages.urllib3.disable_warnings(category=InsecureRequestWarning)
 ### Variables ###
 timeout_query = 10
 extended_timeout_query = 120
+# Alarm-history over the seed-curl jump path routinely blows the normal
+# ``timeout_query`` budget and returns nothing (curl exit=28 -> no HTTP
+# response): the unbounded ``=*`` query asks the node to serialize its
+# entire history, which it can't do inside the budget. Give the call a
+# short, dedicated timeout so a stall fails fast instead of holding up the
+# whole walk. ``ALARM_HISTORY_QUERY`` is isolated here so a verified
+# bounded query (recent-N / time-window) can be dropped in as a one-liner.
+alarm_history_timeout = 5
+ALARM_HISTORY_QUERY = 'restconf/data/ciena-pro-alarm:alarm-history=*'
+# Concurrency: number of SSH shells opened to the seed for parallel
+# neighbor collection. 1 = serial (historical behavior, single shell).
+# Raise (3-5) to fan node collection out across multiple shells so the
+# per-node curl sequences overlap; capped in practice by the seed's
+# concurrent-session limit. Persistent default lives in
+# ``config.RLS_AUDIT_SSH_POOL_SIZE``; the ``RLS_AUDIT_SSH_POOL`` env var
+# overrides it per run when set (e.g. ``=1`` to force a one-off serial run).
+try:
+	import config as _cfg
+	_default_pool = int(getattr(_cfg, "RLS_AUDIT_SSH_POOL_SIZE", 1))
+except Exception:
+	_default_pool = 1
+try:
+	SSH_POOL_SIZE = max(1, int(os.environ.get("RLS_AUDIT_SSH_POOL", _default_pool)))
+except (TypeError, ValueError):
+	SSH_POOL_SIZE = 1
 gain_difference = 0.5
 tilt_difference = 0.5
 # Different loss values for LH and Metro systems
@@ -263,6 +289,9 @@ format_red = None
 format_green_left = None
 format_red_left = None
 format_lookup = {}
+# Left-align cell format; created per-workbook in ``run_audit`` and read
+# by the module-level ``formatted`` helper (rich-string padding fragment).
+left = None
 
 # SSH-via-seed state. RLS field deployments are typically reached via
 # the seed's factory-default ``10.0.0.1`` management port; the
@@ -315,6 +344,123 @@ def _try_open_jump_tunnel():
 	)
 
 
+# ---- Per-worker request context (concurrency) --------------------------
+# When the audit fans node collection out across worker threads, each
+# worker needs its OWN ``requests.Session`` and its OWN leased SSH shell:
+# the module-level ``session`` clears its cookie jar on every neighbor
+# login (see ``_mirror_cookies_to_session``), and one ``curl`` shell is a
+# single serial byte stream. A worker stashes its per-thread session/tunnel
+# on ``_worker_ctx``; the accessors fall back to the module globals when
+# nothing is set, so the serial path stays byte-for-byte unchanged.
+_worker_ctx = threading.local()
+
+
+def _current_session():
+	"""The calling thread's ``requests.Session``, or the module global
+	when no per-worker session is set (serial path)."""
+	return getattr(_worker_ctx, "session", None) or session
+
+
+def _current_tunnel():
+	"""The calling thread's leased SSH shell, or ``None`` -- meaning the
+	caller should use the shared, lazily-opened ``_jump_tunnel`` (serial
+	path)."""
+	return getattr(_worker_ctx, "tunnel", None)
+
+
+class _WalkQueue:
+	"""Dedup'ing BFS work queue for the node walk. Replaces the old
+	pattern of iterating a ``hostlist`` grown in place; ``self.order`` IS
+	that list -- the same object the historical ``hostlist.index`` /
+	``len(hostlist)`` call sites use -- so those keep working unchanged.
+
+	Thread-safe (a lock guards every mutation) so the concurrent collector
+	can dequeue and enqueue-on-discovery from multiple workers, but driven
+	by a single thread it reproduces the old loop exactly.
+
+	Dedup mirrors the original inline logic: a candidate is skipped if its
+	identifier OR short-name already appears among queued nodes, OR among
+	the aliases of nodes already walked (the seed is the classic case --
+	queued as ``10.0.0.1`` but also walked under its operational IP)."""
+
+	def __init__(self, seed):
+		self._lock = threading.Lock()
+		self.order = []             # discovery order == the old ``hostlist``
+		self._order_keys = set()    # lowercased identifiers already queued
+		self._order_shorts = set()  # lowercased short-names already queued
+		self._walked = set()        # identifiers/aliases already walked
+		self._pos = 0               # next index in ``order`` to hand out
+		self._enqueue(seed)
+
+	def _enqueue(self, candidate):
+		self.order.append(candidate)
+		self._order_keys.add(candidate.lower())
+		self._order_shorts.add(format_hostname(candidate)[0].lower())
+
+	def add_candidate(self, candidate, short_nm=''):
+		"""Dedup then enqueue ``candidate``. Returns True if newly queued."""
+		with self._lock:
+			c = candidate.lower()
+			if c in self._order_keys:
+				return False
+			if short_nm and short_nm.lower() in self._order_shorts:
+				return False
+			if c in self._walked:
+				return False
+			if short_nm and short_nm.lower() in self._walked:
+				return False
+			self._enqueue(candidate)
+			return True
+
+	def mark_walked(self, *names):
+		with self._lock:
+			for n in names:
+				if n:
+					self._walked.add(n.lower())
+
+	def is_walked(self, name):
+		with self._lock:
+			return bool(name) and name.lower() in self._walked
+
+	def next(self):
+		"""Return the next not-yet-handed-out node in discovery order, or
+		``None`` when the queue is drained."""
+		with self._lock:
+			if self._pos >= len(self.order):
+				return None
+			host = self.order[self._pos]
+			self._pos += 1
+			return host
+
+	def __len__(self):
+		return len(self.order)
+
+
+# Per-node fields the writer consumes. ``_collect_node`` fetches + parses a
+# node and packs these into a plain record; ``_write_record`` unpacks them
+# and emits the worksheet rows. Keeping the list in one place guarantees the
+# pack and the unpack stay in lock-step.
+_RECORD_FIELDS = (
+	'host', 'short_node_name', 'login_valid', 'check_tls',
+	'reported_node_name', 'domain', 'system_type', 'alarm_free',
+	'shelf_type', 'serial_number', 'mac_address', 'swversion',
+	'ctm_status', 'license', 'location', 'powerconsumption',
+	'site_address', 'site_lat', 'site_lon', 'active_features',
+	'sw_active', 'sw_running', 'sw_committed', 'sw_upgrade_state',
+	'sw_delivered', 'disconnected_neighbors', 'neighbor_sw_versions',
+	'shelf_hw', 'hw_release',
+	'alarm_list', 'cct_db', 'cv_results_list', 'afc_list',
+	'section_list', 'alarm_history_list', 'amp_list', 'inv_list',
+)
+
+
+def _pack_record(local_vars):
+	"""Snapshot the writer-facing fields from a collector's ``locals()``.
+	A field a partial fetch never set simply isn't captured -- the writer
+	supplies a safe default via ``rec.get(...)``."""
+	return {k: local_vars[k] for k in _RECORD_FIELDS if k in local_vars}
+
+
 def _mirror_cookies_to_session(response):
 	"""When a REST call lands through the SSH-curl path, the response
 	object is a ``ResponseLike`` whose cookies aren't visible to
@@ -332,7 +478,8 @@ def _mirror_cookies_to_session(response):
 	so subsequent GETs to the neighbor present the wrong session
 	cookie and get rejected.
 	"""
-	if session is None:
+	sess = _current_session()
+	if sess is None:
 		return
 	cookies = getattr(response, "cookies", None)
 	if not cookies:
@@ -345,14 +492,15 @@ def _mirror_cookies_to_session(response):
 	# planting this host's. Safe because the audit's call sites
 	# capture cookies into a local dict immediately after this
 	# function returns -- clearing the jar later doesn't invalidate
-	# the snapshot they're using.
+	# the snapshot they're using. Under concurrency ``sess`` is the
+	# worker's OWN session, so clearing it can't disturb another node.
 	try:
-		session.cookies.clear()
+		sess.cookies.clear()
 	except Exception:
 		pass
 	for name, value in cookies.items():
 		try:
-			session.cookies.set(name, value)
+			sess.cookies.set(name, value)
 		except Exception:
 			pass
 
@@ -364,11 +512,16 @@ def _audit_request(method, host, cmd, *, data=None, headers=None,
 	like object with ``.status_code``, ``.content``, ``.cookies``."""
 	is_seed = (not host) or (host == _seed_direct_host)
 	if not is_seed:
-		if _jump_tunnel is None:
-			_try_open_jump_tunnel()
-		if _jump_tunnel is not None and _jump_tunnel.is_open:
+		# Per-worker leased shell when the audit is fanning out; else
+		# the shared, lazily-opened tunnel (serial path).
+		tunnel = _current_tunnel()
+		if tunnel is None:
+			if _jump_tunnel is None:
+				_try_open_jump_tunnel()
+			tunnel = _jump_tunnel
+		if tunnel is not None and tunnel.is_open:
 			try:
-				return _jump_tunnel.http_request(
+				return tunnel.http_request(
 					method, host, cmd,
 					data=data, headers=headers, cookies=cookies,
 					verify=verify, timeout=timeout,
@@ -387,7 +540,7 @@ def _audit_request(method, host, cmd, *, data=None, headers=None,
 			addr, cookies=cookies, verify=verify, timeout=timeout,
 		)
 	# POST (login + logout)
-	return session.post(
+	return _current_session().post(
 		addr, data=data, headers=headers, cookies=cookies,
 		verify=verify, timeout=timeout,
 	)
@@ -476,11 +629,14 @@ def logout_of_node(host,cookies):
 		)
 	except Exception:
 		log_callback('Caution: did not log out of node correctly')
-def get_data(host , cmd , cookies):
-	if cmd == 'restconf/data': # increase timeout if getting all data
-		req_timeout = extended_timeout_query
-	else:
-		req_timeout = timeout_query
+def get_data(host , cmd , cookies, req_timeout=None):
+	# ``req_timeout`` lets a caller override the per-call budget (e.g. the
+	# fail-fast alarm-history fetch). When unset, keep the original policy.
+	if req_timeout is None:
+		if cmd == 'restconf/data': # increase timeout if getting all data
+			req_timeout = extended_timeout_query
+		else:
+			req_timeout = timeout_query
 	r = _audit_request(
 		"GET", host, cmd,
 		cookies=cookies, verify=False, timeout=req_timeout,
@@ -638,7 +794,7 @@ def extract_slot_port(port_instance):
 	elif port_match:
 		return port_match.group(1)
 	return None
-def parse_ccs_json(ccs_data):
+def parse_ccs_json(ccs_data, host):
 	"""Parse CCS instances JSON and create flat dictionary."""
 
 	# Dictionary to store all extracted data
@@ -990,7 +1146,7 @@ def run_audit(
 	# State that helper functions read by lexical scope.
 	global workbook, session, network_inventory
 	global format_green, format_red, format_green_left, format_red_left
-	global format_lookup
+	global format_lookup, left
 	# Reset the per-sheet row counters to their starting values (the
 	# reference initialized them once at module top; we re-initialize
 	# every call so back-to-back run_audit() invocations don't
@@ -1307,7 +1463,7 @@ def run_audit(
 		cctsheet = workbook.add_worksheet('Circuits')
 		cctsheet.set_zoom(120)
 		cctsheet.hide_gridlines(2)
-		cctsheet_btm_header = {'Node':14,'Circuit Name':12,'Band':6,'Mux Instance':12,'Operational State':25,'Controller State':16,'Freq':12,'width':10,'width ':10,'Check':7,'Additonal Info':30,
+		cctsheet_btm_header = {'Node':14,'Circuit Name':12,'Band':6,'Mux Instance':12,'Operational State':25,'Controller State':16,'Freq':12,'width':10,'width ':10,'Check':7,'width  ':10,'Additonal Info':30,
 							'Mode':16,'CCMD Ports':12,'Rx':6,'Tx':6,'Mux Ports':35,'Line Ports':45,'Measured':10,'Expected':10,'Measured ':10,'Expected ':10,'Measured  ':10,'Expected  ':10,'Expected ':10,
 							'Measured  ':10,'Expected  ':10,'Measured   ':10,'Expected   ':10}
 		for posn , (title , width) in enumerate(cctsheet_btm_header.items()):
@@ -1380,7 +1536,15 @@ def run_audit(
 	def _strip_domain(item):
 		# Leave bare IP addresses unchanged; strip domain suffix from hostnames
 		return item.lower() if re.match(r'^\d+\.\d+\.\d+\.\d+$', item) else item.lower().split('.')[0]
-	hostlist = [_strip_domain(item) for item in hostlist]
+	# Drive the walk from a dedup'ing BFS queue (was: iterate a ``hostlist``
+	# grown in place). ``walkq.order`` IS that list, so ``hostlist.index`` /
+	# ``len(hostlist)`` call sites keep working, and the same structure is
+	# ready for the concurrent collector.
+	_seeds = [_strip_domain(item) for item in hostlist]
+	walkq = _WalkQueue(_seeds[0])
+	for _seed_extra in _seeds[1:]:
+		walkq.add_candidate(_seed_extra, format_hostname(_seed_extra)[0])
+	hostlist = walkq.order
 	# Reset parameters
 	network_inventory = {}
 	network_links = {}
@@ -1396,27 +1560,44 @@ def run_audit(
 	if options.alarm_history: _extras.append("alarm history")
 	_extras_label = (" + " + " + ".join(_extras)) if _extras else ""
 	log_callback(f"[AUDIT] Starting walk from seed: {hostlist[0]}{_extras_label}")
+	log_callback(
+		"[AUDIT] Collection mode: "
+		+ (f"concurrent (SSH pool={SSH_POOL_SIZE})" if SSH_POOL_SIZE > 1
+		   else "serial (set RLS_AUDIT_SSH_POOL>1 to parallelize)")
+	)
 	log_callback(f"[AUDIT] Output: {outputfilename}")
 
 	node_count = 0
-	# Track short-name of every node we've already walked this run so a
-	# host that ends up on the queue twice -- once by IP from REST
-	# discovery, once by name from the link-walk -- doesn't get audited
-	# twice (and doesn't add duplicate rows to every sheet).
-	_walked_short_names = set()
-	for host in hostlist:
+	# ``walkq`` owns the dedup of nodes reachable under two identifiers
+	# (e.g. by IP from REST discovery and by name from the link-walk) so a
+	# node isn't audited twice / doesn't add duplicate rows.
+	#
+	# Stage 2: per-node work is split into ``_collect_node`` (network fetch
+	# + parse -> a plain record) and ``_write_record`` (workbook writes). A
+	# serial driver runs collect->write in walk order (identical output);
+	# Stage 3 fans the collect phase out across the SSH pool.
+	# ``assumed_*`` are pre-bound so the nested ``nonlocal`` is legal even
+	# when no node reaches the loss-table assignment.
+	assumed_fiber_loss = assumed_connector_loss = None
+	# Locks guarding shared state once collection fans out across workers
+	# (Stage 3). Uncontended -- and thus free -- on the serial path.
+	_count_lock = threading.Lock()
+	_wb_lock = threading.Lock()
+	def _collect_node(host):
+		nonlocal node_count, discover, assumed_fiber_loss, assumed_connector_loss
+		global lh_network, orl_cell_width
 		# Check if host exists in DNS
 		short_node_name,fqdn = format_hostname(host)
 		# Dedup early: if we've already done this node under a different
 		# identifier, skip. ``short_node_name`` is empty for bare IPs
 		# until login resolves them, so this only kicks in for genuine
 		# duplicates (same hostname, or same IP listed twice).
-		if short_node_name and short_node_name.lower() in _walked_short_names:
+		if short_node_name and walkq.is_walked(short_node_name):
 			log_callback(
 				f"[{short_node_name}] Already walked under another identifier"
 				f" -- skipping {host}"
 			)
-			continue
+			return None
 		try:
 			hostip = socket.gethostbyname(fqdn)
 			dnsvalid = True
@@ -1424,16 +1605,17 @@ def run_audit(
 			debug_log(e, 'DNS lookup ' + fqdn)
 			dnsvalid = False
 			log_callback(node_count , ':' , fqdn , ':' , 'Not found in DNS' )
-			continue
-		node_count += 1
+			return None
+		with _count_lock:
+			node_count += 1
 		log_callback(node_count , ':' , short_node_name , ': ...' , end='\r')
 		if short_node_name:
-			_walked_short_names.add(short_node_name.lower())
+			walkq.mark_walked(short_node_name)
 		command = 'login'
 		login_attempt , login_valid , check_tls = login_to_node(fqdn, command , payload, headers)
 		if login_valid:
 			log_callback(node_count , ':' , short_node_name , ':' , 'Connected' )
-			cookies = session.cookies.get_dict()
+			cookies = _current_session().cookies.get_dict()
 		else:
 			log_callback(node_count , ':' , short_node_name , ':' , end = '')
 			if login_attempt in resp_codes:
@@ -1503,10 +1685,10 @@ def run_audit(
 						# via a different identifier.
 						_resolved = node_details.lower() if node_details else ''
 						if _resolved:
-							_walked_short_names.add(_resolved)
+							walkq.mark_walked(_resolved)
 						_local_ip = (node_cfg.get('ip-address') or node.get('ip-address') or '').strip().lower()
 						if _local_ip and _local_ip != '0.0.0.0':
-							_walked_short_names.add(_local_ip)
+							walkq.mark_walked(_local_ip)
 					# The RLS REST schema reports ``ip-address`` at the
 					# config block AND mirrors it at the top level for
 					# section/site neighbors. Prefer the config block
@@ -1612,22 +1794,13 @@ def run_audit(
 					# view that reports the seed at 10.6.22.129 would
 					# slip past the hostlist scan and queue a duplicate
 					# walk.
-					if candidate.lower() in (h.lower() for h in hostlist):
+					# ``walkq`` reproduces the original four-way dedup:
+					# candidate identifier / short-name against both the
+					# already-queued nodes and the already-walked aliases.
+					if walkq.add_candidate(candidate, short_nm):
+						_added += 1
+					else:
 						_skipped_dup += 1
-						continue
-					if short_nm and short_nm.lower() in (
-						format_hostname(h)[0].lower() for h in hostlist
-					):
-						_skipped_dup += 1
-						continue
-					if candidate.lower() in _walked_short_names:
-						_skipped_dup += 1
-						continue
-					if short_nm and short_nm.lower() in _walked_short_names:
-						_skipped_dup += 1
-						continue
-					hostlist.append(candidate)
-					_added += 1
 				if _added:
 					log_callback(
 						f"[{short_node_name}] Added {_added} node(s)"
@@ -1890,13 +2063,16 @@ def run_audit(
 										]
 										amp_list.append(this_amp)
 										# Extend the ORL State cell width if needed
-										if len(orl_desc) - 5 > orl_cell_width:
-											orl_cell_width = len(orl_desc) - 5
-											orl_state_pos = list(ampsheet_header.keys()).index('ORL State')
-											ampsheet.set_column( orl_state_pos , orl_state_pos , orl_cell_width )
+										with _wb_lock:
+											if len(orl_desc) - 5 > orl_cell_width:
+												orl_cell_width = len(orl_desc) - 5
+												orl_state_pos = list(ampsheet_header.keys()).index('ORL State')
+												ampsheet.set_column( orl_state_pos , orl_state_pos , orl_cell_width )
 
 							inv_list.append(slot_item + addnl_slot_data)
-							# get port power levels if card is a CMD
+							# get port power levels if card is a CMD (RLA cards expose no
+							# optmons resource -- their per-port power comes from the
+							# ccs-instance channel-power already parsed above)
 							if 'CCMD' in card_type:
 								command = 'restconf/data/ciena-6500r-slots:slots='+ s['name']+'/inventory/optmons=*'
 								ccmd_power_data , data_valid = get_data(fqdn , command , cookies)
@@ -2022,10 +2198,10 @@ def run_audit(
 								short_nd.lower() == format_hostname(h)[0].lower()
 								for h in hostlist
 							)
-							if not already_queued and short_nd.lower() not in _walked_short_names:
+							if not already_queued and not walkq.is_walked(short_nd):
 								if discover:
 									index = hostlist.index(host)
-									hostlist.insert(index +1 , nd)
+									walkq.add_candidate(nd, short_nd)
 								# Stop node discovery if come across an OL or ROADM
 								if '-l8o' in nd.lower() or '-l8r' in nd.lower():
 									discover = False
@@ -2094,7 +2270,7 @@ def run_audit(
 					if data_valid:
 						# ccs_data = json.loads(ccs)['ciena-6500r-channel-ctrl:ccs-instance']
 						ccs_data = json.loads(ccs)
-						cct_db = parse_ccs_json(ccs_data)
+						cct_db = parse_ccs_json(ccs_data, host)
 						number_of_circuits = len(cct_db)
 						plural = ''
 						if number_of_circuits > 0:
@@ -2109,8 +2285,15 @@ def run_audit(
 						log_callback(' No circuits found')
 					# Get CCMD ports
 					for network_id, cct in cct_db.items():
+						# The circuit network_id is '<freq>.fc' while the mc-path
+						# user-label is 'Channel <freq>', so an exact string compare
+						# never matched (leaving MC spectral width / freq check and
+						# any CCMD add/drop power blank). Match on the shared
+						# frequency instead.
+						_cid_freq = re.search(r'\d+\.\d+', str(network_id))
 						for pth in mcpath_data:
-							if pth.get('user-label') == network_id:
+							_lbl_freq = re.search(r'\d+\.\d+', str(pth.get('user-label', '')))
+							if _cid_freq and _lbl_freq and float(_cid_freq.group()) == float(_lbl_freq.group()):
 								from_port = extract_slot_port(pth.get('from', ''))
 								to_port = extract_slot_port(pth.get('to', ''))
 								min_freq = float(pth.get('min-freq'))
@@ -2306,8 +2489,8 @@ def run_audit(
 
 				# Get alarm history if -H option used
 				if options.alarm_history:
-					command = 'restconf/data/ciena-pro-alarm:alarm-history=*'
-					hx_data , data_valid = get_data(fqdn , command , cookies)
+					command = ALARM_HISTORY_QUERY
+					hx_data , data_valid = get_data(fqdn , command , cookies, req_timeout=alarm_history_timeout)
 					if data_valid:
 						try:
 							hx_entries = json.loads(hx_data).get('ciena-pro-alarm:alarm-history', [])
@@ -2384,6 +2567,58 @@ def run_audit(
 						log_callback('Alarms:' ,'None' )
 					alarm_free = True
 
+		# Fetch/parse complete: close the node session, pack the per-node
+		# record from this frame's locals, and hand it to the writer.
+		if login_valid:
+			logout_of_node(fqdn, cookies)
+			return _pack_record(locals())
+		# Login failed -> no record, no rows (matches the old inline skip).
+		return None
+
+	def _write_record(rec):
+		# Row counters are module globals advanced as sheets fill.
+		global systemrow, alarmrow, cctrow, cvrow, afcrow, hxrow, amprow, invrow
+		# Unpack the record back into the names the write code expects.
+		# Defaults cover a partial fetch that never set a field (the old
+		# inline loop leaked the previous node's value; an explicit default
+		# is safer and only differs on a failed fetch, which writes no rows).
+		host = rec.get('host')
+		short_node_name = rec.get('short_node_name', '')
+		login_valid = rec.get('login_valid', False)
+		check_tls = rec.get('check_tls', '')
+		reported_node_name = rec.get('reported_node_name', '--')
+		domain = rec.get('domain', '--')
+		system_type = rec.get('system_type', 'Unknown')
+		alarm_free = rec.get('alarm_free', True)
+		shelf_type = rec.get('shelf_type', '--')
+		serial_number = rec.get('serial_number', '--')
+		mac_address = rec.get('mac_address', '--')
+		swversion = rec.get('swversion', '--')
+		ctm_status = rec.get('ctm_status', {})
+		license = rec.get('license', '--')
+		location = rec.get('location', '--')
+		powerconsumption = rec.get('powerconsumption', '--')
+		site_address = rec.get('site_address', '--')
+		site_lat = rec.get('site_lat', '--')
+		site_lon = rec.get('site_lon', '--')
+		active_features = rec.get('active_features', '--')
+		sw_active = rec.get('sw_active', '--')
+		sw_running = rec.get('sw_running', '--')
+		sw_committed = rec.get('sw_committed', '--')
+		sw_upgrade_state = rec.get('sw_upgrade_state', '--')
+		sw_delivered = rec.get('sw_delivered', '--')
+		disconnected_neighbors = rec.get('disconnected_neighbors', '--')
+		neighbor_sw_versions = rec.get('neighbor_sw_versions', '--')
+		shelf_hw = rec.get('shelf_hw', '--')
+		hw_release = rec.get('hw_release', '--')
+		alarm_list = rec.get('alarm_list', [])
+		cct_db = rec.get('cct_db', {})
+		cv_results_list = rec.get('cv_results_list', [])
+		afc_list = rec.get('afc_list', [])
+		section_list = rec.get('section_list', [])
+		alarm_history_list = rec.get('alarm_history_list', [])
+		amp_list = rec.get('amp_list', [])
+		inv_list = rec.get('inv_list', [])
 		# Write to system sheet
 		if login_valid and options.outfile:
 			# Select background colour
@@ -2678,9 +2913,98 @@ def run_audit(
 				invrow += 1
 				inv_count += 1
 			draw_border(invsheet , invrow-inv_count , 0 , invrow , len(invsheet_header))
-			if login_valid:
-				logout_of_node(fqdn, cookies)
-		log_callback('')
+
+	def _collect_worker(host, pool):
+		# Each worker gets its OWN requests.Session (cookie isolation) and,
+		# for a non-seed node, leases one shell from the pool for the whole
+		# node so that node's login cookies stay put. The seed is direct.
+		_worker_ctx.session = requests.Session()
+		_worker_ctx.tunnel = None
+		try:
+			if pool is not None and host != _seed_direct_host:
+				with pool.lease() as shell:
+					_worker_ctx.tunnel = shell
+					return _collect_node(host)
+			return _collect_node(host)
+		finally:
+			_worker_ctx.session = None
+			_worker_ctx.tunnel = None
+
+	def _collect_all_concurrent():
+		# Wave-based BFS: drain the queue into a batch, collect the batch
+		# concurrently, let discovery grow the queue, repeat until empty.
+		# The seed is its own first wave (reached directly), so the pool is
+		# opened lazily when the first neighbour wave appears.
+		import concurrent.futures
+		from utils.ssh_tunnel import SshSeedSessionPool
+		records = {}
+		pool = None
+		creds = _tunnel_ssh_creds
+		try:
+			while True:
+				batch = []
+				while True:
+					_h = walkq.next()
+					if _h is None:
+						break
+					batch.append(_h)
+				if not batch:
+					break
+				if (pool is None and creds
+						and any(h != _seed_direct_host for h in batch)):
+					log_callback(
+						f"[SSH-POOL] opening {SSH_POOL_SIZE} shell(s) on "
+						f"{_seed_direct_host}..."
+					)
+					try:
+						pool = SshSeedSessionPool(
+							_seed_direct_host, creds[0], creds[1],
+							size=SSH_POOL_SIZE,
+						).open()
+						log_callback(f"[SSH-POOL] {pool.opened} shell(s) ready.")
+					except Exception as exc:
+						log_callback(
+							f"[SSH-POOL] open failed ({exc}); collecting serially."
+						)
+						pool = None
+				_workers = pool.opened if pool is not None else 1
+				with concurrent.futures.ThreadPoolExecutor(
+					max_workers=max(1, _workers)
+				) as _ex:
+					_futs = {_ex.submit(_collect_worker, h, pool): h
+					         for h in batch}
+					for _fut in concurrent.futures.as_completed(_futs):
+						_h = _futs[_fut]
+						try:
+							records[_h] = _fut.result()
+						except Exception as exc:
+							log_callback(f"[{_h}] collect failed: {exc}")
+							records[_h] = None
+		finally:
+			if pool is not None:
+				pool.close()
+				log_callback("[SSH-POOL] closed.")
+		return records
+
+	# Driver: serial by default (RLS_AUDIT_SSH_POOL=1). When >1, collect
+	# nodes concurrently across the pool, then write the records back in
+	# ``walkq.order`` (discovery order) so output stays deterministic.
+	if SSH_POOL_SIZE > 1:
+		_records = _collect_all_concurrent()
+		for host in list(walkq.order):
+			_rec = _records.get(host)
+			if _rec is not None:
+				_write_record(_rec)
+			log_callback('')
+	else:
+		while True:
+			host = walkq.next()
+			if host is None:
+				break
+			_rec = _collect_node(host)
+			if _rec is not None:
+				_write_record(_rec)
+			log_callback('')
 
 	# Process links
 	# This is done after all nodes have been captured as we need to know the cards on all systems to map the ports
@@ -2697,7 +3021,14 @@ def run_audit(
 			if _from_node and _to_node and isinstance(_loss, (int, float)):
 				link_loss_map[(_from_node, _to_node)] = _loss
 
-	for n in network_links:
+	# Iterate in discovery order (``walkq.order``), not ``network_links``
+	# insertion order: under concurrent collection the dict is populated in
+	# completion order, which would scramble Links-sheet row order. Walk
+	# order is stable across serial and concurrent runs. Nodes with no link
+	# data (or that failed login) simply aren't in the dict -- skip them.
+	for n in list(walkq.order):
+		if n not in network_links:
+			continue
 		if hostlist.index(n) % 2 == 0:
 			fill_format = fill_type1
 		else:

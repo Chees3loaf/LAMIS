@@ -36,6 +36,16 @@ import config
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 _DETACHED = getattr(subprocess, "DETACHED_PROCESS", 0) | _NO_WINDOW
 
+# Hard cap on the startup ``git fetch``/``git status`` update probe. The
+# check runs synchronously on the launch path, so an unreachable or slow
+# remote must not hold the GUI hostage -- a fetch that blows this budget is
+# treated as "no update available" (same as any other probe failure). Tune
+# via the ATLAS_UPDATE_CHECK_TIMEOUT env var if a site needs more headroom.
+try:
+    _GIT_CHECK_TIMEOUT = float(os.environ.get("ATLAS_UPDATE_CHECK_TIMEOUT", "8"))
+except (TypeError, ValueError):
+    _GIT_CHECK_TIMEOUT = 8.0
+
 # SemVer-ish version tag regex. Tolerates an optional leading "v" and
 # pre-release suffixes ("-rc.1", "-beta.2"). Captures the numeric portion
 # for comparison.
@@ -599,6 +609,7 @@ class Updater:
                 text=True,
                 check=True,
                 creationflags=_NO_WINDOW,
+                timeout=_GIT_CHECK_TIMEOUT,
             )
             result = subprocess.run(
                 ['git', 'status'],
@@ -607,11 +618,18 @@ class Updater:
                 text=True,
                 check=True,
                 creationflags=_NO_WINDOW,
+                timeout=_GIT_CHECK_TIMEOUT,
             )
             return (
                 "Your branch is behind" in result.stdout
                 or "can be fast-forwarded" in result.stdout
             )
+        except subprocess.TimeoutExpired:
+            logging.warning(
+                "Update check exceeded %.0fs budget (slow/unreachable remote);"
+                " skipping so startup isn't blocked.", _GIT_CHECK_TIMEOUT
+            )
+            return False
         except subprocess.CalledProcessError as e:
             logging.error(f"Git command failed: {e.stderr}")
             return False

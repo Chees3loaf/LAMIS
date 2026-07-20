@@ -322,8 +322,10 @@ class TestRestDiscoveryExtendsHostlist(unittest.TestCase):
         self.assertIn("for entry in topo_list", self.src)
         # The extend must skip the local (seed) entry.
         self.assertIn("'local'", self.src)
-        # And must actually append to hostlist.
-        self.assertIn("hostlist.append", self.src)
+        # And must actually enqueue the neighbor for the walk. The walk
+        # is now driven by ``_WalkQueue``; discovery enqueues via
+        # ``add_candidate`` (was: ``hostlist.append``).
+        self.assertIn("walkq.add_candidate", self.src)
 
     def test_discovery_prefers_ip_over_hostname(self):
         # Customer nets often don't have working DNS for RLS nodes;
@@ -466,7 +468,10 @@ class TestSeedResolvedNameAddedToWalkedSet(unittest.TestCase):
         # the relevant block has grown over time as we added more
         # identifier tracking (now also captures operational IP).
         self.assertIn("node-type", src)
-        self.assertIn("_walked_short_names.add", src)
+        # Walk dedup is now owned by ``_WalkQueue``; the local-node
+        # branch records aliases via ``walkq.mark_walked`` (was:
+        # ``_walked_short_names.add``).
+        self.assertIn("walkq.mark_walked", src)
         # And the resolved short-name (hostname) is what gets added
         # first -- pin the variable name so a refactor that drops it
         # is caught.
@@ -609,7 +614,7 @@ class TestLocalNodeOperationalIpRecorded(unittest.TestCase):
         # add it to _walked_short_names.
         window = src[idx:idx + 1500]
         self.assertIn("_local_ip", window)
-        self.assertIn("_walked_short_names.add", window)
+        self.assertIn("walkq.mark_walked", window)
         # The fallback to top-level ``ip-address`` matters because
         # firmware variants differ in where they populate the field.
         self.assertIn("node.get('ip-address'", window)
@@ -624,12 +629,16 @@ class TestRestDiscoveryDedupsAgainstWalkedSet(unittest.TestCase):
 
     def test_discovery_checks_walked_set(self):
         from scripts.Network import RLS_Audit
-        src = inspect.getsource(RLS_Audit.run_audit)
-        # The REST discovery block must check _walked_short_names
-        # as part of its dedup chain. Two checks: candidate (IP/name)
-        # and short_nm (hostname).
-        self.assertIn("candidate.lower() in _walked_short_names", src)
-        self.assertIn("short_nm.lower() in _walked_short_names", src)
+        run_src = inspect.getsource(RLS_Audit.run_audit)
+        # Discovery enqueues candidates through the dedup'ing queue.
+        self.assertIn("walkq.add_candidate", run_src)
+        # The walked-set dedup now lives in ``_WalkQueue.add_candidate``:
+        # a candidate is skipped if its identifier OR its short-name is
+        # already in the walked-alias set (catches the seed re-appearing
+        # under its operational IP in a neighbor's topology view).
+        wq_src = inspect.getsource(RLS_Audit._WalkQueue.add_candidate)
+        self.assertIn("self._walked", wq_src)
+        self.assertIn("short_nm", wq_src)
 
 
 class TestGetDataLogsNonSuccessStatuses(unittest.TestCase):
