@@ -245,7 +245,8 @@ def _emit_banner_once() -> None:
 
 def enforce_telnet_policy(host: str, port: int = 23, *,
                           bypass: bool = False,
-                          purpose: Optional[str] = None) -> None:
+                          purpose: Optional[str] = None,
+                          skip_ssh_probe: bool = False) -> None:
     """Apply the Telnet policy to a pending connect; raise on refusal.
 
     Parameters
@@ -261,6 +262,13 @@ def enforce_telnet_policy(host: str, port: int = 23, *,
     purpose
         Optional short tag included in the audit log line (e.g. ``"tl1"`` or
         ``"console"``). Aids incident response.
+    skip_ssh_probe
+        When True, keep the allowlist gate (Layer B) but skip the
+        "prefer SSH" probe (Layer C). Used by devices whose SSH listener is
+        up but does NOT expose the usable CLI — e.g. the Nokia 1830-family
+        PSI, where SSH-as-admin dead-ends at a banner and the CLI is only
+        reachable through the Telnet getty two-step login. The host must
+        still be allowlisted.
     """
     tag = f" purpose={purpose}" if purpose else ""
 
@@ -292,8 +300,13 @@ def enforce_telnet_policy(host: str, port: int = 23, *,
             f"allowlist (data/{_ALLOWLIST_FILENAME})"
         )
 
-    # Layer C: SSH-preferred probe.
-    if ssh_port_open(host):
+    # Layer C: SSH-preferred probe. Skipped for devices whose SSH listener is
+    # up but doesn't expose a usable CLI (see skip_ssh_probe).
+    if skip_ssh_probe and ssh_port_open(host):
+        logging.warning("SECURITY: telnet SSH-preference probe skipped for "
+                        "host=%s port=%d (SSH up but no usable CLI)%s",
+                        host, port, tag)
+    elif ssh_port_open(host):
         logging.warning("SECURITY: telnet refused host=%s port=%d "
                         "(SSH available on :22)%s", host, port, tag)
         raise TelnetPolicyError(

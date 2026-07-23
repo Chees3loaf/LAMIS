@@ -10,10 +10,13 @@ __email__ = 'agbourne@apple.com'
 __contributors__ = 'Zackery Simino'   # v1.5.0 — bidir delta feature, code quality fixes
 __contributors_email__ = 'zsimino@lightriver.com'
 __status__ = 'Production'	
-__version__ = '1.5.0'
+__version__ = '1.6.0'
 __program__ = 'rls_audit'
 
 # Version notes
+# 1.6.0 - Added "Internal Loss (dB)" column to Links tab: for intra-shelf patchcords
+#          (same-node 'fiber' links) the measured loss is flagged red if > internal_fiber_loss_tolerance
+#          (1 dB), green within. Inter-node 'line-fiber' spans stay blank.
 # 1.5.0 - Added bidirectional span loss delta column to Links tab (red if > 2 dB, green if within tolerance).
 #          Fixed 5 code quality issues: bare except clauses now log to Debug.txt; shell injection in
 #          adb_asset() fixed (shell=False); local timeout variable shadowing global in get_data() renamed
@@ -108,7 +111,6 @@ cctrow = 2
 clientrow = 2
 invrow = 2
 alarmrow = 2
-cvrow = 2
 afcrow = 2
 hxrow = 2
 max_orl = 30.0
@@ -125,8 +127,10 @@ LH_cards = ('RLA','DLE')
 Metro_cards = ('DLM')
 adb_cards = ('DLM','DLE','RLA','CMD','CCM','LRU','SRA')
 ctm_slots = ['41' , '42']
+osc_sfp_slots = [50 , 60] # slot-1 sub-slots holding the OSC SFPs (slots 1/inventory/slots=50|60/inventory/circuit-pack) -- added to the Inventory tab
 span_loss_difference = 1.5
 bidir_loss_tolerance = 2.0
+internal_fiber_loss_tolerance = 1.0 # dB - intra-shelf 'fiber' (same-node) patchcord loss above this is flagged
 add_info_col_width = 15
 orl_cell_width = 5
 lh_network = False
@@ -449,7 +453,7 @@ _RECORD_FIELDS = (
 	'sw_active', 'sw_running', 'sw_committed', 'sw_upgrade_state',
 	'sw_delivered', 'disconnected_neighbors', 'neighbor_sw_versions',
 	'shelf_hw', 'hw_release',
-	'alarm_list', 'cct_db', 'cv_results_list', 'afc_list',
+	'alarm_list', 'cct_db', 'afc_list',
 	'section_list', 'alarm_history_list', 'amp_list', 'inv_list',
 )
 
@@ -1141,7 +1145,7 @@ def run_audit(
 	# module globals; the function body would otherwise treat any name
 	# it assigns as local and UnboundLocalError on first read.
 	global options
-	global systemrow, linkrow, amprow, alarmrow, cvrow, afcrow, hxrow
+	global systemrow, linkrow, amprow, alarmrow, afcrow, hxrow
 	global cctrow, invrow, orl_cell_width, lh_network
 	# State that helper functions read by lexical scope.
 	global workbook, session, network_inventory
@@ -1155,7 +1159,6 @@ def run_audit(
 	linkrow = 2
 	amprow = 2
 	alarmrow = 2
-	cvrow = 2
 	afcrow = 2
 	hxrow = 2
 	cctrow = 2
@@ -1336,7 +1339,6 @@ def run_audit(
 			('Links',            'Physical fiber health per span: loss measurements, OSC power, fiber type, length, and AFC section data (PFG type, cascaded, associated elements).'),
 			('Amps',             'Amplifier card inventory and optical power levels (dBm) per amp port across all nodes.'),
 			('Alarms',           'Active alarms per node at time of audit: severity, description, and affected resource.'),
-			('CV Results',       'Connectivity Verification results per port: expected vs actual connections, loss delta, and validation timestamps.'),
 			('AFC Orchestrator', 'Automatic Fiber Characterization state per OMS instance: run state, result, compatibility, channel count, and last update time.'),
 			('Alarm History',    'Historical alarm log (captured with -H option): timestamped alarm events per node.'),
 			('Circuits',         'Optical circuit detail per channel: frequency, spectral width, operational state, power levels at mux/demux ports.'),
@@ -1368,7 +1370,7 @@ def run_audit(
 		linkworksheet.set_zoom(120)
 		linkworksheet.hide_gridlines(2)
 		linkworksheet_header = {'Node':18,'Link Name':20,'Type':14,'From':36,'To':36,'Link Diagnostics':25,'Length':11,'Fiber Type':12,'OSC Tx':8,'OSC Rx':8,'Expected Loss':10,'Measured Loss':10,
-							 'Loss Difference':10,'Assumed Fiber Loss (dB/Km)':13,'Assumed Connector Loss':13,'Calculated Expected Loss':13,'PFG Type':14,'Cascaded':12,'Associated Elements':50,'Bidir Loss Delta':14}
+							 'Loss Difference':10,'Assumed Fiber Loss (dB/Km)':13,'Assumed Connector Loss':13,'Calculated Expected Loss':13,'PFG Type':14,'Cascaded':12,'Associated Elements':50,'Bidir Loss Delta':14,'Internal Loss (dB)':14}
 		# linkworksheet_list = list(linkworksheet_header)
 		for posn , ( title , width) in enumerate(linkworksheet_header.items()):
 			linkworksheet.write( linkrow , posn , title , format_header)
@@ -1420,17 +1422,6 @@ def run_audit(
 			alarmrow += 1
 			alarmsheet.write_url('A1', "internal:'Index'!A1", format_ts_link, dt_string)
 
-		#Create connection validation results sheet
-		cvsheet = workbook.add_worksheet('CV Results')
-		cvsheet.set_zoom(120)
-		cvsheet.hide_gridlines(2)
-		cvsheet_header = {'Node':18,'Slot':10,'Rx Port':12,'Status':12,'Reason':30,'Expected Port ID':28,'Actual Port ID':28,'Link Identifier':22,'Expected Loss (dB)':14,'Measured Loss (dB)':14,'Loss Delta (dB)':12,'Measured Loss Source':18,'CV Total Power Loss (dB)':14,'Expected System':24,'Actual System':24,'Last Validated':22,'Last Status Changed':22}
-		for posn , (title , width) in enumerate(cvsheet_header.items()):
-			cvsheet.write( cvrow , posn , title , format_header)
-			cvsheet.set_column(posn , posn , width)
-		draw_border(cvsheet , cvrow , 0 , cvrow , len(cvsheet_header))
-		cvrow += 1
-		cvsheet.write_url('A1', "internal:'Index'!A1", format_ts_link, dt_string)
 
 		#Create AFC orchestrator sheet
 		afcsheet = workbook.add_worksheet('AFC Orchestrator')
@@ -1645,7 +1636,6 @@ def run_audit(
 			site_address = site_lat = site_lon = active_features = '--'
 			sw_active = sw_running = sw_committed = sw_upgrade_state = sw_delivered = '--'
 			disconnected_neighbors = neighbor_sw_versions = '--'
-			cv_results_list = []
 			afc_list = []
 			alarm_history_list = []
 			section_list = []
@@ -2143,12 +2133,32 @@ def run_audit(
 						# log_callback(sfp_data)
 						for sfp in sfp_data:
 							sfp_number = int(extract(sfp , 'name'))
-							sfp_state = sfp['inventory']['circuit-pack']['admin-state']
+							sfp_cp = sfp['inventory']['circuit-pack']
+							sfp_state = sfp_cp['admin-state']
 							if sfp_state == 'Enabled': # Only add OSC data if the SFP is enabled
 								oscs = sfp['inventory']['oscs'][0]
 								tx = extract( oscs , 'tx-power')
 								rx = extract( oscs , 'rx-power')
 								osc_data[sfp_number] = [tx , rx]
+							# Add the OSC SFP modules to the hardware Inventory tab.
+							# They live under slots=1/inventory/slots=50|60/inventory/
+							# circuit-pack and are skipped by the top-level
+							# slots=*/inventory/circuit-pack sweep, so append a row
+							# here mirroring slot_item + addnl_slot_data (10 fields:
+							# Slot, HW Version, Type, Status, Serial, CLEI, Issue,
+							# Uptime, Card Diag, aDB -- last three blank for an SFP).
+							if sfp_number in osc_sfp_slots and 'c-type' in sfp_cp:
+								osc_ctype = resolve_card_type(sfp_cp.get('c-type' , '') , card_lookup)
+								inv_list.append([
+									'1-' + str(sfp_number),
+									sfp_cp.get('pec' , ''),
+									osc_ctype or 'OSC SFP',
+									sfp_state,
+									sfp_cp.get('serial-number' , ''),
+									sfp_cp.get('common-language-equipment-identifier' , ''),
+									sfp_cp.get('hardware-release' , ''),
+									'' , '' , '',
+								])
 					# log_callback('OSC data:' , osc_data)
 
 				# Get link data
@@ -2333,49 +2343,6 @@ def run_audit(
 									pass
 								break
 
-				# Get connection validation results
-				command = 'restconf/data/ciena-6500r-cv-results:cv-results'
-				cv_data , data_valid = get_data(fqdn , command , cookies)
-				if data_valid:
-					try:
-						cv_root = json.loads(cv_data)['ciena-6500r-cv-results:cv-results']
-						for port in cv_root.get('cv-rx-ports', []):
-							try:
-								exp_loss = float(port.get('expected-physical-loss')) if port.get('expected-physical-loss') is not None else '-'
-							except (TypeError, ValueError):
-								exp_loss = '-'
-							try:
-								meas_loss = float(port.get('measured-physical-loss')) if port.get('measured-physical-loss') is not None else '-'
-							except (TypeError, ValueError):
-								meas_loss = '-'
-							try:
-								total_loss = float(port.get('cv-total-power-loss')) if port.get('cv-total-power-loss') is not None else '-'
-							except (TypeError, ValueError):
-								total_loss = '-'
-							if isinstance(exp_loss, float) and isinstance(meas_loss, float):
-								loss_delta = round(meas_loss - exp_loss, 2)
-							else:
-								loss_delta = '-'
-							cv_results_list.append({
-								'slot': port.get('slot', ''),
-								'rx_port': port.get('port-subfiber', port.get('rx-port', '--')),
-								'status': port.get('status', '--'),
-								'reason': port.get('reason', ''),
-								'expected_port_id': port.get('expected-port-id', ''),
-								'actual_port_id': port.get('actual-port-id', ''),
-								'link_identifier': port.get('link-identifier', ''),
-								'expected_loss': exp_loss,
-								'measured_loss': meas_loss,
-								'loss_delta': loss_delta,
-								'measured_loss_source': port.get('measured-loss-source', ''),
-								'cv_total_power_loss': total_loss,
-								'expected_system': port.get('expected-system-name', ''),
-								'actual_system': port.get('actual-system-name', ''),
-								'last_validated': port.get('last-validated', ''),
-								'last_status_changed': port.get('last-status-changed', ''),
-							})
-					except Exception as exc:
-						debug_log(exc, f'cv-results parse error on {fqdn}')
 
 				# Get AFC orchestrator state
 				command = 'restconf/data/ciena-6500r-afc-orchestrator:afc-orchestrator'
@@ -2577,7 +2544,7 @@ def run_audit(
 
 	def _write_record(rec):
 		# Row counters are module globals advanced as sheets fill.
-		global systemrow, alarmrow, cctrow, cvrow, afcrow, hxrow, amprow, invrow
+		global systemrow, alarmrow, cctrow, afcrow, hxrow, amprow, invrow
 		# Unpack the record back into the names the write code expects.
 		# Defaults cover a partial fetch that never set a field (the old
 		# inline loop leaked the previous node's value; an explicit default
@@ -2613,7 +2580,6 @@ def run_audit(
 		hw_release = rec.get('hw_release', '--')
 		alarm_list = rec.get('alarm_list', [])
 		cct_db = rec.get('cct_db', {})
-		cv_results_list = rec.get('cv_results_list', [])
 		afc_list = rec.get('afc_list', [])
 		section_list = rec.get('section_list', [])
 		alarm_history_list = rec.get('alarm_history_list', [])
@@ -2780,29 +2746,6 @@ def run_audit(
 				draw_border(cctsheet , cctrowmarker , list(cctsheet_btm_header).index('Measured  ') , cctrow , list(cctsheet_btm_header).index('Measured   '))
 				draw_border(cctsheet , cctrowmarker , list(cctsheet_btm_header).index('Measured   ') , cctrow , len(cctsheet_btm_header))
 
-			# Write CV results
-			if cv_results_list:
-				cvsheet.write(cvrow , 0 , reported_node_name)
-				cv_rowmarker = cvrow
-				cv_field_order = ('slot','rx_port','status','reason','expected_port_id','actual_port_id','link_identifier','expected_loss','measured_loss','loss_delta','measured_loss_source','cv_total_power_loss','expected_system','actual_system','last_validated','last_status_changed')
-				for cv in cv_results_list:
-					for cv_idx, key in enumerate(cv_field_order):
-						cv_col = cv_idx + 1
-						val = cv.get(key, '')
-						if key in ('expected_loss','measured_loss','cv_total_power_loss','loss_delta') and isinstance(val, (int,float)):
-							cvsheet.write(cvrow , cv_col , val , format_pwr)
-						else:
-							cvsheet.write(cvrow , cv_col , val)
-					cvsheet.conditional_format( cvrow , 0 , cvrow , len(cvsheet_header)-1 , {'type' : 'no_errors' , 'format' : workbook.add_format({'bg_color' : '#' + fill_format}) })
-					# Highlight status: pass=fail=others 
-					cvsheet.conditional_format( cvrow , 2 , cvrow , 2 , {'type': 'text' , 'criteria': 'containing', 'value': 'pass', 'format': format_green})
-					cvsheet.conditional_format( cvrow , 2 , cvrow , 2 , {'type': 'text' , 'criteria': 'containing', 'value': 'fail', 'format': format_red})
-					cvsheet.conditional_format( cvrow , 2 , cvrow , 2 , {'type': 'text' , 'criteria': 'containing', 'value': 'unknown', 'format': format_amber})
-					# Highlight loss delta: if abs > 1.5 dB
-					cvsheet.conditional_format( cvrow , 9 , cvrow , 9 , {'type': 'cell' , 'criteria': '>', 'value': 1.5, 'format': format_pwr_red})
-					cvsheet.conditional_format( cvrow , 9 , cvrow , 9 , {'type': 'cell' , 'criteria': '<', 'value': -1.5, 'format': format_pwr_red})
-					cvrow += 1
-				draw_border(cvsheet , cv_rowmarker , 0 , cvrow , len(cvsheet_header))
 
 			# Write AFC orchestrator results
 			if afc_list:
@@ -3096,6 +3039,17 @@ def run_audit(
 					linkworksheet.conditional_format(linkrow , bidir_col , linkrow , bidir_col , {'type': 'cell' , 'criteria': '<=' , 'value': bidir_loss_tolerance , 'format': format_pwr_green})
 				else:
 					linkworksheet.write(linkrow , bidir_col , bidir_delta)
+				# Internal-fiber loss: intra-shelf patchcords are same-node 'fiber'
+				# links (vs inter-node 'line-fiber' spans); their measured loss IS
+				# the patch loss and should be ~0 dB. Flag green/red against
+				# internal_fiber_loss_tolerance. Blank for inter-node spans.
+				int_loss_col = full_link_write_pattern.index('Internal Loss (dB)') + 1
+				if from_node and from_node == to_node and isinstance(link_item['Measured Loss'], (int, float)):
+					linkworksheet.write(linkrow , int_loss_col , link_item['Measured Loss'] , format_pwr)
+					linkworksheet.conditional_format(linkrow , int_loss_col , linkrow , int_loss_col , {'type': 'cell' , 'criteria': '>' , 'value': internal_fiber_loss_tolerance , 'format': format_pwr_red})
+					linkworksheet.conditional_format(linkrow , int_loss_col , linkrow , int_loss_col , {'type': 'cell' , 'criteria': '<=' , 'value': internal_fiber_loss_tolerance , 'format': format_pwr_green})
+				else:
+					linkworksheet.write(linkrow , int_loss_col , '')
 				linkworksheet.conditional_format( linkrow , 0 , linkrow , len(linkworksheet_header)-1 , {'type' : 'no_errors' , 'format' : workbook.add_format({'bg_color' : '#' + fill_format})})
 				# Format link diagnostics 
 				linkworksheet.conditional_format( linkrow , link_write_pattern.index('Link Diagnostics')+1 , linkrow , link_write_pattern.index('Link Diagnostics')+1,{'type':'text','criteria':'containing','value':'Good','format':format_green})

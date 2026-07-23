@@ -584,6 +584,21 @@ class TestTelnetPolicy(unittest.TestCase):
                 self.tp.enforce_telnet_policy("10.0.0.5")
             self.assertIn("ssh", str(cm.exception).lower())
 
+    def test_skip_ssh_probe_allows_allowlisted_host_with_ssh_open(self):
+        # Nokia 1830-family PSI: SSH is up on :22 but dead-ends, so Telnet is
+        # required. skip_ssh_probe keeps the allowlist gate but bypasses the
+        # "prefer SSH" refusal.
+        self.tp.add_telnet_allowlist("10.0.0.7", "test")
+        with mock.patch.object(self.tp, "ssh_port_open", return_value=True):
+            self.tp.enforce_telnet_policy("10.0.0.7", skip_ssh_probe=True)  # no raise
+
+    def test_skip_ssh_probe_still_requires_allowlist(self):
+        # skip_ssh_probe only waives Layer C, not the allowlist (Layer B).
+        with mock.patch.object(self.tp, "ssh_port_open", return_value=True):
+            with self.assertRaises(self.tp.TelnetPolicyError) as cm:
+                self.tp.enforce_telnet_policy("10.0.0.8", skip_ssh_probe=True)
+            self.assertIn("allowlist", str(cm.exception).lower())
+
     def test_ssh_probe_disabled_via_env_var(self):
         self.tp.add_telnet_allowlist("10.0.0.6", "test")
         os.environ[self.tp.ENV_DISABLE_SSH_PROBE] = "1"

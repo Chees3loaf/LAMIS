@@ -24,6 +24,7 @@ operator never types it.
 """
 from __future__ import annotations
 import inspect
+import re
 import unittest
 from pathlib import Path
 
@@ -166,8 +167,12 @@ class TestUpgradeWorkersAutoRestoreDhcp(unittest.TestCase):
     def test_each_worker_calls_restore_dhcp_in_finally(self):
         for name, src in self.workers.items():
             with self.subTest(worker=name):
-                self.assertIn(
-                    "self.after(0, self._restore_dhcp)", src,
+                # Scheduled on the Tk thread via ``self.after`` — the bare
+                # ``self.after(0, self._restore_dhcp)`` or, for PSI, wrapped in
+                # a lambda so the activation popup fires after netsh-OK
+                # (``self.after(0, lambda ...: self._restore_dhcp(on_success=...))``).
+                self.assertTrue(
+                    re.search(r"self\.after\(0,.*self\._restore_dhcp", src),
                     f"{name} worker must schedule _restore_dhcp on the "
                     "Tk thread in its finally block",
                 )
@@ -179,6 +184,43 @@ class TestUpgradeWorkersAutoRestoreDhcp(unittest.TestCase):
                     f"{name} worker must guard the _restore_dhcp call "
                     "behind the ownership flag",
                 )
+
+
+class TestPsiActivationPopup(unittest.TestCase):
+    """The PSI upgrade is only 'complete' once activate has dropped the
+    session AND the NIC is back on DHCP — at which point a popup tells the
+    operator activation is in progress and a manual commit is required.
+    """
+
+    def setUp(self):
+        from gui import software_upgrade_frame
+        self.cls = software_upgrade_frame.SoftwareUpgradeFrame
+        self.worker_src = inspect.getsource(self.cls._run_psi_upgrade)
+        self.popup_src = inspect.getsource(self.cls._show_activation_popup)
+
+    def test_popup_chained_to_dhcp_restore_on_success_only(self):
+        # Popup is passed to _restore_dhcp as on_success, and only built when
+        # the run succeeded (guarded by ok_run).
+        self.assertIn("ok_run = False", self.worker_src)
+        self.assertIn("_show_activation_popup", self.worker_src)
+        self.assertIn("on_success=", self.worker_src)
+        self.assertIn("if ok_run else None", self.worker_src)
+
+    def test_popup_text_has_required_wording(self):
+        for needle in (
+            "ACTIVATION IN PROGRESS",
+            "MANUAL COMMIT",
+            "Safe to disconnect",
+            "messagebox.showinfo",
+        ):
+            self.assertIn(needle, self.popup_src,
+                          f"activation popup missing {needle!r}")
+
+    def test_restore_dhcp_fires_on_success_after_netsh_ok(self):
+        # The on_success hook must be invoked only on the netsh-OK branch.
+        src = inspect.getsource(self.cls._restore_dhcp)
+        self.assertIn("on_success", src)
+        self.assertIn("self.after(0, on_success)", src)
 
 
 class TestServerUsingWorkersAutoStopServer(unittest.TestCase):

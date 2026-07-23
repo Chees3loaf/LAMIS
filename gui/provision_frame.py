@@ -8,10 +8,11 @@ Supports:
   - Ciena 39XX/51XX/81XX SAOS 10.x   (via scripts.Network.Ciena_SAOS10)
 
 Workflow:
-  1. User uploads an Excel file (columns: IP, Hostname; optional: Subnet, Gateway).
-  2. Selects one device (serial, one-at-a-time) or all devices (LAN batch).
-  3. Fills in connection + network parameters (device-type-specific extra fields shown).
-  4. Clicks Run; output appears in the log area below.
+  1. Provision a single device by typing its IP (+ optional hostname), OR
+     upload an Excel file (columns: IP, Hostname; optional: Subnet, Gateway)
+     and pick one device from the list. A typed IP overrides the dropdown.
+  2. Fills in connection + network parameters (device-type-specific extra fields shown).
+  3. Clicks Run; output appears in the log area below.
 """
 import logging
 import os
@@ -20,7 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox
 
 try:
     from serial.tools import list_ports
@@ -200,18 +201,22 @@ class ProvisionFrame(ttk.Frame):
         dev_frame = ttk.LabelFrame(self, text="Device Selection")
         dev_frame.pack(fill=tk.X, padx=5, pady=4)
 
-        ttk.Label(dev_frame, text="Device:").pack(side=tk.LEFT, padx=(6, 2))
+        # Row 2a: pick one device from the loaded Excel list + device type
+        dev_row = ttk.Frame(dev_frame)
+        dev_row.pack(fill=tk.X, padx=2, pady=(4, 2))
+
+        ttk.Label(dev_row, text="Device (from Excel):").pack(side=tk.LEFT, padx=(6, 2))
         self._device_var = tk.StringVar()
         self._device_combo = ttk.Combobox(
-            dev_frame, textvariable=self._device_var, state="readonly", width=40
+            dev_row, textvariable=self._device_var, state="readonly", width=40
         )
         self._device_combo.pack(side=tk.LEFT, padx=2)
         self._device_combo.bind("<<ComboboxSelected>>", self._on_device_selected)
 
-        ttk.Label(dev_frame, text="  Device Type:").pack(side=tk.LEFT, padx=(12, 2))
+        ttk.Label(dev_row, text="  Device Type:").pack(side=tk.LEFT, padx=(12, 2))
         self._dtype_var = tk.StringVar(value=_DEVICE_TYPE_OPTIONS[0])
         self._dtype_combo = ttk.Combobox(
-            dev_frame,
+            dev_row,
             textvariable=self._dtype_var,
             values=_DEVICE_TYPE_OPTIONS,
             state="readonly",
@@ -219,6 +224,30 @@ class ProvisionFrame(ttk.Frame):
         )
         self._dtype_combo.pack(side=tk.LEFT, padx=2)
         self._dtype_combo.bind("<<ComboboxSelected>>", self._on_dtype_change)
+
+        # Row 2b: manual single-device entry — overrides the dropdown when IP set
+        manual_row = ttk.Frame(dev_frame)
+        manual_row.pack(fill=tk.X, padx=2, pady=(0, 4))
+
+        ttk.Label(manual_row, text="— or single device —  IP:").pack(
+            side=tk.LEFT, padx=(6, 2)
+        )
+        self._manual_ip_var = tk.StringVar()
+        ttk.Entry(manual_row, textvariable=self._manual_ip_var, width=18).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Label(manual_row, text="  Hostname (optional):").pack(
+            side=tk.LEFT, padx=(10, 2)
+        )
+        self._manual_host_var = tk.StringVar()
+        ttk.Entry(manual_row, textvariable=self._manual_host_var, width=22).pack(
+            side=tk.LEFT, padx=2
+        )
+        ttk.Label(
+            manual_row,
+            text="(when IP is set, it overrides the dropdown above)",
+            foreground="gray",
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
         # ── Row 3: Connection type ─────────────────────────────────────────
         conn_frame = ttk.LabelFrame(self, text="Connection")
@@ -436,17 +465,20 @@ class ProvisionFrame(ttk.Frame):
         self._status_lbl = ttk.Label(ctrl_frame, text="Ready", foreground="gray")
         self._status_lbl.pack(side=tk.LEFT, padx=10)
 
-        # ── Row 8: Output log ──────────────────────────────────────────────
-        log_frame = ttk.LabelFrame(self, text="Output")
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=4)
+        # ── Output ─────────────────────────────────────────────────────────
+        # Progress streams to ATLAS's shared output panel at the bottom of the
+        # main window (the same panel the RLS Network Audit writes to), so this
+        # frame stays short enough to fit without its own log box clipping.
+        ttk.Label(
+            self,
+            text="▼  Live progress appears in the ATLAS output panel at the bottom of the window.",
+            foreground="gray",
+        ).pack(anchor=tk.W, padx=8, pady=(2, 4))
 
-        self._log_text = scrolledtext.ScrolledText(
-            log_frame, height=12, wrap=tk.WORD, state=tk.DISABLED
-        )
-        self._log_text.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-        ttk.Button(log_frame, text="Clear", command=self._clear_log).pack(
-            anchor=tk.E, padx=4, pady=(0, 4)
-        )
+        # Keep the SSH Connect IP in sync with the manual single-device IP so
+        # LAN provisioning targets the typed host (registered here, after the
+        # Connect IP field exists). Clearing the manual IP restores the dropdown.
+        self._manual_ip_var.trace_add("write", self._on_manual_ip_change)
 
         # Initial state
         self._refresh_ports()
@@ -520,6 +552,43 @@ class ProvisionFrame(ttk.Frame):
                     self._route_var.set(d["static_route"])
                 break
 
+    def _on_manual_ip_change(self, *_args) -> None:
+        """Mirror the manual single-device IP into the SSH Connect IP field so
+        LAN provisioning targets it; clearing it restores the dropdown device."""
+        manual_ip = self._manual_ip_var.get().strip()
+        if manual_ip:
+            self._connect_ip_var.set(manual_ip)
+        else:
+            self._on_device_selected()
+
+    @staticmethod
+    def _is_valid_ipv4(value: str) -> bool:
+        parts = value.split(".")
+        if len(parts) != 4:
+            return False
+        return all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)
+
+    def _resolve_target_device(self) -> Optional[Dict[str, str]]:
+        """Return the device to provision.
+
+        A typed manual IP wins over the dropdown; otherwise the device selected
+        from the loaded Excel list. Returns None when neither is available. The
+        returned dict always carries a 'hostname' key (possibly empty string).
+        """
+        manual_ip = self._manual_ip_var.get().strip()
+        if manual_ip:
+            return {
+                "ip": manual_ip,
+                "hostname": self._manual_host_var.get().strip(),
+            }
+        if not self._devices:
+            return None
+        sel = self._device_var.get()
+        return next(
+            (d for d in self._devices if f"{d['hostname']}  ({d['ip']})" == sel),
+            None,
+        )
+
     def _browse_excel(self) -> None:
         path = filedialog.askopenfilename(
             title="Select device list Excel file",
@@ -570,21 +639,27 @@ class ProvisionFrame(ttk.Frame):
     # ── Log helpers ──────────────────────────────────────────────────────────
 
     def _log_append(self, msg: str) -> None:
-        """Append *msg* to the output log widget (thread-safe via after())."""
+        """Append *msg* to ATLAS's shared output panel (bottom of the main
+        window) — the same panel the RLS Network Audit streams to. Marshaled
+        onto the Tk thread via the controller's root so it is safe to call
+        from the provisioning worker thread."""
+        out = getattr(self.controller, "output_screen", None)
+        root = getattr(self.controller, "root", None)
+        if out is None or root is None:
+            return
+        text = msg if msg.endswith("\n") else msg + "\n"
+
         def _do():
-            self._log_text.config(state=tk.NORMAL)
-            self._log_text.insert(tk.END, msg if msg.endswith("\n") else msg + "\n")
-            self._log_text.see(tk.END)
-            self._log_text.config(state=tk.DISABLED)
+            try:
+                out.insert(tk.END, text)
+                out.see(tk.END)
+            except tk.TclError:
+                pass
+
         try:
-            self.after(0, _do)
+            root.after(0, _do)
         except Exception:
             pass
-
-    def _clear_log(self) -> None:
-        self._log_text.config(state=tk.NORMAL)
-        self._log_text.delete("1.0", tk.END)
-        self._log_text.config(state=tk.DISABLED)
 
     def _set_status(self, msg: str, color: str = "gray") -> None:
         def _do():
@@ -610,18 +685,21 @@ class ProvisionFrame(ttk.Frame):
         self._set_status("Stopping…", "orange")
 
     def _run(self) -> None:
-        # Validate device selection
-        if not self._devices:
-            messagebox.showerror("Error", "Load a device list first.")
+        # Resolve the target: a typed single-device IP wins over the dropdown
+        device = self._resolve_target_device()
+        if device is None:
+            messagebox.showerror(
+                "Error",
+                "Enter a single device IP, or load a device list and "
+                "select a device.",
+            )
             return
 
-        sel = self._device_var.get()
-        device = next(
-            (d for d in self._devices if f"{d['hostname']}  ({d['ip']})" == sel),
-            None,
-        )
-        if device is None:
-            messagebox.showerror("Error", "No device selected.")
+        manual_mode = bool(self._manual_ip_var.get().strip())
+        if manual_mode and not self._is_valid_ipv4(device["ip"]):
+            messagebox.showerror(
+                "Error", f"'{device['ip']}' is not a valid IPv4 address."
+            )
             return
 
         # Validate network params
@@ -633,6 +711,25 @@ class ProvisionFrame(ttk.Frame):
         # Resolve device type first so we know whether prefix_len matters
         dtype_label = self._dtype_var.get()
         device_type = _DEVICE_TYPE_MAP.get(dtype_label)  # None = auto-detect
+
+        # Hostname is optional for SAOS / SAOS 10 / OLS, but:
+        #   • auto-detect infers the device type from the hostname, and
+        #   • Nokia 7705/7250 requires it (used for the saved config filename).
+        if not device.get("hostname"):
+            if device_type is None:
+                messagebox.showerror(
+                    "Error",
+                    "No hostname given, so the device type can't be "
+                    "auto-detected.\nEnter a hostname or choose a Device Type.",
+                )
+                return
+            if device_type in ("7705", "7250"):
+                messagebox.showerror(
+                    "Error",
+                    "Nokia 7705/7250 provisioning requires a hostname "
+                    "(used for the saved config filename).",
+                )
+                return
 
         prefix_len = 32  # SAOS 6 always uses /32 for the management IP interface
         if device_type not in ("saos",):
@@ -660,8 +757,9 @@ class ProvisionFrame(ttk.Frame):
         self._stop_flag = False
         self._set_controls(running=True)
         self._set_status("Running…", "blue")
+        disp_name = device["hostname"] or "(no hostname)"
         self._log_append(f"\n{'─'*60}")
-        self._log_append(f"Provisioning: {device['hostname']}  {device['ip']}/{prefix_len}")
+        self._log_append(f"Provisioning: {disp_name}  {device['ip']}/{prefix_len}")
 
         def _worker():
             try:
@@ -715,10 +813,10 @@ class ProvisionFrame(ttk.Frame):
         success = script.run()
         if success:
             self._set_status("Done ✔", "green")
-            self._log_append(f"✔ Done: {device['hostname']}")
+            self._log_append(f"✔ Done: {device['hostname'] or device['ip']}")
         else:
             self._set_status("Failed ✘", "red")
-            self._log_append(f"✘ Failed: {device['hostname']} — see output above")
+            self._log_append(f"✘ Failed: {device['hostname'] or device['ip']} — see output above")
 
     def _run_saos_worker(self, device, conn_type, connect_ip, gateway) -> None:
         from scripts.Network.Ciena_SAOS import Script as SAOSScript
@@ -749,10 +847,10 @@ class ProvisionFrame(ttk.Frame):
         success = script.run()
         if success:
             self._set_status("Done ✔", "green")
-            self._log_append(f"✔ Done: {device['hostname']}")
+            self._log_append(f"✔ Done: {device['hostname'] or device['ip']}")
         else:
             self._set_status("Failed ✘", "red")
-            self._log_append(f"✘ Failed: {device['hostname']} — see output above")
+            self._log_append(f"✘ Failed: {device['hostname'] or device['ip']} — see output above")
 
     def _run_saos10_worker(
         self, device, conn_type, connect_ip, gateway, prefix_len
@@ -779,10 +877,10 @@ class ProvisionFrame(ttk.Frame):
         success = script.run()
         if success:
             self._set_status("Done ✔", "green")
-            self._log_append(f"✔ Done: {device['hostname']}")
+            self._log_append(f"✔ Done: {device['hostname'] or device['ip']}")
         else:
             self._set_status("Failed ✘", "red")
-            self._log_append(f"✘ Failed: {device['hostname']} — see output above")
+            self._log_append(f"✘ Failed: {device['hostname'] or device['ip']} — see output above")
 
     def _run_ols_worker(
         self, device, conn_type, connect_ip, gateway, prefix_len
@@ -810,7 +908,7 @@ class ProvisionFrame(ttk.Frame):
         success = script.run()
         if success:
             self._set_status("Done ✔", "green")
-            self._log_append(f"✔ Done: {device['hostname']}")
+            self._log_append(f"✔ Done: {device['hostname'] or device['ip']}")
         else:
             self._set_status("Failed ✘", "red")
-            self._log_append(f"✘ Failed: {device['hostname']} — see output above")
+            self._log_append(f"✘ Failed: {device['hostname'] or device['ip']} — see output above")

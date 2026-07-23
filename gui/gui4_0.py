@@ -51,7 +51,7 @@ class InventoryGUI:
     _manual_script_modules = {
         "Nokia SAR": "scripts.Nokia_SAR",
         "Nokia IXR": "scripts.Nokia_IXR",
-        "Nokia 1830": "scripts.Nokia_1830",
+        "Nokia PSS": "scripts.Nokia_1830",
         "Nokia PSI": "scripts.Nokia_PSI",
         "Ciena 6500": "scripts.Ciena_6500",
         "Ciena RLS": "scripts.Ciena_RLS",
@@ -67,16 +67,21 @@ class InventoryGUI:
     _ALLOWED_SCRIPT_MODULES = frozenset(_manual_script_modules.values())
 
     _lan_connection_types = {
-        "Nokia 1830": "ssh",
-        "Nokia PSI": "ssh",
+        "Nokia PSS": "ssh",
+        # PSI shelves authenticate over SSH as 'admin' but then dead-end at the
+        # alarm banner (admin != the CLI account). The working login is the
+        # shelf's getty two-step over Telnet: login:cli / Username:admin /
+        # Password:admin (see scripts/_nokia_1830_family.telnet_login). LAN PSI
+        # therefore uses Telnet; the target IP is auto-allowlisted at build time.
+        "Nokia PSI": "telnet",
         "Ciena 6500": "ssh",
         "Ciena RLS": "ssh",
         "Ciena SAOS": "ssh",
         "Ciena SAOS 10": "ssh",
     }
 
-    _allowed_lan_scripts = {"Nokia 1830", "Nokia PSI", "Ciena 6500", "Ciena RLS", "Ciena SAOS", "Ciena SAOS 10"}
-    _allowed_serial_scripts = {"Nokia SAR", "Nokia IXR", "Ciena RLS", "Ciena Waveserver 5"}
+    _allowed_lan_scripts = {"Nokia PSS", "Nokia PSI", "Ciena 6500", "Ciena RLS", "Ciena SAOS", "Ciena SAOS 10"}
+    _allowed_serial_scripts = {"Nokia SAR", "Nokia IXR", "Nokia PSI", "Ciena RLS", "Ciena Waveserver 5"}
 
     def __init__(self, root, update_available, command_tracker, db_cache):
         self.root = root
@@ -884,7 +889,7 @@ class InventoryGUI:
                 return None
 
             if connection_mode == "LAN" and manual_script not in self._allowed_lan_scripts:
-                messagebox.showerror("Input Error", "LAN supports only Nokia 1830, Nokia PSI, Ciena 6500, and Ciena RLS.")
+                messagebox.showerror("Input Error", "LAN supports only Nokia PSS, Nokia PSI, Ciena 6500, and Ciena RLS.")
                 return None
             if connection_mode == "Serial" and manual_script not in self._allowed_serial_scripts:
                 messagebox.showerror("Input Error", "Serial supports only Nokia SAR and Nokia IXR.")
@@ -1018,9 +1023,26 @@ class InventoryGUI:
         if mode == "LAN":
             if script_name not in self._allowed_lan_scripts:
                 raise ValueError(f"{script_name} is not supported in LAN mode")
+            conn_type = self._lan_connection_types.get(script_name, "ssh")
+            ip_address = context["ip_address"]
+            # Telnet is allowlist-gated. Selecting a Telnet-based LAN script and
+            # typing an IP is an explicit operator authorization for Telnet to
+            # THAT host (same rationale as the Network path auto-allowlisting
+            # identified 1830s), so add it before the connection is attempted.
+            if conn_type == "telnet":
+                try:
+                    from utils.telnet_policy import add_telnet_allowlist
+                    add_telnet_allowlist(
+                        ip_address,
+                        f"auto: {script_name} LAN inventory (operator-selected)",
+                    )
+                except Exception as exc:
+                    logging.warning(
+                        f"[TELNET] Could not auto-allowlist {ip_address}: {exc}"
+                    )
             kwargs.update({
-                "connection_type": self._lan_connection_types.get(script_name, "ssh"),
-                "ip_address": context["ip_address"],
+                "connection_type": conn_type,
+                "ip_address": ip_address,
                 "username": context["username"],
                 "password": context["password"],
             })

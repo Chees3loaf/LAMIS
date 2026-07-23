@@ -74,78 +74,78 @@ class NetworkAuditFrame(ttk.Frame):
         cfg = ttk.LabelFrame(self, text="Network Audit Configuration")
         cfg.pack(fill=tk.X, pady=5)
 
-        tk.Label(cfg, text="Seed IP / Hostname:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        # Network type selector — reshapes credentials + optional collection.
+        # Ciena RLS drives the REST audit; Nokia PSI drives the SSH audit
+        # (scripts/Network/Nokia_PSI_Audit.py). Defaults to RLS so the existing
+        # flow is unchanged until the operator switches.
+        tk.Label(cfg, text="Network Type:").grid(row=0, column=0, sticky="w", padx=5, pady=5)
+        self.network_type_var = tk.StringVar(value="Ciena RLS")
+        self.type_combo = ttk.Combobox(
+            cfg, textvariable=self.network_type_var, state="readonly",
+            values=["Ciena RLS", "Nokia PSI"], width=18,
+        )
+        self.type_combo.grid(row=0, column=1, padx=5, pady=5, sticky="w")
+        self.type_combo.bind("<<ComboboxSelected>>", self._on_type_change)
+
+        tk.Label(cfg, text="Seed IP / Hostname:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
         self.seed_entry = tk.Entry(cfg, width=30)
-        self.seed_entry.grid(row=0, column=1, padx=5, pady=5, sticky="w")
-        tk.Label(
-            cfg,
-            text="(one node — the audit auto-discovers the rest via RESTCONF)",
-            fg="gray",
-        ).grid(row=0, column=2, columnspan=2, sticky="w", padx=5)
+        self.seed_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        # Hint text is set per network type by _on_type_change().
+        self.seed_hint_label = tk.Label(cfg, text="", fg="gray")
+        self.seed_hint_label.grid(row=1, column=2, columnspan=2, sticky="w", padx=5)
 
-        # Pre-fill with the Ciena RLS RESTCONF defaults from the
-        # encrypted credential store. The shell user ``su`` does NOT
-        # have REST API access; ``diaguser`` does. The operator can
-        # override either field if the network has rotated the
-        # factory defaults.
-        try:
-            from utils.credentials import get_default_credential_for_vendor
-            _default_user, _default_pass = (
-                get_default_credential_for_vendor("ciena-rls-rest")
-                or ("diaguser", "Ciena123")
-            )
-        except Exception:
-            _default_user, _default_pass = ("diaguser", "Ciena123")
-
-        tk.Label(cfg, text="Username:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        # Credentials are pre-filled per type from the encrypted credential
+        # store by _on_type_change() (RLS RESTCONF diaguser/Ciena123; PSI SSH
+        # admin/admin). The operator can override either field.
+        tk.Label(cfg, text="Username:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
         self.username_entry = tk.Entry(cfg, width=20)
-        self.username_entry.insert(0, _default_user)
-        self.username_entry.grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        self.username_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
-        tk.Label(cfg, text="Password:").grid(row=1, column=2, sticky="w", padx=5, pady=5)
+        tk.Label(cfg, text="Password:").grid(row=2, column=2, sticky="w", padx=5, pady=5)
         self.password_entry = tk.Entry(cfg, width=20, show="*")
-        self.password_entry.insert(0, _default_pass)
-        self.password_entry.grid(row=1, column=3, padx=5, pady=5, sticky="w")
+        self.password_entry.grid(row=2, column=3, padx=5, pady=5, sticky="w")
 
-        tk.Label(
-            cfg,
-            text=(
-                "(RLS RESTCONF default: 'diaguser' / 'Ciena123' --"
-                " override only if your network has rotated)"
-            ),
-            fg="gray",
-        ).grid(row=2, column=0, columnspan=4, sticky="w", padx=5)
+        self.cred_hint_label = tk.Label(cfg, text="", fg="gray")
+        self.cred_hint_label.grid(row=3, column=0, columnspan=4, sticky="w", padx=5)
 
-        tk.Label(cfg, text="Output File:").grid(row=3, column=0, sticky="w", padx=5, pady=5)
+        tk.Label(cfg, text="Output File:").grid(row=4, column=0, sticky="w", padx=5, pady=5)
         self.output_entry = tk.Entry(cfg, width=50)
-        self.output_entry.grid(row=3, column=1, columnspan=2, padx=5, pady=5, sticky="w")
-        # Default output dir: last-used directory the operator browsed
-        # to (if it still exists), else the OS Desktop. Path is built
-        # at frame construction so the timestamp reflects when the
-        # operator opened the screen, not when the audit fires.
-        default_dir = _resolve_default_output_dir()
-        default_out = os.path.join(
-            default_dir,
-            f"RLS_Audit_{datetime.datetime.now():%Y-%m-%d_%H%M%S}.xlsx",
-        )
-        self.output_entry.insert(0, default_out)
+        self.output_entry.grid(row=4, column=1, columnspan=2, padx=5, pady=5, sticky="w")
+        # Default output path (name + dir) is filled per type by
+        # _on_type_change(); the timestamp reflects when the screen was opened.
         tk.Button(cfg, text="Browse…", command=self._browse_output).grid(
-            row=3, column=3, padx=5, pady=5, sticky="w",
+            row=4, column=3, padx=5, pady=5, sticky="w",
         )
 
-        # Optional toggles
+        # Optional Data Collection — the exact widgets shown depend on the
+        # network type (see _on_type_change): RLS shows the alarm toggles; PSI
+        # shows an info note (it always captures alarms). Debug shows for both.
         opts = ttk.LabelFrame(self, text="Optional Data Collection")
         opts.pack(fill=tk.X, pady=5)
+        self._opts_frame = opts
         self.capture_alarms_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
+        self.cb_alarms = tk.Checkbutton(
             opts, text="Capture active alarms (adds 'Alarms' sheet)",
             variable=self.capture_alarms_var,
-        ).pack(anchor="w", padx=10, pady=2)
+        )
         self.capture_history_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
+        self.cb_history = tk.Checkbutton(
             opts, text="Capture alarm history (adds 'Alarm History' sheet)",
             variable=self.capture_history_var,
-        ).pack(anchor="w", padx=10, pady=2)
+        )
+        self.psi_opts_note = tk.Label(
+            opts,
+            text=(
+                "PSI always captures alarms; the whole line is auto-discovered"
+                " and walked from the seed."
+            ),
+            fg="gray",
+        )
+        self.debug_var = tk.BooleanVar(value=False)
+        self.cb_debug = tk.Checkbutton(
+            opts, text="Debug mode (verbose logging)",
+            variable=self.debug_var,
+        )
 
         controls = ttk.Frame(self)
         controls.pack(fill=tk.X, pady=10)
@@ -155,6 +155,84 @@ class NetworkAuditFrame(ttk.Frame):
         self.run_button.pack(side=tk.RIGHT, padx=5)
         self.status_label = tk.Label(controls, text="Status: Ready", anchor="w")
         self.status_label.pack(side=tk.RIGHT, padx=10)
+
+        # Populate credentials / hints / output name / optional toggles for the
+        # default network type (Ciena RLS).
+        self._on_type_change()
+
+    def _current_type(self) -> str:
+        """'psi' or 'rls' from the Network Type dropdown."""
+        return "psi" if self.network_type_var.get().startswith("Nokia") else "rls"
+
+    def _defaults_for_type(self, ntype: str):
+        """Return (username, password, cred_hint, seed_hint) for the type."""
+        try:
+            from utils.credentials import get_default_credential_for_vendor
+        except Exception:
+            get_default_credential_for_vendor = None
+
+        def _lookup(vendor, fallback):
+            if get_default_credential_for_vendor:
+                try:
+                    return get_default_credential_for_vendor(vendor) or fallback
+                except Exception:
+                    return fallback
+            return fallback
+
+        if ntype == "psi":
+            user, pw = _lookup("nokia", ("admin", "admin"))
+            cred_hint = (
+                "(Nokia PSI SSH default: 'admin' / 'admin' --"
+                " override only if your network has rotated)"
+            )
+            seed_hint = (
+                "(one node — the audit auto-discovers the line via network-map + OSC)"
+            )
+        else:
+            user, pw = _lookup("ciena-rls-rest", ("diaguser", "Ciena123"))
+            cred_hint = (
+                "(RLS RESTCONF default: 'diaguser' / 'Ciena123' --"
+                " override only if your network has rotated)"
+            )
+            seed_hint = "(one node — the audit auto-discovers the rest via RESTCONF)"
+        return user, pw, cred_hint, seed_hint
+
+    def _default_output_path(self, ntype: str) -> str:
+        prefix = "PSI_Audit" if ntype == "psi" else "RLS_Audit"
+        return os.path.join(
+            _resolve_default_output_dir(),
+            f"{prefix}_{datetime.datetime.now():%Y-%m-%d_%H%M%S}.xlsx",
+        )
+
+    def _on_type_change(self, *_event) -> None:
+        """Reshape credentials, hints, output name and the optional-collection
+        section when the network type changes (also called once at build)."""
+        ntype = self._current_type()
+        user, pw, cred_hint, seed_hint = self._defaults_for_type(ntype)
+        self.username_entry.delete(0, tk.END)
+        self.username_entry.insert(0, user)
+        self.password_entry.delete(0, tk.END)
+        self.password_entry.insert(0, pw)
+        self.cred_hint_label.config(text=cred_hint)
+        self.seed_hint_label.config(text=seed_hint)
+
+        # Regenerate the default output filename unless the operator has set a
+        # custom path (i.e. it no longer matches the auto-generated pattern).
+        cur = self.output_entry.get().strip()
+        if not cur or re.match(r"^(RLS|PSI)_Audit_.*\.xlsx$", os.path.basename(cur)):
+            self.output_entry.delete(0, tk.END)
+            self.output_entry.insert(0, self._default_output_path(ntype))
+
+        # Optional Data Collection — repack per type (RLS: alarm toggles; PSI:
+        # info note). Debug is always last so it stays at the bottom.
+        for w in (self.cb_alarms, self.cb_history, self.psi_opts_note, self.cb_debug):
+            w.pack_forget()
+        if ntype == "psi":
+            self.psi_opts_note.pack(anchor="w", padx=10, pady=2)
+        else:
+            self.cb_alarms.pack(anchor="w", padx=10, pady=2)
+            self.cb_history.pack(anchor="w", padx=10, pady=2)
+        self.cb_debug.pack(anchor="w", padx=10, pady=2)
 
     def _browse_output(self) -> None:
         current = self.output_entry.get().strip()
@@ -185,6 +263,8 @@ class NetworkAuditFrame(ttk.Frame):
         output_path = self.output_entry.get().strip()
         capture_alarms = self.capture_alarms_var.get()
         capture_history = self.capture_history_var.get()
+        ntype = self._current_type()
+        debug = self.debug_var.get()
 
         if not seed:
             messagebox.showerror("Input Error", "Seed IP / hostname is required.")
@@ -216,11 +296,14 @@ class NetworkAuditFrame(ttk.Frame):
         self.run_button.config(state=tk.DISABLED)
         self.status_label.config(text="Status: Discovering…")
         out = self.controller.output_screen
-        out.insert(tk.END, f"\n── RLS Network Audit ──\n")
+        label = "Nokia PSI" if ntype == "psi" else "Ciena RLS"
+        out.insert(tk.END, f"\n── {label} Network Audit ──\n")
         out.insert(tk.END, f"Seed     : {seed}\n")
         out.insert(tk.END, f"Output   : {output_path}\n")
-        out.insert(tk.END, f"Alarms   : {'on' if capture_alarms else 'off'}\n")
-        out.insert(tk.END, f"History  : {'on' if capture_history else 'off'}\n")
+        if ntype != "psi":
+            out.insert(tk.END, f"Alarms   : {'on' if capture_alarms else 'off'}\n")
+            out.insert(tk.END, f"History  : {'on' if capture_history else 'off'}\n")
+        out.insert(tk.END, f"Debug    : {'on' if debug else 'off'}\n")
         out.see(tk.END)
 
         root = self.controller.root
@@ -238,16 +321,30 @@ class NetworkAuditFrame(ttk.Frame):
 
         def _worker() -> None:
             try:
-                from scripts.Network.RLS_Audit import run_audit
-                run_audit(
-                    seed_host=seed,
-                    username=username,
-                    password=password,
-                    output_path=output_path,
-                    capture_alarms=capture_alarms,
-                    capture_alarm_history=capture_history,
-                    log_callback=_log_to_panel,
-                )
+                if ntype == "psi":
+                    # PSI audit runs in-process (paramiko SSH, no console) and
+                    # streams to the panel via log_callback -- same model as RLS.
+                    from scripts.Network.Nokia_PSI_Audit import run_audit as _psi_run_audit
+                    _psi_run_audit(
+                        seed_host=seed,
+                        username=username,
+                        password=password,
+                        output_path=output_path,
+                        debug=debug,
+                        log_callback=_log_to_panel,
+                    )
+                else:
+                    from scripts.Network.RLS_Audit import run_audit
+                    run_audit(
+                        seed_host=seed,
+                        username=username,
+                        password=password,
+                        output_path=output_path,
+                        capture_alarms=capture_alarms,
+                        capture_alarm_history=capture_history,
+                        debug=debug,
+                        log_callback=_log_to_panel,
+                    )
                 scrub_password_widget(self.password_entry)
                 # Remember the directory the operator just used so the
                 # next audit defaults to it. Only persisted on success

@@ -3,9 +3,14 @@ scripts/Network/Nokia_PSI_Upgrade.py — Software upgrade flow for Nokia PSI.
 
 The PSI fetches its load from the local HTTP server staged by the
 Software Upgrades GUI tab (PC at 172.16.0.101, PSI at 172.16.0.1). Login
-mechanics mirror the Nokia 1830: SSH as ``cli`` then a second inner
-Username/Password dialog on the shell channel. Once we're in, the
-upgrade sequence is:
+uses the Nokia 1830-family getty three-stage over **Telnet** — SSH-as-
+``admin`` authenticates but then dead-ends at the alarm banner (``admin``
+is not the CLI account, and the session ignores input), so the usable CLI
+is only reachable via the Telnet getty: ``login:`` -> ``cli``,
+``Username:`` -> ``admin``, ``Password:`` -> ``admin``. This mirrors the
+inventory PSI path (see ``scripts/_nokia_1830_family`` and
+``reference_nokia_1830_class_access``). Once we're in, the upgrade
+sequence is:
 
   1. config general ftpserver enable
   2. config software server ip 172.16.0.101
@@ -27,13 +32,10 @@ from __future__ import annotations
 
 import logging
 import re
+import select
 import socket
 import time
 from typing import Callable, Optional
-
-import paramiko
-
-from utils.helpers import ensure_host_key_known, nokia_ssh_authenticate
 
 logger = logging.getLogger(__name__)
 
@@ -52,19 +54,156 @@ _STATUS_TIMEOUT_S = 30 * 60  # 30 min cap
 # Activate triggers a chassis reboot — same success signal as G42.
 _ACTIVATE_DROP_TIMEOUT_S = 5 * 60
 _MIN_ELAPSED_FOR_RESET_S = 30.0
+# Grace period after sending `activate` to catch a fast rejection (the shelf
+# refuses in ~0.5s if the load isn't complete) before announcing success.
+_ACTIVATE_GRACE_S = 3.0
 
 _PROMPT_TIMEOUT_S = 30
+
+# Telnet transport: socket-connect + default per-read timeout, and the per
+# getty-prompt wait for the login:/Username:/Password: dialog.
+_TELNET_TIMEOUT_S = 20
+_LOGIN_STEP_TIMEOUT_S = 12
 
 # 1830/PSI prompt formats. They typically end with "#" but also "$" for
 # certain user accounts. Allow either.
 _PROMPT_RE = re.compile(r"([A-Za-z0-9._@\-]+[#>\$])\s*$")
 _PASSWORD_RE = re.compile(r"(?i)password\s*:\s*$")
-_USERNAME_RE = re.compile(r"(?i)(username|login)\s*:\s*$")
 _ACK_RE = re.compile(
     r"(?i)\(\s*y\s*/\s*n\s*\)|\[\s*y\s*/\s*n\s*\]|continue\?|accept\?|press\s+y"
 )
-_STATUS_COMPLETE_RE = re.compile(r"(?i)\b(complete|completed|success|loaded)\b")
-_STATUS_FAILED_RE = re.compile(r"(?i)\b(fail|failed|error|aborted)\b")
+# Confirmations that want the full word "yes" (not a bare "y"). The PSI's
+# port-change gate is: "Continue? ... Enter 'yes' to confirm, 'no' to cancel:".
+# Checked BEFORE _ACK_RE so a prompt containing both "Continue?" and
+# "Enter 'yes'" is answered with "yes", not "y".
+_CONFIRM_YES_RE = re.compile(
+    r"(?i)(?:enter|type)\s+'?yes'?\s+to\s+confirm"
+    r"|\[\s*yes\s*/\s*no\s*\]|\byes\s*/\s*no\b"
+)
+# Cap auto-confirmations per command so echoed prompt text can't loop forever.
+_MAX_CONFIRMS = 5
+# `config software upgrade status` header fields. Anchored to the labelled
+# lines so we read the AGGREGATE operation state — NOT the per-stage
+# "...100% complete" lines, which are present from the first poll and caused
+# activate to fire before the load had transferred anything.
+_OPERATION_RE = re.compile(r"(?im)^\s*Operation\s*:\s*(\S.*?)\s*$")
+_OP_STATUS_RE = re.compile(r"(?im)^\s*Operation\s+Status\s*:\s*(\S.*?)\s*$")
+_PERCENT_RE = re.compile(r"(?im)^\s*Percent\s+Completion\s*:\s*(\d+)\s*%")
+_UPGRADE_PATH_RE = re.compile(r"(?im)^\s*Upgrade\s+Path\s+Available\s*:\s*(\S+)")
+_WORKING_RELEASE_RE = re.compile(r"(?im)^\s*Working\s+Release\s*:\s*(\S+)")
+# Explicit failure signals: a header status of Failed/Aborted/Error, or any
+# download-script stage whose RESULT is a failure (not "Success"/"None").
+_STAGE_FAIL_RE = re.compile(r"(?im)^\s*RESULT\s*:\s*(fail\w*|error\w*|abort\w*)")
+# The shelf rejects `activate` if the load isn't truly complete.
+_ACTIVATE_REJECT_RE = re.compile(
+    r"(?i)unable to complete|operation in progress|not allowed|"
+    r"rejected|cannot activate"
+)
+
+
+def _strip_telnet_noise(data: bytes) -> bytes:
+    """Drop CR and embedded NUL bytes from a Telnet capture.
+
+    The PSI's Telnet stream carries CR-NUL (RFC 854 bare-CR encoding) plus
+    stray NULs around the prompt, and their placement varies per command.
+    Left in, they break a plain ``endswith(prompt)`` / ``\\s*$`` match — e.g.
+    ``b"PROMPT#\\x00"`` does not end with ``b"PROMPT#"`` and ``rstrip()`` does
+    NOT strip NUL — which silently hangs a command until its prompt timeout.
+    """
+    return data.replace(b"\r", b"").replace(b"\x00", b"")
+
+
+class _TelnetChannel:
+    """paramiko-Channel-shaped facade over :class:`utils.telnet.Telnet`.
+
+    The PSI upgrade phases (``_configure_server`` / status polling /
+    ``_activate``) were written against a paramiko shell channel
+    (``send``/``recv``/``recv_ready``/``closed``). PSI's usable CLI is only
+    reachable over the Telnet getty two-step — SSH-as-admin dead-ends at the
+    alarm banner — so we drive Telnet but keep that channel-shaped surface,
+    letting the command phases run unchanged.
+    """
+
+    def __init__(self, telnet) -> None:
+        self._t = telnet
+        self._buf = bytearray()
+        self._closed = False
+
+    def _pull(self) -> None:
+        """Move any immediately-available bytes into the local buffer."""
+        if self._closed:
+            return
+        try:
+            data = self._t.read_very_eager()
+        except OSError:
+            self._closed = True
+            return
+        if data:
+            self._buf.extend(data)
+
+    def _peer_closed(self) -> bool:
+        """True once the peer has sent FIN/RST — the PSI reboot on activate.
+
+        Uses ``MSG_PEEK`` so we inspect the socket without consuming real data
+        or Telnet IAC bytes: select says readable + peek returns empty ==> the
+        peer closed cleanly; an OSError ==> reset.
+        """
+        sock = getattr(self._t, "_sock", None)
+        if sock is None:
+            return self._closed
+        try:
+            readable, _, _ = select.select([sock], [], [], 0)
+            if not readable:
+                return False
+            return sock.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
+    # ── paramiko.Channel-compatible surface ─────────────────────────────────
+
+    def send(self, data) -> int:
+        if isinstance(data, str):
+            data = data.encode("utf-8", errors="replace")
+        try:
+            self._t.write(data)
+        except OSError:
+            self._closed = True
+            raise
+        return len(data)
+
+    def recv_ready(self) -> bool:
+        if not self._buf:
+            self._pull()
+        return bool(self._buf)
+
+    def recv(self, nbytes: int = 65535) -> bytes:
+        if not self._buf:
+            self._pull()
+        if not self._buf:
+            return b""
+        chunk = bytes(self._buf[:nbytes])
+        del self._buf[:nbytes]
+        return chunk
+
+    def exit_status_ready(self) -> bool:
+        if not self._closed and not self._buf and self._peer_closed():
+            self._closed = True
+        return self._closed
+
+    @property
+    def closed(self) -> bool:
+        return self.exit_status_ready()
+
+    def settimeout(self, _timeout) -> None:
+        # Telnet applies per-read timeouts internally; nothing to set here.
+        pass
+
+    def close(self) -> None:
+        self._closed = True
+        try:
+            self._t.close()
+        except Exception:
+            pass
 
 
 class NokiaPSIUpgradeScript:
@@ -93,57 +232,16 @@ class NokiaPSIUpgradeScript:
         self.output_callback = output_callback or (lambda _msg: None)
         self.stop_callback = stop_callback or (lambda: False)
         self._prompt: str = ""
+        self._working_release: str = ""
 
     # ── Public entry ────────────────────────────────────────────────────────
 
     def run(self) -> bool:
-        self._log(f"Connecting to PSI at {self.ip_address} as {self.username}…")
-        if not ensure_host_key_known(self.ip_address, port=22):
-            self._log(f"Host key verification failed for {self.ip_address}.")
-            return False
-
-        # PSI is 1830-class: the outer SSH user ('cli') has no real SSH
-        # password. Plain password auth is rejected outright, so we mirror
-        # the working Nokia_1830 flow — auth_none, falling back to an empty
-        # keyboard-interactive response. The real admin/admin credentials
-        # are entered at the inner Username:/Password: shell prompts by
-        # `_two_stage_login`, not here.
-        sock = None
-        transport = None
         session = None
         try:
-            try:
-                sock = socket.create_connection((self.ip_address, 22), timeout=15)
-                transport = paramiko.Transport(sock)
-                transport.start_client(timeout=15)
-            except Exception as exc:
-                self._log(f"SSH connect error: {exc}")
+            session = self._connect()
+            if session is None:
                 return False
-
-            try:
-                # SSH-layer auth: modern shelves accept admin/admin password auth
-                # and drop straight to the shell; legacy shelves use a passwordless
-                # 'cli' account + the inner two-stage in _two_stage_login. Try the
-                # admin (inner) creds first.
-                nokia_ssh_authenticate(transport, self.inner_username, self.inner_password)
-                logging.info("[PSI] SSH auth succeeded for %s@%s",
-                             self.inner_username, self.ip_address)
-            except (paramiko.AuthenticationException, paramiko.SSHException) as exc:
-                self._log(
-                    f"SSH authentication was rejected ({exc}). Check the login "
-                    "credentials for this shelf (default admin/admin)."
-                )
-                return False
-
-            session = transport.open_session()
-            session.get_pty(width=200, height=10000)
-            session.invoke_shell()
-            session.settimeout(30)
-
-            if not self._two_stage_login(session):
-                self._log("PSI two-stage login did not reach a shell prompt.")
-                return False
-            self._log(f"Two-stage login successful; prompt detected ({self._prompt}).")
 
             if not self._configure_server(session):
                 return False
@@ -156,69 +254,123 @@ class NokiaPSIUpgradeScript:
                     session.close()
             except Exception:
                 pass
+
+    # ── Phase 1 — connect + login (Telnet getty three-stage) ─────────────────
+
+    def _connect(self) -> Optional["_TelnetChannel"]:
+        """Open Telnet to the PSI and drive the getty three-stage login.
+
+        PSI's usable CLI is reachable only over Telnet: over SSH it
+        authenticates as ``admin`` but then dead-ends at the alarm banner
+        (``admin`` is not the CLI account and the session ignores input). The
+        dialog is ``login:`` -> ``cli``, ``Username:`` -> ``admin``,
+        ``Password:`` -> ``admin`` (see ``reference_nokia_1830_class_access``).
+        Returns a channel adapter ready for the command phases, or None.
+        """
+        self._log(
+            f"Connecting to PSI at {self.ip_address} via Telnet as {self.username}…"
+        )
+
+        # Selecting a PSI upgrade against an operator-entered IP is an explicit
+        # authorization for Telnet to THAT host (same rationale as the LAN
+        # inventory path in gui4_0._build_manual_script_instance). Telnet stays
+        # allowlist-gated (Layer B) even with skip_ssh_probe, so add it first.
+        try:
+            from utils.telnet_policy import add_telnet_allowlist
+            add_telnet_allowlist(
+                self.ip_address,
+                f"auto: Nokia PSI upgrade (operator-selected) {self.ip_address}",
+            )
+        except Exception as exc:
+            logger.warning("[TELNET] Could not auto-allowlist %s: %s",
+                           self.ip_address, exc)
+
+        try:
+            from utils.telnet import Telnet
+            # skip_ssh_probe: the PSI keeps :22 open but SSH-as-admin dead-ends
+            # at the alarm banner, so waive the "prefer SSH" refusal (Layer C).
+            # The allowlist gate (Layer B) still applies.
+            telnet = Telnet(
+                self.ip_address, timeout=_TELNET_TIMEOUT_S,
+                skip_ssh_probe=True, purpose="nokia-psi-upgrade",
+            )
+        except Exception as exc:
+            self._log(
+                f"Telnet connection to {self.ip_address} failed ({exc}). The PSI "
+                "CLI is only reachable over Telnet for the upgrade flow."
+            )
+            return None
+
+        try:
+            telnet.read_until(b"login: ", timeout=_LOGIN_STEP_TIMEOUT_S)
+            self._log(f"getty login: — sending '{self.username}'")
+            telnet.write(self.username.encode("ascii", "replace") + b"\n")
+
+            telnet.read_until(b"Username: ", timeout=_LOGIN_STEP_TIMEOUT_S)
+            self._log(f"Sending inner username: {self.inner_username}")
+            telnet.write(self.inner_username.encode("ascii", "replace") + b"\n")
+
+            telnet.read_until(b"Password: ", timeout=_LOGIN_STEP_TIMEOUT_S)
+            self._log("Sending inner password")
+            telnet.write(self.inner_password.encode("ascii", "replace") + b"\n")
+        except Exception as exc:
+            self._log(f"Telnet login dialog failed: {exc}")
             try:
-                if transport:
-                    transport.close()
+                telnet.close()
             except Exception:
                 pass
+            return None
 
-    # ── Phase 1 — login ─────────────────────────────────────────────────────
+        session = _TelnetChannel(telnet)
+        if not self._settle_shell(session):
+            self._log("PSI Telnet login did not reach a shell prompt.")
+            session.close()
+            return None
+        self._log(f"Telnet login successful; prompt detected ({self._prompt}).")
+        return session
 
-    def _two_stage_login(self, session) -> bool:
-        """SSH gave us a banner with the inner ``Username:`` prompt. Answer
-        it with ``inner_username``, then the password prompt with
-        ``inner_password``, ack any Y/n EULA banners, settle on a shell
-        prompt. Mirrors ``DeviceIdentifier._do_1830_two_stage_login``."""
-        banner = self._drain(session, idle_seconds=1.5, max_wait=8.0)
-        if not _USERNAME_RE.search(banner):
-            # Modern shelves (admin/admin SSH auth) drop straight to the shell —
-            # no inner Username:/Password:. Accept that if a prompt is present.
-            m = _PROMPT_RE.search(banner)
-            if m:
-                self._prompt = m.group(1)
+    def _settle_shell(self, session) -> bool:
+        """After the getty three-stage, read the alarm/MOTD banner, ack any
+        post-login Y/n EULA banner, and latch the shell prompt into
+        ``self._prompt``. Returns True once a prompt is seen.
+
+        The Telnet getty CLI *does* respond to input (unlike the dead SSH
+        channel), so a newline nudge is safe to elicit a fresh prompt."""
+        post = self._drain(session, idle_seconds=1.5, max_wait=12.0)
+        for _ in range(5):
+            low = post.lower()
+            if "login incorrect" in low or "invalid" in low:
                 self._log(
-                    f"At shell prompt after SSH auth ({self._prompt}); "
-                    "no inner login needed."
+                    "Telnet login rejected — check the shelf credentials "
+                    "(default cli / admin / admin)."
                 )
-                return True
-            self._log(
-                "No inner Username: prompt and no shell prompt after SSH auth — "
-                "is this really a PSI / 1830-class device?"
-            )
-            return False
-
-        self._log(f"Sending inner username: {self.inner_username}")
-        session.send(f"{self.inner_username}\n")
-        pw_banner = self._drain(session, idle_seconds=1.0, max_wait=8.0)
-        if not _PASSWORD_RE.search(pw_banner):
-            self._log("No inner password prompt after sending username.")
-            return False
-
-        self._log("Sending inner password")
-        session.send(f"{self.inner_password}\n")
-        post = self._drain(session, idle_seconds=1.5, max_wait=10.0)
-        if re.search(r"(?i)(incorrect|invalid|fail|denied)", post):
-            self._log("Inner login rejected.")
-            return False
-
-        # Some builds throw a Y/n EULA banner before dropping to the shell.
-        for _ in range(3):
+                return False
             m = _PROMPT_RE.search(post)
             if m:
                 self._prompt = m.group(1)
                 return True
-            if _ACK_RE.search(post):
-                self._log("Acknowledging post-login Y/n banner")
-                session.send("y\n")
+            answer = self._confirmation_answer(post)
+            if answer is not None:
+                self._log(f"Acknowledging post-login banner (sending {answer!r})")
+                session.send(answer + "\n")
                 post = self._drain(session, idle_seconds=1.0, max_wait=8.0)
                 continue
-            break
+            session.send("\n")
+            post = self._drain(session, idle_seconds=1.2, max_wait=8.0)
+        return False
 
-        m = _PROMPT_RE.search(post)
-        if not m:
-            return False
-        self._prompt = m.group(1)
-        return True
+    @staticmethod
+    def _confirmation_answer(text: str) -> Optional[str]:
+        """Return the reply for an interactive confirmation gate in *text*, or
+        None if there isn't one. PSI config commands can gate on ``Enter 'yes'
+        to confirm`` (wants the full word ``yes``); others use a bare
+        ``(y/n)``. Check the yes-form first so a combined
+        ``Continue? … Enter 'yes'`` prompt isn't answered with just ``y``."""
+        if _CONFIRM_YES_RE.search(text):
+            return "yes"
+        if _ACK_RE.search(text):
+            return "y"
+        return None
 
     # ── Phase 2 — FTP/HTTP server config ────────────────────────────────────
 
@@ -252,7 +404,9 @@ class NokiaPSIUpgradeScript:
                     if not chunk:
                         return False
                     buf.extend(chunk)
-                    tail = bytes(buf[-200:]).decode("utf-8", errors="replace")
+                    tail = _strip_telnet_noise(bytes(buf[-200:])).decode(
+                        "utf-8", errors="replace"
+                    )
                     if not sent_password and _PASSWORD_RE.search(tail):
                         self._log(f"  (sending FTP password)")
                         session.send(f"{_FTP_PASSWORD}\n")
@@ -261,7 +415,7 @@ class NokiaPSIUpgradeScript:
                         deadline = time.time() + _PROMPT_TIMEOUT_S
                         continue
                 else:
-                    stripped = bytes(buf).replace(b"\r", b"").rstrip()
+                    stripped = _strip_telnet_noise(bytes(buf)).rstrip()
                     if stripped.endswith(prompt_b) and b"\n" in stripped:
                         time.sleep(0.3)
                         if not session.recv_ready():
@@ -304,7 +458,8 @@ class NokiaPSIUpgradeScript:
 
         self._log(
             f"Polling 'config software upgrade status' every "
-            f"{_STATUS_POLL_INTERVAL_S:.0f}s — expect ~5 min for the load."
+            f"{_STATUS_POLL_INTERVAL_S:.0f}s — waiting for the load to transfer "
+            "(Operation Status: Completed, 100%). This can take several minutes."
         )
         start = time.monotonic()
         while True:
@@ -316,24 +471,77 @@ class NokiaPSIUpgradeScript:
                     f"Load did not complete within {_STATUS_TIMEOUT_S/60:.0f} min."
                 )
                 return False
-            out = self._send_capture(session, "config software upgrade status", timeout=60)
+            # A status dump never needs a confirmation, and it's large — don't
+            # let auto-confirm fire on any incidental text.
+            out = self._send_capture(
+                session, "config software upgrade status", timeout=60,
+                auto_confirm=False,
+            )
             if out is None:
                 self._log("Status command returned no output — bailing.")
                 return False
-            self._echo_relevant(out, "config software upgrade status")
-            if _STATUS_FAILED_RE.search(out):
-                self._log("Status reports a failure.")
+
+            info = self._parse_status(out)
+            if info["working_release"]:
+                self._working_release = info["working_release"]
+            self._log(
+                f"  [load] Operation={info['operation']} "
+                f"Status={info['status']} Percent={info['percent']}% "
+                f"UpgradePath={info['path']}"
+            )
+
+            # Failure: explicit header status or a failed download stage.
+            status_l = (info["status"] or "").lower()
+            if any(k in status_l for k in ("fail", "abort", "error")) \
+                    or _STAGE_FAIL_RE.search(out):
+                self._log(f"Load FAILED — Operation Status: {info['status']!r}.")
+                self._echo_relevant(out, "config software upgrade status")
                 return False
-            if _STATUS_COMPLETE_RE.search(out):
-                self._log("Load reported complete.")
+
+            # Completion gate (per operator): the aggregate Load operation must
+            # report Completed at 100% with an available upgrade path. The
+            # per-stage "100% complete" lines are NOT sufficient.
+            if self._load_complete(info):
+                self._log(
+                    "Load complete — Operation Status: Completed, "
+                    "Percent Completion: 100%, Upgrade Path Available: True."
+                )
                 return True
+
             time.sleep(_STATUS_POLL_INTERVAL_S)
+
+    @staticmethod
+    def _load_complete(info: dict) -> bool:
+        """The aggregate Load operation is done and safe to activate."""
+        return (
+            (info.get("status") or "").lower() == "completed"
+            and info.get("percent") == 100
+            and (info.get("path") or "").lower() == "true"
+        )
+
+    @staticmethod
+    def _parse_status(out: str) -> dict:
+        """Extract the header fields of a `config software upgrade status`
+        dump. Returns operation/status/path as trimmed strings (or None) and
+        percent as an int (or None)."""
+        def field(rx):
+            m = rx.search(out)
+            return m.group(1).strip() if m else None
+
+        pct_m = _PERCENT_RE.search(out)
+        return {
+            "operation": field(_OPERATION_RE),
+            "status": field(_OP_STATUS_RE),
+            "percent": int(pct_m.group(1)) if pct_m else None,
+            "path": field(_UPGRADE_PATH_RE),
+            "working_release": field(_WORKING_RELEASE_RE),
+        }
 
     # ── Phase 4 — activate ──────────────────────────────────────────────────
 
     def _activate(self, session) -> bool:
         cmd = "config software upgrade manual activate yes"
-        self._log(f">> {cmd}  (device will reboot — SSH will drop)")
+        self._log(f">> {cmd}  (device will reboot — the connection will drop)")
         start = time.monotonic()
         try:
             session.send(cmd + "\n")
@@ -341,6 +549,8 @@ class NokiaPSIUpgradeScript:
             self._log(f"send error on activate: {exc}")
             return False
 
+        captured = ""
+        notified = False
         deadline = time.time() + _ACTIVATE_DROP_TIMEOUT_S
         while time.time() < deadline:
             if self.stop_callback():
@@ -350,20 +560,43 @@ class NokiaPSIUpgradeScript:
                 if session.recv_ready():
                     chunk = session.recv(65535)
                     if chunk:
-                        for line in chunk.decode("utf-8", errors="replace").splitlines():
+                        text = _strip_telnet_noise(chunk).decode(
+                            "utf-8", errors="replace"
+                        )
+                        captured += text
+                        for line in text.splitlines():
                             if line.strip():
                                 self._log(f"  {line.rstrip()}")
-                elif session.closed or session.exit_status_ready():
+                        # If the shelf refuses the activate (e.g. the load
+                        # wasn't really complete), it prints an error and stays
+                        # up — don't sit here waiting for a reboot that isn't
+                        # coming.
+                        if _ACTIVATE_REJECT_RE.search(captured):
+                            self._log(
+                                "Activate was REJECTED by the shelf — it is not "
+                                "rebooting. The load may not be fully complete."
+                            )
+                            return False
+                # Accepted: no rejection within the grace window, so the shelf
+                # is activating. Notify once, before the session drops on
+                # reboot. The grace lets a fast reject (~0.5s in the field) be
+                # caught first so we don't announce success then fail.
+                if not notified and time.monotonic() - start >= _ACTIVATE_GRACE_S:
+                    self._notify_activation_in_progress()
+                    notified = True
+                if session.closed or session.exit_status_ready():
                     elapsed = time.monotonic() - start
                     if elapsed >= _MIN_ELAPSED_FOR_RESET_S:
+                        if not notified:
+                            self._notify_activation_in_progress()
                         self._log(
-                            f"SSH closed after {elapsed:.0f}s — PSI is "
-                            "rebooting into the new load. Treating as success."
+                            f"Connection closed after {elapsed:.0f}s — PSI is "
+                            "rebooting into the new load."
                         )
                         return True
                     self._log(
-                        f"SSH closed only {elapsed:.0f}s in — too early to "
-                        "credit as a reboot. Failing."
+                        f"Connection closed only {elapsed:.0f}s in — too early "
+                        "to credit as a reboot. Failing."
                     )
                     return False
                 else:
@@ -371,38 +604,55 @@ class NokiaPSIUpgradeScript:
             except Exception as exc:
                 elapsed = time.monotonic() - start
                 if elapsed >= _MIN_ELAPSED_FOR_RESET_S:
+                    if not notified:
+                        self._notify_activation_in_progress()
                     self._log(
-                        f"SSH channel error after {elapsed:.0f}s ({exc}); "
+                        f"Connection error after {elapsed:.0f}s ({exc}); "
                         "treating as expected reboot."
                     )
                     return True
-                self._log(f"SSH channel error too early: {exc}")
+                self._log(f"Connection error too early: {exc}")
                 return False
 
         self._log("Activate did not result in a session drop within timeout.")
         return False
 
+    def _notify_activation_in_progress(self) -> None:
+        """Log that activation was accepted, before the reboot drops the
+        session. This is the log record; the operator-facing popup (with the
+        manual-commit / safe-to-disconnect wording) is raised by the GUI after
+        the NIC is restored to DHCP."""
+        rel = self._working_release or self.software_filename or "the new release"
+        self._log(
+            f"Activation accepted — the PSI is rebooting into {rel}. "
+            "(A manual commit will be required once it is back.)"
+        )
+
     # ── Send helpers ────────────────────────────────────────────────────────
 
-    def _send(self, session, cmd: str, timeout: float = _PROMPT_TIMEOUT_S) -> bool:
+    def _send(self, session, cmd: str, timeout: float = _PROMPT_TIMEOUT_S,
+              auto_confirm: bool = True) -> bool:
         """Send a command, wait for prompt, log output. Returns False on
         timeout or send error."""
         self._log(f">> {cmd}")
-        out = self._send_capture(session, cmd, timeout=timeout)
+        out = self._send_capture(session, cmd, timeout=timeout,
+                                 auto_confirm=auto_confirm)
         if out is None:
             return False
         self._echo_relevant(out, cmd)
         return True
 
     def _send_capture(
-        self, session, cmd: str, timeout: float
+        self, session, cmd: str, timeout: float, auto_confirm: bool = True
     ) -> Optional[str]:
         try:
             session.send(cmd + "\n")
         except Exception as exc:
             logger.debug("send failed: %s", exc)
             return None
-        return self._read_until_prompt(session, timeout=timeout)
+        return self._read_until_prompt(
+            session, timeout=timeout, auto_confirm=auto_confirm
+        )
 
     # ── Reading / prompt detection ──────────────────────────────────────────
 
@@ -421,12 +671,15 @@ class NokiaPSIUpgradeScript:
                 if time.time() - last_read >= idle_seconds and buf:
                     break
                 time.sleep(0.1)
-        return buf.decode("utf-8", errors="replace")
+        return _strip_telnet_noise(bytes(buf)).decode("utf-8", errors="replace")
 
-    def _read_until_prompt(self, session, timeout: float) -> Optional[str]:
+    def _read_until_prompt(
+        self, session, timeout: float, auto_confirm: bool = True
+    ) -> Optional[str]:
         deadline = time.time() + timeout
         buf = bytearray()
         prompt_b = self._prompt.encode("utf-8")
+        confirmations = 0
         while time.time() < deadline:
             if self.stop_callback():
                 return None
@@ -437,21 +690,49 @@ class NokiaPSIUpgradeScript:
                         return None
                     buf.extend(chunk)
                 else:
-                    stripped = bytes(buf).replace(b"\r", b"").rstrip()
+                    stripped = _strip_telnet_noise(bytes(buf)).rstrip()
                     if stripped.endswith(prompt_b) and b"\n" in stripped:
                         time.sleep(0.3)
                         if not session.recv_ready():
                             return buf.decode("utf-8", errors="replace")
                         continue
+                    # The device is idle without the base prompt — it may be
+                    # waiting on an interactive confirmation (e.g. the
+                    # port-change "Enter 'yes' to confirm" gate). Answer it so
+                    # the command completes instead of timing out.
+                    if auto_confirm and confirmations < _MAX_CONFIRMS:
+                        answer = self._confirmation_answer(
+                            _strip_telnet_noise(bytes(buf[-400:])).decode(
+                                "utf-8", errors="replace"
+                            )
+                        )
+                        if answer is not None:
+                            self._log(f"  (auto-confirming: sending {answer!r})")
+                            session.send(answer + "\n")
+                            confirmations += 1
+                            buf = bytearray()
+                            deadline = time.time() + timeout
+                            continue
                     if session.closed or session.exit_status_ready():
                         return None
                     time.sleep(0.15)
             except Exception as exc:
                 logger.debug("recv error: %s", exc)
                 return None
+        # Timed out. Surface what the device actually sent (repr keeps control
+        # bytes visible) so a stuck command — a sub-prompt we didn't answer, an
+        # error banner, dead silence — is diagnosable from the log.
+        tail = repr(bytes(buf)[-300:]) if buf else "<nothing received>"
+        self._log(
+            f"Timed out after {timeout:.0f}s waiting for prompt "
+            f"{self._prompt!r}. Last bytes: {tail}"
+        )
         return None
 
     def _echo_relevant(self, out: str, cmd: str) -> None:
+        # Drop CR/NUL noise so the command echo and trailing prompt line are
+        # recognised (and the log isn't peppered with ^@).
+        out = out.replace("\r", "").replace("\x00", "")
         lines = out.splitlines()
         if lines and cmd in lines[0]:
             lines = lines[1:]

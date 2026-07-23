@@ -37,7 +37,7 @@ _SALES_BOM_MARKER = "__sales_bom_import__"
 SCRIPT_OPTIONS: Dict[str, str] = {
     AUTO_DETECT_NOKIA: "",
     "Nokia PSI":     "scripts.Nokia_PSI",
-    "Nokia 1830":    "scripts.Nokia_1830",
+    "Nokia PSS":     "scripts.Nokia_1830",
     "Nokia SAR":     "scripts.Nokia_SAR_Raw",
     "Nokia IXR":     "scripts.Nokia_IXR_Raw",
     "Ciena 6500":    "scripts.Ciena_6500",

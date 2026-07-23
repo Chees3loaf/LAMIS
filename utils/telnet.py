@@ -105,11 +105,13 @@ class Telnet:
     """
 
     def __init__(self, host: str, port: int = 23, timeout: Optional[float] = None,
-                 *, bypass_policy: bool = False, purpose: Optional[str] = None):
+                 *, bypass_policy: bool = False, purpose: Optional[str] = None,
+                 skip_ssh_probe: bool = False):
         # Imported lazily to avoid a circular import (telnet_policy → helpers
         # → ... → utils.telnet would otherwise loop during package init).
         from utils.telnet_policy import enforce_telnet_policy
-        enforce_telnet_policy(host, port, bypass=bypass_policy, purpose=purpose)
+        enforce_telnet_policy(host, port, bypass=bypass_policy, purpose=purpose,
+                              skip_ssh_probe=skip_ssh_probe)
         self._sock = socket.create_connection((host, port), timeout=timeout)
         self._default_timeout = timeout
         self._buf = b""

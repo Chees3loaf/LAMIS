@@ -73,6 +73,11 @@ _PROMPT_RE = re.compile(
 )
 
 _LOGIN_RE = re.compile(rb"(?:[Ll]ogin|[Uu]sername):\s*$")
+# Getty "login:" vs the inner "Username:" must be answered differently for the
+# Nokia 1830 family (login: -> cli, Username: -> admin), so match them
+# separately. Both end-anchored so the banner's "Last Login:" line never matches.
+_GETTY_LOGIN_RE = re.compile(rb"[Ll]ogin:\s*$")
+_USERNAME_ONLY_RE = re.compile(rb"[Uu]sername:\s*$")
 _PASSWORD_RE = re.compile(rb"[Pp]assword:\s*$")
 _SHELL_RE = re.compile(rb"(?:[\*]?[ABab]:[A-Za-z0-9_\-.]+[#>]|[A-Za-z0-9_\-.]+\*?[#>$])\s*$")
 _FAIL_RE = re.compile(rb"(?:[Ll]ogin\s+(?:incorrect|failed)|[Aa]uthentication\s+fail)")
@@ -332,6 +337,84 @@ def serial_login(
 
     logging.warning("[SERIAL] All default credentials exhausted on serial console.")
     return False, None
+
+
+def serial_getty_login(
+    ser,
+    *,
+    login_name: str = "cli",
+    shell_user: str = "admin",
+    shell_pass: str = "admin",
+    timeout: float = 10.0,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """Drive the Nokia 1830-family getty *three-stage* console login.
+
+    Unlike :func:`serial_login` (single ``Login:``/``Password:``), the 1830
+    family answers three distinct prompts::
+
+        <host> login: cli
+        Username: admin
+        Password: <admin>
+        <banner>
+        <host>#
+
+    i.e. the getty ``login:`` gets ``login_name`` (``cli`` — a login account,
+    NOT the operator), then the inner ``Username:``/``Password:`` get
+    ``shell_user``/``shell_pass`` (admin/admin). Answers whichever prompt is at
+    the tail of the buffer until a shell prompt appears. Returns True on
+    success.
+    """
+    try:
+        ser.reset_input_buffer()
+    except Exception:
+        pass
+    ser.write(b"\r\n")
+    logger.debug("[SERIAL][getty] wake-up CRLF sent; waiting for prompt")
+    buf, _ = _read_until(ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop)
+    tail = buf[-512:]
+    sent = {"login": 0, "user": 0, "pass": 0}
+
+    for _ in range(8):
+        if should_stop and should_stop():
+            return False
+        if _SHELL_RE.search(tail):
+            logging.info("[SERIAL] Getty two-step login reached shell prompt.")
+            return True
+        if _FAIL_RE.search(buf):
+            logging.warning("[SERIAL] Getty login rejected.")
+            return False
+
+        if _GETTY_LOGIN_RE.search(tail) and sent["login"] < 2:
+            logger.debug("[SERIAL][getty] login: -> %r", login_name)
+            _drain_quiet(ser, quiet_ms=400, max_wait=2.0)
+            try:
+                ser.reset_input_buffer()
+            except Exception:
+                pass
+            ser.write((login_name + "\r").encode("utf-8", errors="replace"))
+            sent["login"] += 1
+        elif _USERNAME_ONLY_RE.search(tail) and sent["user"] < 2:
+            logger.debug("[SERIAL][getty] Username: -> %r", shell_user)
+            ser.write((shell_user + "\r").encode("utf-8", errors="replace"))
+            sent["user"] += 1
+        elif _PASSWORD_RE.search(tail) and sent["pass"] < 2:
+            logger.debug("[SERIAL][getty] Password: -> (inner)")
+            ser.write((shell_pass + "\r").encode("utf-8", errors="replace"))
+            sent["pass"] += 1
+        else:
+            break
+
+        buf, _ = _read_until(ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop)
+        tail = buf[-512:]
+
+    ok = bool(_SHELL_RE.search(tail))
+    if not ok:
+        logging.warning(
+            f"[SERIAL] Getty two-step login did not reach a shell prompt. "
+            f"Last bytes: {tail[-200:]!r}"
+        )
+    return ok
 
 
 def capture_until_prompt(

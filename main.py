@@ -44,9 +44,63 @@ def _maybe_dispatch_to_tds() -> None:
     sys.exit(0)
 
 
+def _relaunch_as_admin() -> bool:
+    """On Windows, relaunch ATLAS elevated (UAC) when not already Administrator.
+
+    Some operations need an elevated token -- notably the Nokia PSI network
+    audit's neighbor walk, which adds temporary Windows /32 routes. Relaunching
+    at startup means the operator gets one UAC prompt up front instead of a
+    mid-run "Run as Administrator" failure.
+
+    Returns True if this process should keep running (already elevated,
+    non-Windows, or the user declined UAC -> run unelevated with admin-gated
+    features limited). Returns False if an elevated instance was launched and
+    THIS (unelevated) instance should exit.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        if ctypes.windll.shell32.IsUserAnAdmin():
+            return True
+    except Exception:
+        return True  # can't determine -> don't block startup
+    try:
+        import ctypes
+        import subprocess
+        frozen = getattr(sys, "frozen", False)
+        exe = sys.executable
+        if not frozen:
+            # Relaunch through the windowless interpreter (pythonw.exe) so the
+            # elevated instance doesn't pop a console window. Falls back to the
+            # current interpreter if pythonw isn't alongside it. The frozen build
+            # is already a windowed exe (console=False), so it needs no swap.
+            _pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+            if os.path.isfile(_pyw):
+                exe = _pyw
+        args = sys.argv[1:] if frozen else [os.path.abspath(sys.argv[0])] + sys.argv[1:]
+        params = subprocess.list2cmdline(args)
+        workdir = os.path.dirname(sys.executable if frozen else os.path.abspath(sys.argv[0]))
+        # ShellExecuteW "runas" triggers the UAC prompt; SW_SHOWNORMAL = 1.
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, workdir, 1)
+        if int(rc) > 32:
+            return False  # elevated instance launched -> exit this one
+        # rc <= 32: user declined UAC or it failed -> carry on unelevated.
+    except Exception:
+        pass
+    return True
+
+
 # Dispatch BEFORE any heavy imports (tkinter, gui, paramiko, ...) so the
 # TDS subprocess doesn't pay the GUI startup tax.
 _maybe_dispatch_to_tds()
+
+# Relaunch elevated (UAC) for the GUI path -- after the TDS dispatch (the
+# --tds-mode child inherits the parent's token, so it never reaches here) and
+# before the heavy imports (a relaunch exits cheaply). If the user declines
+# UAC, ATLAS still starts unelevated; only admin-gated features are limited.
+if not _relaunch_as_admin():
+    sys.exit(0)
 
 
 from tkinter import Tk, Label

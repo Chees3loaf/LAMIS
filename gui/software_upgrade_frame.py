@@ -1122,7 +1122,9 @@ class SoftwareUpgradeFrame(ttk.Frame):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _restore_dhcp(self) -> None:
+    def _restore_dhcp(
+        self, on_success: Optional[Callable[[], None]] = None
+    ) -> None:
         nic = self._nic_var.get().strip() or self._static_ip_applied_on
         if not nic:
             messagebox.showerror("Error", "Select a network interface.")
@@ -1145,6 +1147,10 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 self._static_ip_applied_on = None
                 self._set_nic_status(f"DHCP on {nic}", "green")
                 self._log(f"netsh OK: {msg}")
+                # Only once the NIC is safely back on DHCP do we fire the
+                # caller's completion hook (the PSI activation popup).
+                if on_success is not None:
+                    self.after(0, on_success)
             else:
                 self._set_nic_status("Failed — see log", "red")
                 self._log(f"netsh FAILED: {msg}")
@@ -1585,6 +1591,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
             # rooted at CC's parent so /CC/<release> resolves.
             static_ip_owned_by_us = False
             server_started_by_us = False
+            ok_run = False
             try:
                 # Step 1 — set PC NIC to the PSI service IP.
                 # Helper handles stale-binding cleanup.
@@ -1647,9 +1654,17 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 if server_started_by_us:
                     self._log("Stopping HTTP server…")
                     self.after(0, self._stop_server)
+                # On success the operation is only "complete" once the NIC is
+                # restored — chain the activation popup to the netsh-OK check so
+                # it appears after DHCP is back. On failure, just restore DHCP.
+                popup = (lambda: self._show_activation_popup(filename)) if ok_run else None
                 if static_ip_owned_by_us:
                     self._log("Restoring DHCP on the NIC…")
-                    self.after(0, self._restore_dhcp)
+                    self.after(0, lambda cb=popup: self._restore_dhcp(on_success=cb))
+                elif popup is not None:
+                    # No static IP to restore (operator pre-set it) — still
+                    # signal completion.
+                    self.after(0, popup)
                 self.after(0, lambda: self._psi_run_btn.config(state=tk.NORMAL))
                 self.after(0, lambda: self._psi_stop_btn.config(state=tk.DISABLED))
 
@@ -1673,6 +1688,23 @@ class SoftwareUpgradeFrame(ttk.Frame):
             self.after(0, _do)
         except Exception:
             pass
+
+    def _show_activation_popup(self, release: str) -> None:
+        """Final completion signal for a PSI upgrade: the activate command has
+        dropped the session (shelf rebooting) AND the NIC is back on DHCP.
+        Must run on the main thread (scheduled via ``after``)."""
+        rel = release or "the new release"
+        msg = (
+            f"ACTIVATION IN PROGRESS — the PSI is activating {rel} and will "
+            "reboot.\n\nIMPORTANT: MANUAL COMMIT is required.\n\n"
+            "Safe to disconnect."
+        )
+        self._log(f"ACTIVATION IN PROGRESS — activating {rel}; MANUAL COMMIT "
+                  "required. Safe to disconnect.")
+        try:
+            messagebox.showinfo("PSI Upgrade — Activation In Progress", msg)
+        except Exception:
+            logging.exception("Failed to show PSI activation popup")
 
     # ── Nokia PSS upgrade ───────────────────────────────────────────────────
 
