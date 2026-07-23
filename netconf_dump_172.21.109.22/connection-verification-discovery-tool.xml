@@ -1,0 +1,18 @@
+<connection-verification-discovery-tool_capture><connection-verification-discovery-tool>
+      <config>
+        <tool-mode>true</tool-mode>
+        <minute-offset>-1</minute-offset>
+        <tx-dwell-time>5000</tx-dwell-time>
+        <rx-dwell-time>160000</rx-dwell-time>
+        <max-insertion-loss>-1.0</max-insertion-loss>
+      </config>
+      <state>
+        <tool-mode>true</tool-mode>
+        <minute-offset>-1</minute-offset>
+        <tx-dwell-time>5000</tx-dwell-time>
+        <rx-dwell-time>160000</rx-dwell-time>
+        <max-insertion-loss>-1.0</max-insertion-loss>
+      </state>
+      <connectivity-ports/>
+    </connection-verification-discovery-tool>
+    </connection-verification-discovery-tool_capture>
