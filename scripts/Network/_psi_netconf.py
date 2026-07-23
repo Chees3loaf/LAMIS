@@ -534,17 +534,6 @@ def parse_amplifiers(oa_elem, card_type_by_slot=None):
             elif _instant(st, "output-power-c-band") or _instant(st, "input-power-c-band"):
                 band = "C"
 
-        card_type = card_type_by_slot.get(slot)
-        if not card_type:
-            if is_raman:
-                card_type = "RA5PB"
-            elif band == "L":
-                card_type = "EILAL"
-            elif band == "C":
-                card_type = "EILA"
-            else:
-                card_type = amp_type or "--"
-
         if is_raman:
             port_label = "Raman"
         else:
@@ -552,6 +541,22 @@ def parse_amplifiers(oa_elem, card_type_by_slot=None):
                           or (f"Line{m.group(4)}" if (m and m.group(4)) else None)
                           or (m.group(3) if m else None)
                           or "--")
+
+        # Card mnemonic: prefer the inventory-resolved value; else derive from the
+        # band AND the amp PORT SHAPE, since the part-no map doesn't cover every
+        # amp. ILAs (Line1/Line2 ports) run EILA/EILAL; terminals (LineIn/LineOut)
+        # run IRDM32/IRDM32L -- the CLI mnemonic the telnet audit reads directly.
+        card_type = card_type_by_slot.get(slot)
+        if not card_type:
+            terminal_amp = port_label in ("LineIn", "LineOut")
+            if is_raman:
+                card_type = "RA5PB"
+            elif band == "L":
+                card_type = "IRDM32L" if terminal_amp else "EILAL"
+            elif band == "C":
+                card_type = "IRDM32" if terminal_amp else "EILA"
+            else:
+                card_type = amp_type or "--"
 
         current_gain = _num(_instant(st, "actual-gain"))
         # Power leaf name varies by band: total (Raman) / c-band / l-band (EDFA).

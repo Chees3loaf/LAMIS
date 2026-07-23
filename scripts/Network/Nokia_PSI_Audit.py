@@ -2812,57 +2812,100 @@ def _oamp_lan_teardown(st, username, password):
             st['seed_fqdn'], username, password, st['oamp_restore'])
 
 
+def _wired_up_ifaces():
+    """(ifIndex, description) for connected, physical, non-Wi-Fi adapters -- the
+    candidates for a direct OAMP-LAN connection. Wi-Fi is deliberately excluded so
+    the OAMP /24 is never multi-net onto the routed wireless NIC."""
+    if sys.platform != 'win32':
+        return []
+    _, out = _powershell(
+        "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | "
+        "Where-Object { $_.Status -eq 'Up' } | "
+        "ForEach-Object { \"$($_.ifIndex) $($_.InterfaceDescription)\" }")
+    res = []
+    for line in out.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            continue
+        idx, desc = int(parts[0]), parts[1]
+        low = desc.lower()
+        if 'wi-fi' in low or 'wifi' in low or 'wireless' in low:
+            continue
+        res.append((idx, desc))
+    return res
+
+
+def _ensure_wired_oamp_adjacency(seed_ip, prefix):
+    """Find or CREATE a wired NIC that is L2-adjacent to the seed's OAMP subnet,
+    so the operator does not have to hand-configure a 172.21.109.x IP.
+
+    Returns ``(source_ip, iface_index, created)``; *created* is True only when
+    THIS call added the address (teardown must then remove it). Never touches
+    Wi-Fi. Returns ``(None, None, False)`` when no connected wired NIC can reach
+    the seed on-link (remote / Wi-Fi-only -> caller direct-connects).
+
+    Probe: on each connected wired NIC add the OAMP temp IP, ping the seed from
+    it; the NIC that answers on-link is the OAMP LAN. A NIC that does not answer
+    has its temp IP removed immediately, so nothing is left on the wrong NIC."""
+    # 1. A wired NIC already on the seed subnet that actually reaches it (operator
+    #    pre-configured, or a leftover) -- reuse it, do not own it.
+    existing = _wired_onlink_ip(seed_ip)
+    if existing:
+        idx = _iface_index_toward(seed_ip)
+        if idx and _ping_from(existing, seed_ip):
+            return existing, idx, False
+
+    # 2. Set the OAMP temp IP on each connected wired NIC in turn until one
+    #    reaches the seed on-link.
+    temp = _oamp_temp_ip(seed_ip, prefix)
+    if not temp:
+        return None, None, False
+    for idx, desc in _wired_up_ifaces():
+        present, created = _add_temp_ip(idx, temp, prefix)
+        if not present:
+            continue
+        if _ping_from(temp, seed_ip):
+            debug_log(f'set temp {temp}/{prefix} on if {idx} ({desc}) -- reaches '
+                      f'the seed on-link', 'oamp wired-adjacency')
+            return temp, idx, created
+        if created:                       # not the OAMP NIC -> undo
+            _remove_temp_ip(idx, temp)
+    return None, None, False
+
+
 def _setup_oamp_lan(seed_fqdn, seed_ip, username, password, route_targets):
     """Build the temporary "DCN over the OAMP LAN" for a routed GNE the audit PC
-    is L2-adjacent to (the ON-SITE path). Adjacency is checked FIRST, so a
-    remote/VPN PC (not on-link to the OAMP subnet) bails out here and the caller
-    direct-connects -- WITHOUT ever writing to the seed's OSPF config. Steps:
-      1. Multi-net a temp IP onto the OAMP subnet + ping the GNE from it (L2 check).
-      2. (on-site only) GNE advertises its OAMP subnet into OSPF (RNE return path).
+    is wired to. ATLAS SETS the required OAMP-subnet IP on the wired NIC itself
+    (probing connected wired NICs, never Wi-Fi) and removes it at teardown, so the
+    operator no longer has to hand-configure 172.21.109.x. Steps:
+      1. Establish wired L2 adjacency (set + ping-verify an OAMP temp IP).
+      2. GNE advertises its OAMP subnet into OSPF (RNE return path).
       3. Interface-pinned /32 routes to each neighbour through the GNE OAMP.
-    Returns a teardown-state dict on success, or None (fully unwound)."""
-    # Read-only adjacency gate FIRST: if the seed is reached via a gateway
-    # (routed WiFi/VPN, NOT on-link) the OAMP-LAN must not run at all -- multi-
-    # netting the OAMP /24 onto a routed NIC shadows its route and breaks that
-    # interface. Skip cleanly (no temp IP, no routes) -> caller direct-connects.
-    if not _seed_is_onlink(seed_ip):
-        debug_log('OAMP-LAN: seed reached via a gateway (routed, not L2-adjacent) '
-                  '-- skipping (no temp IP / no routes) so the routed interface is '
-                  'left untouched; direct-connect instead', '_setup_oamp_lan')
-        return None
+    A remote/Wi-Fi-only PC finds no wired OAMP NIC in step 1 and returns None
+    (caller direct-connects; the routed interface is never touched). Returns a
+    teardown-state dict on success, or None (fully unwound)."""
     from scripts.Network import _psi_oamp_netconf as _oamp_nc
-    iface = _iface_index_toward(seed_ip)
     prefix = _oamp_nc.oamp_prefix_over_netconf(seed_fqdn, username, password)
-    temp_ip = _oamp_temp_ip(seed_ip, prefix)
-    if not iface or not temp_ip:
-        debug_log(f'OAMP-LAN: iface={iface} temp_ip={temp_ip} -- cannot multi-net',
+
+    # 1. Establish (or reuse) a wired NIC on the OAMP subnet -- ATLAS sets the IP.
+    source_ip, iface, created = _ensure_wired_oamp_adjacency(seed_ip, prefix)
+    if not source_ip:
+        debug_log('OAMP-LAN: no connected wired NIC reaches the seed on-link '
+                  '(remote / Wi-Fi only) -- direct-connect instead; nothing set',
                   '_setup_oamp_lan')
         return None
 
-    # 1. L2-adjacency probe BEFORE any seed write. Remote/VPN PCs are not on-link
-    #    to the OAMP subnet, so the sourced ping fails here and we fall back to
-    #    direct-connect with the seed's OSPF config untouched.
-    present, created = _add_temp_ip(iface, temp_ip, prefix)
-    if not present:
-        return None
-    if not _ping_from(temp_ip, seed_ip):
-        debug_log('OAMP-LAN: PC is not L2-adjacent to the GNE OAMP (remote seed) '
-                  '-- direct-connect instead; seed OSPF untouched', '_setup_oamp_lan')
-        if created:
-            _remove_temp_ip(iface, temp_ip)
-        return None
-
-    # 2. On-site: advertise the OAMP subnet into OSPF (RNE return path).
+    # 2. Advertise the OAMP subnet into OSPF (RNE return path to source_ip).
     ready, oamp_restore, _pfx = prepare_oamp_remote_access(
         seed_fqdn, username, password)
     if not ready:
         debug_log('OAMP-LAN: OAMP redistribute prepare failed', '_setup_oamp_lan')
         if created:
-            _remove_temp_ip(iface, temp_ip)
+            _remove_temp_ip(iface, source_ip)
         return None
     st = {
-        'gateway': seed_ip, 'iface': iface,
-        'temp_ip': temp_ip if created else None, 'routes': [],
+        'gateway': seed_ip, 'iface': iface, 'source_ip': source_ip,
+        'temp_ip': source_ip if created else None, 'routes': [],
         'oamp_restore': oamp_restore, 'seed_fqdn': seed_fqdn,
     }
 
@@ -3626,7 +3669,8 @@ def main():
 
     # Prefer a WIRED / on-link NIC to reach the gear over Wi-Fi (so the operator
     # need not disable Wi-Fi). Routed seeds only; bound onto every NETCONF
-    # connection. None => let the OS route (Wi-Fi-only setups are untouched).
+    # connection. None here just means no wired OAMP IP is preset -- OAMP-LAN
+    # discovery will try to SET one on a connected wired NIC (and remove it after).
     discovery_source_ip = None
     if not use_cit_routing:
         discovery_source_ip = _preferred_source_ip(
@@ -3635,9 +3679,9 @@ def main():
             print(f'Reaching the gear from {bold}{discovery_source_ip}{resetc} '
                   f'(preferring a wired/on-link NIC over Wi-Fi).')
         else:
-            print(f'{amber}No wired path to the seed found — using the default '
-                  f'route (Wi-Fi). That is a routed, seed-only path; wire into the '
-                  f'OAMP LAN (172.21.109.x) or CIT port for the full walk.{resetc}')
+            print('Seed reached over the default route (Wi-Fi) for now; if a wired '
+                  'NIC is on the OAMP LAN, discovery will set a temporary '
+                  '172.21.109.x on it for the full walk and remove it afterward.')
 
     # ── Concurrency scaffolding (parallel node audit) ────────────────────────
     # The audit of each site is independent network work. Workers touch no
@@ -4450,6 +4494,7 @@ def main():
         nonlocal discovery_transport_ready, discovery_gateway
         nonlocal discovery_temp_iface, discovery_temp_ip
         nonlocal discovery_restore_state, discovery_cleanup_registered
+        nonlocal discovery_source_ip
         print = emit
         route_targets = [
             r['ne_ip'] for r in tracker.records
@@ -4478,6 +4523,9 @@ def main():
             discovery_routes_added.extend(_oamp['routes'])
             discovery_restore_state = _oamp['oamp_restore']
             discovery_transport_ready = True
+            # Source RNE connections from the wired OAMP-subnet IP ATLAS set, so
+            # the RNE return route (redistributed OAMP subnet) applies.
+            discovery_source_ip = _oamp.get('source_ip') or discovery_source_ip
             print(f'{green}OK{resetc}')
             atexit.register(
                 remove_neighbor_host_routes,
