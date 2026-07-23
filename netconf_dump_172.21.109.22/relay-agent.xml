@@ -1,9 +1,0 @@
-<relay-agent_capture><relay-agent>
-      <dhcp>
-        <interfaces/>
-      </dhcp>
-      <dhcpv6>
-        <interfaces/>
-      </dhcpv6>
-    </relay-agent>
-    </relay-agent_capture>

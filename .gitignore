@@ -233,3 +233,18 @@ _validate/
 *_RLS_Validation.csv
 *_RLS_Walk_Neighbors.csv
 Walk_Summary*.csv
+
+# NETCONF diagnostic captures dumped by tools/netconf_dump.py and
+# tools/netconf_getconfig.py (per-device config/state XML trees). These are
+# customer/lab equipment captures and must never be committed.
+netconf_dump_*/
+netconf_config_*/
+
+# Ad-hoc debug logs and per-device debug/audit workbooks dropped during
+# in-tree development and TDS/RLS troubleshooting.
+Debug.txt
+_*.xlsx
+scripts/TDS/*_Debug.xlsx
+scripts/TDS/TDS_Debug.txt
+scripts/TDS/*_RLS_Network.xlsx
+scripts/TDS/*_RLS.xlsx
