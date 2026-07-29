@@ -108,6 +108,9 @@ class BomFrame(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _append_log(self, msg: str) -> None:
+        if msg.strip():
+            logging.info("[BOM] %s", msg.rstrip())
+
         def _do():
             self._log.configure(state="normal")
             self._log.insert(tk.END, msg + "\n")

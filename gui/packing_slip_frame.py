@@ -163,10 +163,10 @@ class PackingSlipFrame(ttk.Frame):
                 text=f"✓ {file_name} ({count_label})",
                 foreground="green",
             )
-            out = self.controller.output_screen
-            out.insert(tk.END, f"Loaded file: {file_name} with {count_label}\n")
-            out.see(tk.END)
-            logging.info(f"File uploaded: {file_path} with {len(self.uploaded_file_data)} rows")
+            activity = getattr(self.controller, "log_activity", logging.info)
+            activity(
+                f"[PACKING] Loaded {file_path} with {count_label}."
+            )
 
         except Exception as e:
             messagebox.showerror("File Error", f"Failed to load file:\n{friendly_error(e)}")
@@ -389,9 +389,11 @@ class PackingSlipFrame(ttk.Frame):
             )
 
             self.ps_status_label.config(text="Status: Ready")
-            out = self.controller.output_screen
-            out.insert(tk.END, f"Processing complete — {len(processed_data)} device(s) ready.\n")
-            out.see(tk.END)
+            activity = getattr(self.controller, "log_activity", logging.info)
+            activity(
+                f"[PACKING] Processing complete; "
+                f"{len(processed_data)} device(s) ready."
+            )
             self._show_print_selection_dialog(save_path)
 
         except Exception as e:
@@ -605,14 +607,10 @@ class PackingSlipFrame(ttk.Frame):
                 wb_src.save(save_path)
                 os.startfile(save_path)
 
-                out = self.controller.output_screen
-                out.insert(
-                    tk.END,
-                    f"Saved {len(selected_sheets)} individual packing slip tab(s) to: {save_path}\n",
-                )
-                out.see(tk.END)
-                logging.info(
-                    f"Individual save: {len(selected_sheets)} tab(s) → {save_path}"
+                activity = getattr(self.controller, "log_activity", logging.info)
+                activity(
+                    f"[PACKING] Saved {len(selected_sheets)} individual "
+                    f"packing-slip tab(s) to {save_path}."
                 )
 
             else:  # consolidated — single sheet, all line items from all selected devices
@@ -702,10 +700,11 @@ class PackingSlipFrame(ttk.Frame):
                 wb_out.save(save_path)
                 os.startfile(save_path)
 
-                out = self.controller.output_screen
-                out.insert(tk.END, f"Consolidated packing slip saved: {save_path}\n")
-                out.see(tk.END)
-                logging.info(f"Consolidated save: {row_num - 15} line item(s) → {save_path}")
+                activity = getattr(self.controller, "log_activity", logging.info)
+                activity(
+                    f"[PACKING] Saved consolidated packing slip with "
+                    f"{row_num - 15} line item(s) to {save_path}."
+                )
 
         except Exception as e:
             messagebox.showerror("Print Error", f"Failed to prepare sheets for printing:\n{friendly_error(e)}")

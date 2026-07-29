@@ -34,10 +34,27 @@ UPDATE_HTTP_TIMEOUT_S = 15
 # ============================================================================
 
 # Pod/Network settings
-POD_NETWORK_PREFIX = "10.9"          # IP network prefix (e.g., "10.9.{pod}.{host}")
-POD_MIN = 100                         # Minimum pod number
-POD_MAX = 112                         # Maximum pod number
-POD_COUNT = 13                        # Number of pod options (POD_MAX - POD_MIN + 1)
+#
+# Pods live on 172.21.1xx.x: the third octet is POD_THIRD_OCTET_BASE + pod number,
+# so Pod 1 is 172.21.101.x and Pod 13 is 172.21.113.x. The operator supplies only
+# the fourth octet.
+#
+# The lab is a separate range on 10.9.x.x where the operator supplies BOTH the
+# third and fourth octets, because the lab is not organised into pods.
+POD_NETWORK_PREFIX = "172.21"         # first two octets for pod ranges
+POD_THIRD_OCTET_BASE = 100            # Pod N -> third octet POD_THIRD_OCTET_BASE + N
+POD_COUNT = 13                        # Pods 1..13 -> 172.21.101 .. 172.21.113
+POD_MIN = POD_THIRD_OCTET_BASE + 1    # lowest pod third octet (101)
+POD_MAX = POD_THIRD_OCTET_BASE + POD_COUNT  # highest pod third octet (113)
+
+LAB_LABEL = "Lab"                     # dropdown entry that selects the lab range
+LAB_NETWORK_PREFIX = "10.9"           # lab: 10.9.<operator>.<operator>
+
+# Upper bound on a single Inventory sweep. A pod range is capped at 256 addresses
+# by its fixed /24, but a Lab range takes a third octet at each end and can
+# therefore cross /24 boundaries — this stops a mistyped octet from queueing a
+# sweep of tens of thousands of addresses.
+MAX_SCAN_ADDRESSES = 4096
 
 # Default SSH/Telnet ports (standard, unlikely to change)
 SSH_PORT = 22
@@ -159,6 +176,18 @@ AI_BASE_URL = None
 AI_CHAT_MODEL = "gpt-4o-mini"
 AI_EMBED_MODEL = "text-embedding-3-small"
 AI_EMBED_DIM = 1536  # dimensionality of text-embedding-3-small
+
+# Dense customer route diagrams need substantially stronger vision and a much
+# larger structured-output budget than grounded text RAG. Keep this profile
+# separate so diagram accuracy improvements do not raise the cost of every
+# documentation-assistant request. ``auto`` lets current vision models retain
+# native image detail when useful. High reasoning is used here because route
+# topology, wrapped connectors, and dense labels require the strongest review
+# pass before ATLAS stages a transcription.
+RLS_DIAGRAM_MODEL = "gpt-5.6-terra"
+RLS_DIAGRAM_IMAGE_DETAIL = "auto"
+RLS_DIAGRAM_REASONING_EFFORT = "high"
+RLS_DIAGRAM_MAX_COMPLETION_TOKENS = 65_536
 
 # Retrieval / chunking knobs.
 AI_CHUNK_WORDS = 220          # ~target words per chunk

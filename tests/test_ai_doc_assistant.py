@@ -5,6 +5,8 @@ so we exercise the real vector store, cosine retrieval, citation wiring, and
 the all-important "not in the docs" guardrail.
 """
 
+import logging
+
 import numpy as np
 import pytest
 
@@ -530,6 +532,236 @@ def test_chat_passes_seed_and_temperature(monkeypatch):
     p.chat("system", "user")
     assert captured.get("seed") == 7
     assert captured.get("temperature") == 0
+
+
+def test_chat_images_json_uses_strict_schema_and_preserves_image_order(
+    monkeypatch,
+):
+    """Route-diagram extraction uses one strict, ordered multimodal request."""
+
+    from types import SimpleNamespace
+    from utils.ai import provider as provider_mod
+
+    captured = {}
+
+    class _Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(
+                            content='{"route_code":"A-Z","shelves":[]}'
+                        )
+                    )
+                ]
+            )
+
+    fake_client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_Completions())
+    )
+    monkeypatch.setattr(provider_mod.config, "AI_SEED", 7, raising=False)
+    provider = provider_mod.OpenAIProvider(api_key="sk-test")
+    provider._client = fake_client
+    schema = {
+        "type": "object",
+        "properties": {
+            "route_code": {"type": "string"},
+            "shelves": {"type": "array", "items": {"type": "object"}},
+        },
+        "required": ["route_code", "shelves"],
+        "additionalProperties": False,
+    }
+
+    result = provider.chat_images_json(
+        "system",
+        "extract",
+        [(b"first", "png"), (b"second", "jpeg")],
+        schema,
+        "atlas_route_diagram",
+    )
+
+    assert result == {"route_code": "A-Z", "shelves": []}
+    assert captured["response_format"]["type"] == "json_schema"
+    assert captured["response_format"]["json_schema"]["strict"] is True
+    content = captured["messages"][1]["content"]
+    assert content[0] == {"type": "text", "text": "extract"}
+    assert content[1]["image_url"]["url"].startswith(
+        "data:image/png;base64,"
+    )
+    assert content[1]["image_url"]["detail"] == "high"
+    assert content[2]["image_url"]["url"].startswith(
+        "data:image/jpeg;base64,"
+    )
+    assert content[2]["image_url"]["detail"] == "high"
+    assert captured["temperature"] == 0
+    assert captured["seed"] == 7
+
+
+def test_chat_images_json_supports_route_vision_reasoning_profile(
+    monkeypatch,
+):
+    """Dense route extraction can use native detail and a large output budget."""
+
+    from types import SimpleNamespace
+    from utils.ai import provider as provider_mod
+
+    captured = {}
+
+    class _Completions:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"shelves":[]}')
+                    )
+                ]
+            )
+
+    provider = provider_mod.OpenAIProvider(
+        api_key="sk-test",
+        chat_model="diagram-vision-model",
+        image_detail="auto",
+        reasoning_effort="low",
+        max_completion_tokens=65_536,
+    )
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_Completions())
+    )
+
+    assert provider.chat_images_json(
+        "system",
+        "extract",
+        [(b"route", "png")],
+        {
+            "type": "object",
+            "properties": {"shelves": {"type": "array"}},
+            "required": ["shelves"],
+            "additionalProperties": False,
+        },
+        "route",
+    ) == {"shelves": []}
+
+    assert captured["model"] == "diagram-vision-model"
+    assert captured["reasoning_effort"] == "low"
+    assert captured["max_completion_tokens"] == 65_536
+    assert "temperature" not in captured
+    assert "seed" not in captured
+    content = captured["messages"][1]["content"]
+    assert content[1]["image_url"]["detail"] == "auto"
+
+
+def test_chat_images_json_logs_only_safe_request_and_response_metadata(
+    monkeypatch,
+    caplog,
+):
+    """Vision telemetry must never serialize prompts, pixels, or model output."""
+
+    from types import SimpleNamespace
+    from utils.ai import provider as provider_mod
+
+    class _Completions:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        finish_reason="stop",
+                        message=SimpleNamespace(
+                            content='{"result":"private-returned-content"}'
+                        ),
+                    )
+                ],
+                usage=SimpleNamespace(
+                    prompt_tokens=123,
+                    completion_tokens=45,
+                    total_tokens=168,
+                ),
+            )
+
+    provider = provider_mod.OpenAIProvider(
+        api_key="sk-test",
+        chat_model="diagram-vision-model",
+        image_detail="auto",
+        reasoning_effort="low",
+    )
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_Completions())
+    )
+
+    with caplog.at_level(logging.INFO, logger="utils.ai.provider"):
+        result = provider.chat_images_json(
+            "private-system-prompt",
+            "private-user-prompt",
+            [(b"private-image-bytes", "png"), (b"more-private-bytes", "jpeg")],
+            {
+                "type": "object",
+                "properties": {"result": {"type": "string"}},
+                "required": ["result"],
+                "additionalProperties": False,
+            },
+            "private-schema-name",
+        )
+
+    assert result == {"result": "private-returned-content"}
+    log_text = caplog.text
+    assert "model='diagram-vision-model'" in log_text
+    assert "images=2" in log_text
+    assert "detail='auto'" in log_text
+    assert "reasoning_effort='low'" in log_text
+    assert "finish_reason='stop'" in log_text
+    assert "prompt_tokens=123" in log_text
+    assert "completion_tokens=45" in log_text
+    assert "total_tokens=168" in log_text
+    assert "private-system-prompt" not in log_text
+    assert "private-user-prompt" not in log_text
+    assert "private-image-bytes" not in log_text
+    assert "more-private-bytes" not in log_text
+    assert "private-schema-name" not in log_text
+    assert "private-returned-content" not in log_text
+
+
+def test_chat_images_json_logging_tolerates_sparse_fake_response(
+    monkeypatch,
+    caplog,
+):
+    """Existing test/proxy responses need not expose finish reason or usage."""
+
+    from types import SimpleNamespace
+    from utils.ai import provider as provider_mod
+
+    class _Completions:
+        def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content='{"result":"ok"}')
+                    )
+                ]
+            )
+
+    provider = provider_mod.OpenAIProvider(api_key="sk-test")
+    provider._client = SimpleNamespace(
+        chat=SimpleNamespace(completions=_Completions())
+    )
+
+    with caplog.at_level(logging.INFO, logger="utils.ai.provider"):
+        result = provider.chat_images_json(
+            "system",
+            "user",
+            [(b"image", "png")],
+            {
+                "type": "object",
+                "properties": {"result": {"type": "string"}},
+                "required": ["result"],
+                "additionalProperties": False,
+            },
+            "route",
+        )
+
+    assert result == {"result": "ok"}
+    assert "finish_reason='unavailable'" in caplog.text
+    assert "token_usage=unavailable" in caplog.text
 
 
 def test_provider_prefers_env_over_keystore(monkeypatch):

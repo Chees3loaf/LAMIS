@@ -1022,6 +1022,9 @@ class RawFrame(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _log_write(self, text: str) -> None:
+        if text.strip():
+            logging.info("[FILE PROCESSING] %s", text.rstrip())
+
         def _write() -> None:
             self._log.configure(state="normal")
             self._log.insert(tk.END, text)

@@ -45,8 +45,8 @@ _BUILTIN_DEFAULT_SEED: List[Tuple[str, str]] = [
     # Once authenticated, the Nokia_1830 script performs the secondary
     # interactive cli -> admin -> admin sequence (see scripts/Nokia_1830.py).
     ("cli", "admin"),
-    # Ciena 6500 / RLS shell login: su / Ciena123.
-    ("su", "Ciena123"),
+    # Ciena 6500 / RLS shell login: su / Ciena123!.
+    ("su", "Ciena123!"),
     # Ciena RLS RESTCONF login -- distinct from the shell user. The REST
     # API requires the diaguser account; ``su`` works for SSH only.
     ("diaguser", "Ciena123"),

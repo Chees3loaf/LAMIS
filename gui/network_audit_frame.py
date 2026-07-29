@@ -295,29 +295,36 @@ class NetworkAuditFrame(ttk.Frame):
         self._running = True
         self.run_button.config(state=tk.DISABLED)
         self.status_label.config(text="Status: Discovering…")
-        out = self.controller.output_screen
         label = "Nokia PSI" if ntype == "psi" else "Ciena RLS"
-        out.insert(tk.END, f"\n── {label} Network Audit ──\n")
-        out.insert(tk.END, f"Seed     : {seed}\n")
-        out.insert(tk.END, f"Output   : {output_path}\n")
-        if ntype != "psi":
-            out.insert(tk.END, f"Alarms   : {'on' if capture_alarms else 'off'}\n")
-            out.insert(tk.END, f"History  : {'on' if capture_history else 'off'}\n")
-        out.insert(tk.END, f"Debug    : {'on' if debug else 'off'}\n")
-        out.see(tk.END)
+        controller_activity = getattr(self.controller, "log_activity", None)
+
+        def activity(message: str, level: int = logging.INFO) -> None:
+            if callable(controller_activity):
+                controller_activity(message, level)
+            else:
+                logging.log(level, message)
+
+        feature_summary = (
+            ""
+            if ntype == "psi"
+            else (
+                f", alarms={'on' if capture_alarms else 'off'}, "
+                f"history={'on' if capture_history else 'off'}"
+            )
+        )
+        activity(
+            f"[NETWORK AUDIT] Starting {label}; seed={seed}, "
+            f"output={output_path}, debug={'on' if debug else 'off'}"
+            f"{feature_summary}."
+        )
 
         root = self.controller.root
 
         def _log_to_panel(msg: str) -> None:
-            """Forward audit progress lines to the main output panel. Must
-            be marshaled to the Tk thread."""
-            def _do() -> None:
-                out.insert(tk.END, str(msg) + "\n")
-                out.see(tk.END)
-            try:
-                root.after(0, _do)
-            except Exception:
-                pass
+            """Persist PSI progress; RLS already tees every line to logging."""
+
+            if ntype == "psi":
+                activity(f"[NETWORK AUDIT] {msg}")
 
         def _worker() -> None:
             try:
@@ -365,8 +372,9 @@ class NetworkAuditFrame(ttk.Frame):
                     self.run_button.config(state=tk.NORMAL)
                     self.status_label.config(text="Status: Ready")
                     self._running = False
-                    out.insert(tk.END, f"\nAudit complete. Saved to:\n  {output_path}\n")
-                    out.see(tk.END)
+                    activity(
+                        f"[NETWORK AUDIT] Audit complete; saved to {output_path}."
+                    )
                     messagebox.showinfo(
                         "Network Audit Complete",
                         f"Audit finished.\n\nReport: {output_path}",
@@ -386,8 +394,10 @@ class NetworkAuditFrame(ttk.Frame):
                     self.run_button.config(state=tk.NORMAL)
                     self.status_label.config(text="Status: Aborted")
                     self._running = False
-                    out.insert(tk.END, f"\n[ABORT] {abort_msg}\n")
-                    out.see(tk.END)
+                    activity(
+                        f"[NETWORK AUDIT] Aborted: {abort_msg}",
+                        logging.WARNING,
+                    )
                     messagebox.showerror("Network Audit Aborted", abort_msg)
 
                 root.after(0, on_audit_abort)
@@ -402,8 +412,9 @@ class NetworkAuditFrame(ttk.Frame):
                     self.run_button.config(state=tk.NORMAL)
                     self.status_label.config(text="Status: Error")
                     self._running = False
-                    out.insert(tk.END, f"\n[ERROR] {err_msg}\n")
-                    out.see(tk.END)
+                    activity(
+                        f"[NETWORK AUDIT] Failed: {err_msg}", logging.ERROR
+                    )
                     messagebox.showerror("Network Audit Error", err_msg)
 
                 root.after(0, on_error)

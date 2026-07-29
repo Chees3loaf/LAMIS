@@ -12,6 +12,7 @@ Hosts the file-processing sub-modes toggled by radio buttons:
                    onto every device tab whose serials match
                    (AssetImportFrame).
 """
+import logging
 from typing import Any
 
 import tkinter as tk
@@ -75,3 +76,12 @@ class FileProcessingFrame(ttk.Frame):
             self.asset_import_frame.pack(fill=tk.BOTH, expand=True)
         else:
             self.bom_compare_frame.pack(fill=tk.BOTH, expand=True)
+        labels = {
+            "raw_inventory": "Raw Inventory",
+            "bom": "BoM",
+            "bom_compare": "BoM Comparison",
+            "asset_import": "Asset Import",
+        }
+        logging.info(
+            "[FILE PROCESSING] Mode selected: %s", labels.get(mode, mode)
+        )

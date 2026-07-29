@@ -24,6 +24,7 @@ import pandas as pd
 import script_interface
 import csv
 from utils.helpers import (
+    CredentialFilter,
     extract_ip_sort_key,
     friendly_error,
     get_data_dir,
@@ -39,13 +40,31 @@ from gui.inventory_frame import InventoryFrame
 from gui.diagnostics_frame import DiagnosticsFrame
 from gui.packing_slip_frame import PackingSlipFrame
 from gui.file_processing_frame import FileProcessingFrame
-from gui.provision_frame import ProvisionFrame
+from gui.provisioning_frame import ProvisioningFrame
 from gui.software_upgrade_frame import SoftwareUpgradeFrame
 from gui.ai_assistant_frame import AIAssistantFrame
 
 command_tracker = script_interface.CommandTracker()
 db_cache = script_interface.get_cache()
 DATA_DIR = get_data_dir()
+
+
+class _GuiQueueLogHandler(logging.Handler):
+    """Move Python log records onto a queue drained by Tk's main thread."""
+
+    def __init__(self, message_queue: Queue) -> None:
+        super().__init__()
+        self._message_queue = message_queue
+        self._atlas_gui_handler = True
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if getattr(record, "atlas_skip_gui", False):
+            return
+        try:
+            self._message_queue.put_nowait(self.format(record))
+        except Exception:
+            self.handleError(record)
+
 
 class InventoryGUI:
     _manual_script_modules = {
@@ -90,6 +109,10 @@ class InventoryGUI:
         self.db_cache = db_cache
         self.outputs = {}
         self.task_queue = Queue()
+        self._activity_log_queue = Queue()
+        self._activity_log_handler: Optional[_GuiQueueLogHandler] = None
+        self._activity_log_after_id: Optional[str] = None
+        self._last_logged_status = ""
         self.stop_threads = False
         self.is_paused = False
         self.save_location = None
@@ -112,6 +135,7 @@ class InventoryGUI:
         # via the run_queue ("creds_needed" event).
         self.pause_queue: List[Tuple[str, Any]] = []
         self._creds_response_queue: Queue = Queue()
+        self._install_activity_log_handler()
 
         if os.path.isfile(self.db_file):
             if self.db_cache.db_path != self.db_file:
@@ -147,8 +171,83 @@ class InventoryGUI:
         # Initialize ScrolledText for Output at the bottom
         self.output_screen = scrolledtext.ScrolledText(self.root, height=8, width=120)
         self.output_screen.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.output_screen.insert(tk.END, "Automatied Toolkit for Lightriver Asset & Systems (ATLAS)\n")
-        self.output_screen.insert(tk.END, "Select mode above to begin\n")
+        self._activity_log_after_id = self.root.after(
+            50, self._drain_activity_log_queue
+        )
+        self.root.bind("<Destroy>", self._on_root_destroy, add="+")
+        self.log_activity(
+            "[ATLAS] Interface ready. Select a mode above to begin."
+        )
+
+    def _install_activity_log_handler(self) -> None:
+        """Mirror every Python log record into the shared ATLAS output panel.
+
+        Logging can originate on worker threads, so the handler only enqueues
+        formatted text. ``_drain_activity_log_queue`` is the sole Tk writer.
+        """
+
+        root_logger = logging.getLogger()
+        root_logger.setLevel(getattr(config, "LOG_LEVEL", logging.INFO))
+        for handler in tuple(root_logger.handlers):
+            if getattr(handler, "_atlas_gui_handler", False):
+                root_logger.removeHandler(handler)
+                try:
+                    handler.close()
+                except Exception:
+                    pass
+        handler = _GuiQueueLogHandler(self._activity_log_queue)
+        handler.setFormatter(logging.Formatter(config.LOG_FORMAT))
+        handler.addFilter(CredentialFilter())
+        root_logger.addHandler(handler)
+        self._activity_log_handler = handler
+
+    def _drain_activity_log_queue(self) -> None:
+        """Render queued log records on Tk's main thread."""
+
+        self._activity_log_after_id = None
+        while True:
+            try:
+                message = self._activity_log_queue.get_nowait()
+            except Empty:
+                break
+            try:
+                self.output_screen.insert(tk.END, message.rstrip() + "\n")
+                self.output_screen.see(tk.END)
+            except (AttributeError, tk.TclError):
+                return
+        try:
+            self._activity_log_after_id = self.root.after(
+                100, self._drain_activity_log_queue
+            )
+        except tk.TclError:
+            self._activity_log_after_id = None
+
+    def _on_root_destroy(self, event: tk.Event) -> None:
+        """Detach the GUI logging handler when this Tk root is destroyed."""
+
+        if event.widget is not self.root:
+            return
+        logging.info("[ATLAS] Interface closing.")
+        if self._activity_log_after_id is not None:
+            try:
+                self.root.after_cancel(self._activity_log_after_id)
+            except tk.TclError:
+                pass
+            self._activity_log_after_id = None
+        handler = self._activity_log_handler
+        if handler is not None:
+            root_logger = logging.getLogger()
+            root_logger.removeHandler(handler)
+            handler.close()
+            self._activity_log_handler = None
+
+    @staticmethod
+    def log_activity(message: object, level: int = logging.INFO) -> None:
+        """Write one operational event to every configured ATLAS log sink."""
+
+        text = str(message).rstrip()
+        if text:
+            logging.log(level, text)
 
     def setup_gui(self):
         app_version = getattr(config, "APP_VERSION", "")
@@ -193,7 +292,7 @@ class InventoryGUI:
         self.packing_slip_frame = PackingSlipFrame(self.content_frame, self)
         self.file_processing_frame = FileProcessingFrame(self.content_frame, self)
         self.raw_frame = self.file_processing_frame.raw_frame
-        self.provision_frame = ProvisionFrame(self.content_frame, self)
+        self.provision_frame = ProvisioningFrame(self.content_frame, self)
         self.software_upgrade_frame = SoftwareUpgradeFrame(self.content_frame, self)
         self.ai_assistant_frame = (
             AIAssistantFrame(self.content_frame, self)
@@ -407,9 +506,7 @@ class InventoryGUI:
         main thread via ``root.after`` before any dialog is shown.
         """
         self._set_update_menu_state(False)
-        if self.output_screen is not None:
-            self.output_screen.insert(tk.END, "Checking for updates…\n")
-            self.output_screen.see(tk.END)
+        self.log_activity("[UPDATE] Checking for updates.")
 
         def _probe() -> Tuple[Optional[Updater], bool, Optional[str]]:
             try:
@@ -429,8 +526,9 @@ class InventoryGUI:
             updater, available, err = fut.result()
             self._set_update_menu_state(True)
             if err:
-                self.output_screen.insert(tk.END, f"Update check failed: {err}\n")
-                self.output_screen.see(tk.END)
+                self.log_activity(
+                    f"[UPDATE] Update check failed: {err}", logging.ERROR
+                )
                 messagebox.showerror("Update Check Failed", err)
                 return
             if not available:
@@ -438,8 +536,9 @@ class InventoryGUI:
                 # was up from a stale boot-time probe.
                 self.update_available = False
                 self._set_update_indicator(False)
-                self.output_screen.insert(tk.END, "You're already on the latest version.\n")
-                self.output_screen.see(tk.END)
+                self.log_activity(
+                    "[UPDATE] ATLAS is already on the latest version."
+                )
                 messagebox.showinfo(
                     "No Updates",
                     f"ATLAS v{getattr(config, 'APP_VERSION', '?')} is up to date.",
@@ -464,8 +563,7 @@ class InventoryGUI:
 
         updater.set_confirmation_callback(_ask)
         self._set_update_menu_state(False)
-        self.output_screen.insert(tk.END, "Preparing update…\n")
-        self.output_screen.see(tk.END)
+        self.log_activity("[UPDATE] Preparing update.")
 
         def _apply() -> Tuple[bool, str, Updater]:
             ok, msg = updater.apply_update()
@@ -474,8 +572,10 @@ class InventoryGUI:
         def _on_apply(fut) -> None:
             ok, msg, up = fut.result()
             self._set_update_menu_state(True)
-            self.output_screen.insert(tk.END, msg + "\n")
-            self.output_screen.see(tk.END)
+            self.log_activity(
+                f"[UPDATE] {msg}",
+                logging.INFO if ok else logging.WARNING,
+            )
             if ok and up.installed_mode:
                 # In installed mode a hidden PowerShell watcher is polling
                 # for this process to exit; once it sees ATLAS gone it'll
@@ -508,9 +608,15 @@ class InventoryGUI:
         Non-blocking — the dialog runs independently so the operator
         can keep working in the main window while it's open.
         """
+        self.log_activity("[PART LOOKUP] Open requested.")
         try:
             db_path = str(get_database_path())
         except Exception as exc:
+            self.log_activity(
+                f"[PART LOOKUP] Database path unavailable: "
+                f"{friendly_error(exc)}",
+                logging.ERROR,
+            )
             messagebox.showerror(
                 "Part Lookup",
                 f"Could not resolve the parts database.\n\n"
@@ -520,7 +626,14 @@ class InventoryGUI:
         try:
             from gui.part_lookup_dialog import PartLookupDialog
             PartLookupDialog(self.root, db_path)
+            self.log_activity(
+                f"[PART LOOKUP] Opened against database {db_path}."
+            )
         except Exception as exc:
+            self.log_activity(
+                f"[PART LOOKUP] Could not open: {friendly_error(exc)}",
+                logging.ERROR,
+            )
             messagebox.showerror(
                 "Part Lookup",
                 f"Could not open the lookup dialog.\n\n{friendly_error(exc)}",
@@ -533,9 +646,15 @@ class InventoryGUI:
         couldn't reliably find the logs to send with bug reports —
         this gives them a one-click path.
         """
+        self.log_activity("[LOGGING] Open logs folder requested.")
         try:
             log_dir = get_logs_dir()
         except Exception as exc:
+            self.log_activity(
+                f"[LOGGING] Could not resolve logs directory: "
+                f"{friendly_error(exc)}",
+                logging.ERROR,
+            )
             messagebox.showerror(
                 "Open Logs Folder",
                 f"Could not resolve the ATLAS logs directory.\n\n{friendly_error(exc)}",
@@ -548,7 +667,13 @@ class InventoryGUI:
                 subprocess.Popen(["open", str(log_dir)])
             else:
                 subprocess.Popen(["xdg-open", str(log_dir)])
+            self.log_activity(f"[LOGGING] Opened logs folder {log_dir}.")
         except Exception as exc:
+            self.log_activity(
+                f"[LOGGING] Could not open logs folder {log_dir}: "
+                f"{friendly_error(exc)}",
+                logging.ERROR,
+            )
             messagebox.showerror(
                 "Open Logs Folder",
                 f"Could not open the logs folder.\n\n"
@@ -556,6 +681,7 @@ class InventoryGUI:
             )
 
     def _show_about(self) -> None:
+        self.log_activity("[UI] About dialog opened.")
         version = getattr(config, "APP_VERSION", "(unknown)")
         owner = getattr(config, "GITHUB_OWNER", "")
         repo  = getattr(config, "GITHUB_REPO", "")
@@ -676,9 +802,22 @@ class InventoryGUI:
             self.software_upgrade_frame.pack(fill=tk.BOTH, expand=True)
         elif mode == "ai_assistant" and getattr(self, "ai_assistant_frame", None):
             self.ai_assistant_frame.pack(fill=tk.BOTH, expand=True)
+        labels = {
+            "inventory": "Inventory",
+            "tds": "Diagnostics",
+            "packing_slip": "Packing Slip Generator",
+            "raw": "File Processing",
+            "provision": "Provisioning",
+            "software_upgrade": "Software Upgrades",
+            "ai_assistant": "Doc Search",
+        }
+        self.log_activity(f"[UI] Mode selected: {labels.get(mode, mode)}")
 
     def update_status(self, message: str) -> None:
         self.inventory_frame.update_status(message)
+        if message and message != self._last_logged_status:
+            self._last_logged_status = message
+            self.log_activity(f"[STATUS] {message}")
 
     def set_run_controls(self, running: bool) -> None:
         self.inventory_frame.set_run_controls(running)
@@ -950,43 +1089,48 @@ class InventoryGUI:
 
             return context
 
-        pod_1 = self.inventory_frame.pod_var_1.get()
-        pod_2 = self.inventory_frame.pod_var_2.get()
-        start_ip_1 = self.inventory_frame.start_ip_entry_1.get()
-        end_ip_1 = self.inventory_frame.end_ip_entry_1.get()
-        start_ip_2 = self.inventory_frame.start_ip_entry_2.get()
-        end_ip_2 = self.inventory_frame.end_ip_entry_2.get()
-
-        if not start_ip_1 or not end_ip_1:
+        # Each selector resolves to a full start/end address. A pod contributes a fixed
+        # /24 and reads only the fourth octet; the Lab reads a third octet per end, so a
+        # Lab range may legitimately span more than one /24.
+        range_1_start, range_1_end, range_1_error = self.inventory_frame.resolve_range(1)
+        if range_1_error:
+            messagebox.showerror("Input Error", range_1_error)
+            return None
+        if not range_1_start:
             messagebox.showwarning("Input Error", "Please enter at least one IP range (IP Selection 1).")
             return None
 
-        try:
-            start_ip_1, end_ip_1 = int(start_ip_1), int(end_ip_1)
-            start_ip_2 = int(start_ip_2) if start_ip_2 else None
-            end_ip_2 = int(end_ip_2) if end_ip_2 else None
-        except ValueError:
-            messagebox.showerror("Input Error", "IP values must be numbers.")
+        range_2_start, range_2_end, range_2_error = self.inventory_frame.resolve_range(2)
+        if range_2_error:
+            messagebox.showerror("Input Error", range_2_error)
             return None
 
-        # Validate IP ranges (start <= end)
-        if start_ip_1 > end_ip_1:
-            messagebox.showerror("Input Error", "IP Range 1: Start IP must be less than or equal to End IP.")
-            return None
-        if start_ip_2 is not None and end_ip_2 is not None and start_ip_2 > end_ip_2:
-            messagebox.showerror("Input Error", "IP Range 2: Start IP must be less than or equal to End IP.")
+        def expand(start: str, end: str) -> list[str]:
+            first, last = int(ipaddress.IPv4Address(start)), int(ipaddress.IPv4Address(end))
+            return [str(ipaddress.IPv4Address(value)) for value in range(first, last + 1)]
+
+        range_1_ips = expand(range_1_start, range_1_end)
+        range_2_ips = expand(range_2_start, range_2_end) if range_2_start else []
+
+        # A Lab range can cross /24 boundaries, so guard against a sweep so large it
+        # would stall the run rather than scanning what the operator meant.
+        total_requested = len(range_1_ips) + len(range_2_ips)
+        if total_requested > config.MAX_SCAN_ADDRESSES:
+            messagebox.showerror(
+                "Range Too Large",
+                f"That selection covers {total_requested} addresses "
+                f"(limit {config.MAX_SCAN_ADDRESSES}). Narrow the range and try again.",
+            )
+            logging.warning(f"Rejected oversized scan range: {total_requested} addresses")
             return None
 
-        ip_list = {f"{config.POD_NETWORK_PREFIX}.{pod_1}.{i}" for i in range(start_ip_1, end_ip_1 + 1)}
-        if start_ip_2 is not None and end_ip_2 is not None:
-            ip_count_before_merge = len(ip_list)
-            ip_list.update(f"{config.POD_NETWORK_PREFIX}.{pod_2}.{i}" for i in range(start_ip_2, end_ip_2 + 1))
-            # Warn about duplicates only when both ranges are in the same pod
-            if pod_2 == pod_1:
-                overlap_count = ip_count_before_merge + (end_ip_2 - start_ip_2 + 1) - len(ip_list)
-                if overlap_count > 0:
-                    messagebox.showwarning("Duplicate IPs Detected", f"IP ranges overlap by {overlap_count} addresses. Duplicates will be removed.")
-                    logging.warning(f"Duplicate IPs detected and removed: {overlap_count} addresses")
+        ip_list = set(range_1_ips)
+        if range_2_ips:
+            overlap_count = len(ip_list) + len(range_2_ips) - len(ip_list | set(range_2_ips))
+            ip_list.update(range_2_ips)
+            if overlap_count > 0:
+                messagebox.showwarning("Duplicate IPs Detected", f"IP ranges overlap by {overlap_count} addresses. Duplicates will be removed.")
+                logging.warning(f"Duplicate IPs detected and removed: {overlap_count} addresses")
 
         return {
             "customer": customer,
@@ -1363,48 +1507,69 @@ class InventoryGUI:
                 event_type, payload = "log", item
 
             if event_type == "log":
-                self.output_screen.insert(tk.END, payload + '\n')
-                self.output_screen.see(tk.END)
+                self.log_activity(payload)
             elif event_type == "progress":
                 current, total, label = payload
                 self.inventory_frame.update_progress(current, total, label)
+                self.log_activity(
+                    f"[PROGRESS] {label} ({current}/{total})"
+                )
             elif event_type == "error":
+                self.log_activity(f"[RUN] Failed: {payload}", logging.ERROR)
                 self.finish_run()
                 messagebox.showerror("Run Error", payload)
                 should_reschedule = False
                 break
             elif event_type == "aborted":
+                self.log_activity("[RUN] Run aborted.", logging.WARNING)
                 self.finish_run()
-                self.output_screen.insert(tk.END, "Run aborted.\n")
-                self.output_screen.see(tk.END)
                 should_reschedule = False
                 break
             elif event_type == "inventory_complete":
                 if payload:
+                    self.log_activity(
+                        "[INVENTORY] Collection complete; starting export."
+                    )
                     self.update_status("Exporting...")
                     self.start_export_worker(None)
                 else:
+                    self.log_activity(
+                        "[INVENTORY] Collection completed without an export.",
+                        logging.WARNING,
+                    )
                     self.finish_run()
                 should_reschedule = False
                 break
             elif event_type == "export_complete":
                 output_file = payload["output_file"]
-                self.output_screen.insert(tk.END, f"Report saved successfully as:\n{output_file}\n")
-                self.output_screen.see(tk.END)
+                self.log_activity(
+                    f"[EXPORT] Report saved successfully: {output_file}"
+                )
                 self.finish_run(success_message=True)
                 should_reschedule = False
                 break
             elif event_type == "export_error":
+                self.log_activity(
+                    f"[EXPORT] Failed to save Excel file: {payload}",
+                    logging.ERROR,
+                )
                 self.finish_run()
                 messagebox.showerror("Export Error", f"Failed to save Excel file:\n{payload}")
                 should_reschedule = False
                 break
             elif event_type == "packing_complete":
+                self.log_activity(
+                    f"[PACKING] Packing slips saved: {payload}"
+                )
                 self.finish_run(success_message=True)
                 messagebox.showinfo("Success", f"Packing slips saved to:\n{payload}")
                 should_reschedule = False
                 break
             elif event_type == "packing_error":
+                self.log_activity(
+                    f"[PACKING] Packing slip export failed: {payload}",
+                    logging.ERROR,
+                )
                 self.finish_run()
                 messagebox.showerror("Packing Slip Error", f"Error:\n{payload}")
                 should_reschedule = False
@@ -1417,24 +1582,27 @@ class InventoryGUI:
                 ip = payload
                 try:
                     from utils.credentials import prompt_for_credentials_gui
-                    self.output_screen.insert(
-                        tk.END,
-                        f"\n[{ip}] Default credentials failed — please enter credentials.\n",
+                    self.log_activity(
+                        f"[AUTH] {ip}: default credentials failed; "
+                        "requesting operator credentials.",
+                        logging.WARNING,
                     )
-                    self.output_screen.see(tk.END)
                     answer = prompt_for_credentials_gui(parent_window=self.root)
                 except Exception as prompt_err:
                     logging.exception(f"Credential prompt failed for {ip}")
-                    self.output_screen.insert(
-                        tk.END,
-                        f"[{ip}] Credential prompt failed: {friendly_error(prompt_err)}\n",
+                    self.log_activity(
+                        f"[AUTH] {ip}: credential prompt failed: "
+                        f"{friendly_error(prompt_err)}",
+                        logging.ERROR,
                     )
                     answer = None
                 # Always push *something* so the worker doesn't hang.
                 self._creds_response_queue.put(answer if answer else (None, None))
             else:
-                self.output_screen.insert(tk.END, str(payload) + '\n')
-                self.output_screen.see(tk.END)
+                self.log_activity(
+                    f"[RUN] Unrecognized queue event {event_type}: {payload}",
+                    logging.WARNING,
+                )
 
         if should_reschedule and ((self.run_future and not self.run_future.done()) or (self.export_future and not self.export_future.done())):
             self.root.after(100, self.poll_run_queue)
@@ -1496,7 +1664,12 @@ class InventoryGUI:
             logging.exception("Failed-devices popup did not display")
 
     def run_script(self):
+        self.log_activity("[RUN] Inventory run requested.")
         if (self.run_future and not self.run_future.done()) or (self.export_future and not self.export_future.done()):
+            self.log_activity(
+                "[RUN] Request refused because another run is in progress.",
+                logging.WARNING,
+            )
             messagebox.showwarning("Run In Progress", "Please wait for the current run to finish.")
             return
 
@@ -1508,6 +1681,10 @@ class InventoryGUI:
 
         context = self.collect_run_context()
         if not context:
+            self.log_activity(
+                "[RUN] Inventory run cancelled or blocked by input validation.",
+                logging.WARNING,
+            )
             self.update_status("Ready")
             return
 
@@ -1515,6 +1692,15 @@ class InventoryGUI:
         self.run_queue = Queue()
         self.set_run_controls(True)
         self.update_status("Running...")
+        target_count = (
+            len(context.get("ip_list", ()))
+            if context.get("connection_mode") == "Network"
+            else 1
+        )
+        self.log_activity(
+            f"[RUN] Starting {context.get('connection_mode', 'unknown')} "
+            f"inventory for {target_count} target(s)."
+        )
         self.start_run_worker()
 
 
@@ -1885,8 +2071,7 @@ class InventoryGUI:
         while not queue.empty():
             try:
                 message = queue.get_nowait()
-                self.output_screen.insert(tk.END, message + '\n')
-                self.output_screen.see(tk.END)
+                self.log_activity(message)
             except Empty:
                 break
         
@@ -1894,8 +2079,14 @@ class InventoryGUI:
         with self.lock:
             self.is_paused = not self.is_paused
             self.update_status("Paused" if self.is_paused else "Resumed")
+            self.log_activity(
+                "[RUN] Paused by operator."
+                if self.is_paused
+                else "[RUN] Resumed by operator."
+            )
     
     def abort_program(self):
+        self.log_activity("[RUN] Abort requested by operator.", logging.WARNING)
         with self.lock:
             self.stop_threads = True
             # Stop any script that is actively executing (concurrent pipeline).
@@ -1928,7 +2119,13 @@ class ConsoleRedirector:
         pass  # Required for compatibility with logging
     
 def main():
+    # Development entry point: use the same rotating log as main.py instead
+    # of silently dropping INFO records when this module is run directly.
+    from utils.logging_setup import configure_atlas_logging
+
+    log_file = configure_atlas_logging()
     logging.info("Starting ATLAS")
+    logging.info("Log file: %s", log_file)
     root = tk.Tk()
     # Reuse the already-created instances
     app = InventoryGUI(

@@ -603,32 +603,44 @@ class SafeAutoAddPolicy:
 
 
 class CredentialFilter(logging.Filter):
-    """Logging filter that redacts credential values before records reach the file handler.
+    """Redact credential values before records reach any ATLAS log sink.
 
-    Matches common credential keywords (password, passwd, secret, community,
-    authorization, token) followed by ``=`` or ``:`` and replaces the value
-    with ``[REDACTED]``.  Applied to the file handler only so on-disk logs
-    never contain cleartext credentials from device output or error messages.
+    Covers ``key=value``, ``key: value``, common CLI ``key value`` forms, and
+    authorization bearer headers. The file, console, and GUI handlers all use
+    this filter.
     """
 
-    _PATTERN = re.compile(
-        r'(?i)(password|passwd|secret|community|authorization|token)\s*[:=]\s*\S+'
+    _AUTH_PATTERN = re.compile(
+        r"(?i)\b(authorization)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+"
+    )
+    _KEY_VALUE_PATTERN = re.compile(
+        r"(?i)\b("
+        r"password|passwd|secret|community|token|"
+        r"api[_ -]?key|shared[_ -]?key|license[_ -]?key"
+        r")\b\s*(?:[:=]|\s)\s*"
+        r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
     )
 
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = self._PATTERN.sub(
-            lambda m: m.group(1) + '=[REDACTED]', str(record.msg)
+    @classmethod
+    def _redact(cls, value: str) -> str:
+        value = cls._AUTH_PATTERN.sub(
+            lambda match: match.group(1) + "=[REDACTED]",
+            value,
         )
-        if record.args:
-            try:
-                args = record.args if isinstance(record.args, tuple) else (record.args,)
-                record.args = tuple(
-                    self._PATTERN.sub(lambda m: m.group(1) + '=[REDACTED]', a)
-                    if isinstance(a, str) else a
-                    for a in args
-                )
-            except Exception:
-                pass
+        return cls._KEY_VALUE_PATTERN.sub(
+            lambda match: match.group(1) + "=[REDACTED]",
+            value,
+        )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            rendered = record.getMessage()
+        except Exception:
+            rendered = str(record.msg)
+        record.msg = self._redact(rendered)
+        # The message has already consumed %-style positional/mapping args.
+        # Clearing them prevents Formatter from applying the same args twice.
+        record.args = ()
         return True
 
 

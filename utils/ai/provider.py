@@ -14,10 +14,48 @@ this module never forces the dependency on a build that has the feature off.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
-from typing import List, Optional, Protocol, Sequence
+import re
+from typing import Any, List, Mapping, Optional, Protocol, Sequence
 
 import config
+
+
+LOGGER = logging.getLogger(__name__)
+
+_TOKEN_USAGE_FIELDS = (
+    "prompt_tokens",
+    "completion_tokens",
+    "total_tokens",
+    # OpenAI-compatible proxies and newer endpoints may use the input/output
+    # names instead of the Chat Completions prompt/completion names.
+    "input_tokens",
+    "output_tokens",
+)
+
+
+def _token_usage_log_fragment(usage: object) -> str:
+    """Return only known numeric token counters from a provider response."""
+
+    if usage is None:
+        return "token_usage=unavailable"
+    counters: list[str] = []
+    for field_name in _TOKEN_USAGE_FIELDS:
+        if isinstance(usage, Mapping):
+            value = usage.get(field_name)
+        else:
+            value = getattr(usage, field_name, None)
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            counters.append(f"{field_name}={value}")
+    if not counters:
+        return "token_usage=unavailable"
+    return "token_usage(" + ", ".join(counters) + ")"
 
 
 class AIProvider(Protocol):
@@ -29,6 +67,17 @@ class AIProvider(Protocol):
 
     def chat(self, system: str, user: str) -> str:
         """Return the model's text answer to ``user`` under ``system`` rules."""
+        ...
+
+    def chat_images_json(
+        self,
+        system: str,
+        user: str,
+        images: Sequence[tuple[bytes, str]],
+        json_schema: Mapping[str, Any],
+        schema_name: str,
+    ) -> Mapping[str, Any]:
+        """Return strict structured data extracted from one or more images."""
         ...
 
 
@@ -47,7 +96,31 @@ class OpenAIProvider:
         base_url: Optional[str] = None,
         chat_model: Optional[str] = None,
         embed_model: Optional[str] = None,
+        image_detail: str = "high",
+        reasoning_effort: Optional[str] = None,
+        max_completion_tokens: Optional[int] = None,
     ) -> None:
+        if image_detail not in {"auto", "low", "high"}:
+            raise ValueError("image_detail must be 'auto', 'low', or 'high'.")
+        if reasoning_effort is not None and reasoning_effort not in {
+            "none",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        }:
+            raise ValueError("reasoning_effort has an unsupported value.")
+        if (
+            max_completion_tokens is not None
+            and (
+                isinstance(max_completion_tokens, bool)
+                or not isinstance(max_completion_tokens, int)
+                or max_completion_tokens < 1
+            )
+        ):
+            raise ValueError("max_completion_tokens must be a positive integer.")
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._base_url = (
             base_url
@@ -56,6 +129,9 @@ class OpenAIProvider:
         )
         self._chat_model = chat_model or config.AI_CHAT_MODEL
         self._embed_model = embed_model or config.AI_EMBED_MODEL
+        self._image_detail = image_detail
+        self._reasoning_effort = reasoning_effort
+        self._max_completion_tokens = max_completion_tokens
         self._client = None  # lazily constructed on first use
 
     def _ensure_client(self):
@@ -156,6 +232,127 @@ class OpenAIProvider:
             kwargs["seed"] = seed
         resp = client.chat.completions.create(**kwargs)
         return (resp.choices[0].message.content or "").strip()
+
+    def chat_images_json(
+        self,
+        system: str,
+        user: str,
+        images: Sequence[tuple[bytes, str]],
+        json_schema: Mapping[str, Any],
+        schema_name: str,
+    ) -> Mapping[str, Any]:
+        """Extract schema-constrained JSON from an ordered image sequence.
+
+        Route diagrams often arrive as several consecutive slices in a DOCX.
+        Sending those slices in one request preserves their document order and
+        lets the caller validate one coherent route.  The model output is never
+        trusted directly: the API is asked for strict JSON-schema output and
+        the route importer performs its own type, range, identity, confidence,
+        and continuity checks before anything reaches a configuration provider.
+        """
+
+        import base64
+
+        if not images:
+            raise ValueError("At least one image is required.")
+        if not isinstance(json_schema, Mapping):
+            raise TypeError("json_schema must be a mapping.")
+        clean_name = re.sub(r"[^A-Za-z0-9_-]+", "_", schema_name).strip("_")
+        if not clean_name:
+            raise ValueError("schema_name must contain a letter or digit.")
+
+        content: list[dict[str, Any]] = [{"type": "text", "text": user}]
+        for index, item in enumerate(images):
+            if (
+                not isinstance(item, (tuple, list))
+                or len(item) != 2
+                or not isinstance(item[0], (bytes, bytearray))
+                or not isinstance(item[1], str)
+            ):
+                raise TypeError(
+                    "Each image must be a (bytes, image_format) pair."
+                )
+            image_bytes, image_format = item
+            if not image_bytes:
+                raise ValueError(f"Image {index + 1} is empty.")
+            clean_format = image_format.strip().lower().replace("jpg", "jpeg")
+            if clean_format not in {"png", "jpeg", "webp", "gif"}:
+                raise ValueError(
+                    f"Image {index + 1} has unsupported format "
+                    f"{image_format!r}."
+                )
+            encoded = base64.b64encode(bytes(image_bytes)).decode("ascii")
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": (
+                            f"data:image/{clean_format};base64,{encoded}"
+                        ),
+                        "detail": self._image_detail,
+                    },
+                }
+            )
+
+        client = self._ensure_client()
+        kwargs: dict[str, Any] = {
+            "model": self._chat_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": clean_name[:64],
+                    "strict": True,
+                    "schema": dict(json_schema),
+                },
+            },
+        }
+        if self._reasoning_effort is None:
+            kwargs["temperature"] = 0
+            seed = getattr(config, "AI_SEED", None)
+            if seed is not None:
+                kwargs["seed"] = seed
+        else:
+            # Current reasoning models use their reasoning setting instead of
+            # the legacy temperature/seed reproducibility profile.
+            kwargs["reasoning_effort"] = self._reasoning_effort
+        if self._max_completion_tokens is not None:
+            kwargs["max_completion_tokens"] = self._max_completion_tokens
+        LOGGER.info(
+            "[AI VISION] Structured image request: model=%r, images=%d, "
+            "detail=%r, reasoning_effort=%r.",
+            self._chat_model,
+            len(images),
+            self._image_detail,
+            self._reasoning_effort,
+        )
+        response = client.chat.completions.create(**kwargs)
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        LOGGER.info(
+            "[AI VISION] Structured image response: model=%r, "
+            "finish_reason=%r, %s.",
+            self._chat_model,
+            finish_reason if finish_reason is not None else "unavailable",
+            _token_usage_log_fragment(getattr(response, "usage", None)),
+        )
+        raw = (choice.message.content or "").strip()
+        if not raw:
+            raise RuntimeError("The vision provider returned an empty result.")
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "The vision provider returned invalid structured JSON."
+            ) from exc
+        if not isinstance(parsed, Mapping):
+            raise RuntimeError(
+                "The vision provider result must be a JSON object."
+            )
+        return dict(parsed)
 
 
 def default_provider() -> AIProvider:

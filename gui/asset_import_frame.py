@@ -89,6 +89,9 @@ class AssetImportFrame(ttk.Frame):
     # ── Helpers ───────────────────────────────────────────────────────
 
     def _append_log(self, msg: str) -> None:
+        if msg.strip():
+            logging.info("[ASSET IMPORT] %s", msg.rstrip())
+
         def _do():
             self._log.configure(state="normal")
             self._log.insert(tk.END, msg + "\n")

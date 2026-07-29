@@ -1,9 +1,9 @@
 """Source-level guards on the user-visible progress breadcrumbs.
 
 The operator complaint that prompted these: during a LAN scan, the
-output panel stays blank for long stretches because the helper-level
-``logging.info`` lines go to the FILE log, not the GUI panel. Only
-``queue.put(("log", ...))`` calls surface to the panel.
+output panel stayed blank for long stretches. Queue breadcrumbs now
+flow through ``InventoryGUI.log_activity`` so the same event reaches
+both the rotating file and the queue-backed GUI logging handler.
 
 These tests pin the breadcrumbs at each phase boundary so a future
 refactor can't silently drop them and reintroduce the "is it

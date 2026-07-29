@@ -196,8 +196,10 @@ class TDSFrame(ttk.Frame):
         self.tds_status_label.config(text="Status: Running...")
         self.tds_run_button.config(state=tk.DISABLED)
         out = self.controller.output_screen
-        out.insert(tk.END, f"Starting TDS diagnostics at {ip} (platform={platform})...\n")
-        out.see(tk.END)
+        activity = getattr(self.controller, "log_activity", logging.info)
+        activity(
+            f"[TDS] Starting diagnostics at {ip} (platform={platform})."
+        )
 
         root = self.controller.root
 
@@ -299,6 +301,10 @@ class TDSFrame(ttk.Frame):
                         out.insert(tk.END, combined + "\n")
                         out.see(tk.END)
                     if result is None:
+                        logging.warning(
+                            "[TDS] Cancelled for %s; no credentials were provided.",
+                            ip,
+                        )
                         # No default available AND operator cancelled the prompt —
                         # nothing was attempted.
                         messagebox.showwarning(
@@ -306,8 +312,14 @@ class TDSFrame(ttk.Frame):
                             "No credentials were provided; TDS did not run.",
                         )
                     elif result.returncode == 0:
+                        logging.info("[TDS] Diagnostics completed for %s.", ip)
                         messagebox.showinfo("TDS Complete", "TDS diagnostics completed successfully.")
                     else:
+                        logging.error(
+                            "[TDS] Diagnostics failed for %s with exit code %s.",
+                            ip,
+                            result.returncode,
+                        )
                         messagebox.showerror(
                             "TDS Error",
                             f"TDS script exited with code {result.returncode}.",

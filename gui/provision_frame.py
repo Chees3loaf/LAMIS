@@ -639,10 +639,17 @@ class ProvisionFrame(ttk.Frame):
     # ── Log helpers ──────────────────────────────────────────────────────────
 
     def _log_append(self, msg: str) -> None:
-        """Append *msg* to ATLAS's shared output panel (bottom of the main
-        window) — the same panel the RLS Network Audit streams to. Marshaled
-        onto the Tk thread via the controller's root so it is safe to call
-        from the provisioning worker thread."""
+        """Write provisioning activity to the rolling log and shared panel."""
+        activity = getattr(self.controller, "log_activity", None)
+        if callable(activity):
+            try:
+                activity(msg)
+                return
+            except Exception:
+                logging.debug(
+                    "Provisioning controller log bridge failed", exc_info=True
+                )
+        logging.info(msg.rstrip())
         out = getattr(self.controller, "output_screen", None)
         root = getattr(self.controller, "root", None)
         if out is None or root is None:
@@ -683,8 +690,10 @@ class ProvisionFrame(ttk.Frame):
     def _stop(self) -> None:
         self._stop_flag = True
         self._set_status("Stopping…", "orange")
+        self._log_append("[PROVISIONING] Stop requested by operator.")
 
     def _run(self) -> None:
+        self._log_append("[PROVISIONING] Provisioning run requested.")
         # Resolve the target: a typed single-device IP wins over the dropdown
         device = self._resolve_target_device()
         if device is None:
@@ -808,7 +817,10 @@ class ProvisionFrame(ttk.Frame):
             configure_card=self._cfg_card_var.get(),
             sync_redundancy=self._sync_var.get(),
             stop_callback=lambda: self._stop_flag,
-            output_callback=self._log_append,
+            # Nokia_Provision already writes every callback message through
+            # Python logging; the global GUI handler mirrors those records.
+            # A second callback log would duplicate every line.
+            output_callback=lambda _msg: None,
         )
         success = script.run()
         if success:

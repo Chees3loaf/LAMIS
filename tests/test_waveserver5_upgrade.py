@@ -326,17 +326,14 @@ class TestSoftwareUpgradeLogTeesToAllSinks(unittest.TestCase):
     upgrade SCRIPT's logger.info lines made it through.
 
     Source-level pins are enough here -- we don't spin up Tk in unit
-    tests. The contract: _log must reference output_screen on the
-    controller AND call logging.info.
+    tests. The contract: _log must use the controller's unified
+    ``log_activity`` bridge, with ``logging.info`` as its fallback.
     """
 
     def test_log_method_writes_to_controller_output_screen(self):
         from gui import software_upgrade_frame
         src = inspect.getsource(software_upgrade_frame.SoftwareUpgradeFrame._log)
-        # The shared bottom panel is named ``output_screen`` on the
-        # controller across the rest of ATLAS. Pin the reference so a
-        # rename in one place doesn't silently break the tee.
-        self.assertIn("output_screen", src)
+        self.assertIn("log_activity", src)
 
     def test_log_method_writes_to_python_logger(self):
         from gui import software_upgrade_frame
@@ -350,7 +347,9 @@ class TestSoftwareUpgradeLogTeesToAllSinks(unittest.TestCase):
         # bottom shared panel may not always be visible (Diagnostics
         # mode hides it, for instance), so we want belt-and-braces.
         from gui import software_upgrade_frame
-        src = inspect.getsource(software_upgrade_frame.SoftwareUpgradeFrame._log)
+        src = inspect.getsource(
+            software_upgrade_frame.SoftwareUpgradeFrame._log_local
+        )
         self.assertIn("_log_text", src)
 
 

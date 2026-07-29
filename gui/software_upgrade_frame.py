@@ -1311,7 +1311,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
                     username=user,
                     password=pwd,
                     server_url=server_url,
-                    output_callback=self._log,
+                    output_callback=self._log_from_script,
                     stop_callback=lambda: self._upgrade_stop,
                 )
                 ok_run = script.run()
@@ -1445,7 +1445,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
                     password=pwd,
                     server_url=server_url,
                     manifest_name=manifest,
-                    output_callback=self._log,
+                    output_callback=self._log_from_script,
                     stop_callback=lambda: self._upgrade_stop,
                 )
                 ok_run = script.run()
@@ -1636,7 +1636,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
                     inner_username=inner_user,
                     inner_password=inner_pwd,
                     software_filename=filename,
-                    output_callback=self._log,
+                    output_callback=self._log_from_script,
                     stop_callback=lambda: self._upgrade_stop,
                 )
                 ok_run = script.run()
@@ -1820,7 +1820,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
                     inner_username=inner_user,
                     inner_password=inner_pwd,
                     software_filename=filename,
-                    output_callback=self._log,
+                    output_callback=self._log_from_script,
                     stop_callback=lambda: self._upgrade_stop,
                 )
                 ok_run = script.run()
@@ -1985,7 +1985,7 @@ class SoftwareUpgradeFrame(ttk.Frame):
                     device_ip_cidr=device_ip_cidr,
                     gateway_ip=pc_ip,
                     hostname=_WS5_HOSTNAME,
-                    output_callback=self._log,
+                    output_callback=self._log_from_script,
                     stop_callback=lambda: self._upgrade_stop,
                 )
                 ok_run = script.run()
@@ -2084,6 +2084,31 @@ class SoftwareUpgradeFrame(ttk.Frame):
         except Exception:
             pass
 
+    def _log_local(self, msg: str) -> None:
+        """Write only to this frame's timestamped log widget."""
+
+        ts = time.strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}\n"
+
+        def _do() -> None:
+            try:
+                self._log_text.config(state=tk.NORMAL)
+                self._log_text.insert(tk.END, line)
+                self._log_text.see(tk.END)
+                self._log_text.config(state=tk.DISABLED)
+            except Exception:
+                pass
+
+        try:
+            self.after(0, _do)
+        except Exception:
+            pass
+
+    def _log_from_script(self, msg: str) -> None:
+        """Render script output locally; the script itself logs it globally."""
+
+        self._log_local(msg)
+
     def _log(self, msg: str) -> None:
         """Tee a single log line to every sink the operator might be
         watching:
@@ -2102,49 +2127,20 @@ class SoftwareUpgradeFrame(ttk.Frame):
         destroyed, controller missing the output_screen attr,
         logging handler error) must not break the others.
         """
-        ts = time.strftime("%H:%M:%S")
-        line = f"[{ts}] {msg}\n"
+        self._log_local(msg)
 
-        # 1) Per-frame log widget. Marshaled to the Tk main loop so
-        # worker threads can safely call this.
-        def _do() -> None:
-            try:
-                self._log_text.config(state=tk.NORMAL)
-                self._log_text.insert(tk.END, line)
-                self._log_text.see(tk.END)
-                self._log_text.config(state=tk.DISABLED)
-            except Exception:
-                pass
+        # 2 + 3) The controller's activity bridge writes once to Python
+        # logging; InventoryGUI's queue-backed handler mirrors that record
+        # into controller.output_screen on Tk's thread. Tests and standalone
+        # frames without the bridge still write to the root logger.
         try:
-            self.after(0, _do)
+            activity = getattr(self.controller, "log_activity", None)
+            if callable(activity):
+                activity(msg.lstrip("\n"))
+            else:
+                logging.info(msg.lstrip("\n"))
         except Exception:
-            pass
-
-        # 2) Shared bottom output panel (used by every other mode).
-        # Wrapped in try because some test contexts construct the
-        # frame with a stub controller that doesn't have the attr.
-        out = getattr(self.controller, "output_screen", None)
-        if out is not None:
-            def _do_shared() -> None:
-                try:
-                    out.insert(tk.END, line)
-                    out.see(tk.END)
-                except Exception:
-                    pass
-            try:
-                self.after(0, _do_shared)
-            except Exception:
-                pass
-
-        # 3) Python logger -> ATLAS rolling log file. INFO level so
-        # the operator can attach the file to a bug report and have
-        # the full transcript. Strip the leading newline some calls
-        # add for visual spacing in the widget -- the file logger
-        # adds its own line terminator.
-        try:
             logging.info(msg.lstrip("\n"))
-        except Exception:
-            pass
 
     def _clear_log(self) -> None:
         self._log_text.config(state=tk.NORMAL)

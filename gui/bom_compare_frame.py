@@ -447,6 +447,9 @@ class BomCompareFrame(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _append_log(self, msg: str) -> None:
+        if msg.strip():
+            logging.info("[BOM COMPARE] %s", msg.rstrip())
+
         def _do():
             self._log.configure(state="normal")
             self._log.insert(tk.END, msg + "\n")

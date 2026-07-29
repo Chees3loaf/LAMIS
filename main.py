@@ -1,8 +1,6 @@
 import logging
-import logging.handlers
 import os
 import sys
-from datetime import datetime
 
 
 def _maybe_dispatch_to_tds() -> None:
@@ -112,15 +110,13 @@ from script_interface import CommandTracker
 import config
 from utils.helpers import (
     get_database_path,
-    CredentialFilter,
     set_host_key_prompt,
     default_tk_host_key_prompt,
-    restrict_path_to_owner,
     cleanup_stale_lamis_tempfiles,
     scrub_known_hosts,
     get_known_hosts_path,
-    get_logs_dir,
 )
+from utils.logging_setup import configure_atlas_logging
 
 # --- Host key cleanup on exit/crash ---
 import atexit
@@ -154,30 +150,9 @@ def _register_known_hosts_cleanup():
 
 _register_known_hosts_cleanup()
 
-# Configure logging — write to console AND a rotating, timestamped log file.
-# get_logs_dir() returns %APPDATA%\ATLAS\logs so it's writable when ATLAS
-# is installed under Program Files (read-only for standard users).
-_log_dir = str(get_logs_dir())
-restrict_path_to_owner(_log_dir, is_dir=True)  # F019: lock log dir to current user
-_log_file = os.path.join(_log_dir, datetime.now().strftime("ATLAS_%Y-%m-%d_%H-%M-%S.log"))
-
-_root_logger = logging.getLogger()
-_root_logger.setLevel(config.LOG_LEVEL)
-_fmt = logging.Formatter(config.LOG_FORMAT)
-
-_console_handler = logging.StreamHandler()
-_console_handler.setFormatter(_fmt)
-_root_logger.addHandler(_console_handler)
-
-_file_handler = logging.handlers.RotatingFileHandler(
-    _log_file,
-    maxBytes=getattr(config, "LOG_MAX_BYTES", 5 * 1024 * 1024),
-    backupCount=getattr(config, "LOG_BACKUP_COUNT", 5),
-    encoding="utf-8",
-)
-_file_handler.setFormatter(_fmt)
-_file_handler.addFilter(CredentialFilter())
-_root_logger.addHandler(_file_handler)
+# Configure logging before any work starts. The helper is idempotent and is
+# shared with gui/gui4_0.py's development entry point.
+_log_file = str(configure_atlas_logging())
 
 # Suppress PIL debug logs
 logging.getLogger("PIL").setLevel(config.PIL_LOG_LEVEL)
