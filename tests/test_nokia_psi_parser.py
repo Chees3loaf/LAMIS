@@ -60,5 +60,50 @@ class TestNokiaPSIShelfDetailParser(unittest.TestCase):
         self.assertEqual(df.iloc[0]["System Type"], "PSI-8L")
 
 
+class TestPSIDeviceNameResolution(unittest.TestCase):
+    """The workbook read the device name from ``shelf_detail`` and never from
+    ``system_name``. When 'show general system-identification' has no hostname
+    line, ``extract_shelf_detail`` synthesises "Nokia <product>" — identical on
+    every 1830 — so all PSI shelves landed on one "Nokia_1830" tab, each run
+    deleting the previous shelf's sheet instead of adding its own.
+    """
+
+    def test_generic_product_name_is_not_a_device_identity(self):
+        from gui.workbook_builder import _real_name
+
+        # Shared by every 1830 on the network — must not become a tab name.
+        self.assertEqual(_real_name("Nokia 1830"), "")
+        self.assertEqual(_real_name("nokia 1830"), "")
+        # Parser failure sentinels are not identities either.
+        self.assertEqual(_real_name("Unknown"), "")
+        self.assertEqual(_real_name("Error"), "")
+        self.assertEqual(_real_name(""), "")
+
+    def test_real_tids_survive(self):
+        from gui.workbook_builder import _real_name
+
+        self.assertEqual(_real_name("uslgd1-l9i2"), "uslgd1-l9i2")
+        self.assertEqual(_real_name("  ramantest1  "), "ramantest1")
+        # A hostname that merely starts with the vendor name is still a TID.
+        self.assertEqual(_real_name("Nokia 1830 East"), "Nokia 1830 East")
+        self.assertEqual(_real_name("nokia-1830-a"), "nokia-1830-a")
+
+    def test_builder_reads_the_system_name_dataframe(self):
+        # The PSI name-resolution loop must consult 'system_name' (the
+        # 'show general name' TID) before shelf_detail's product fallback.
+        import inspect
+
+        from gui.workbook_builder import WorkbookBuilder
+
+        src = inspect.getsource(WorkbookBuilder.build_psi_report_workbook)
+        keys = src[src.index('for key in ('):]
+        keys = keys[:keys.index(')')]
+        self.assertIn('"system_name"', keys)
+        self.assertLess(
+            keys.index('"system_name"'), keys.index('"shelf_detail"'),
+            "system_name must be consulted before shelf_detail",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

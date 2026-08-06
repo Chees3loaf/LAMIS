@@ -68,6 +68,29 @@ _FACTORY_DEFAULT_HOSTNAMES: Dict[str, str] = {
 }
 
 
+# Strings a parser emits when it could not read a hostname. These are not
+# device identities -- every shelf that fails the same way reports the same
+# string, so accepting one as the device name collapses those shelves onto a
+# single shared tab. ``_real_name`` maps them back to "" so the caller drops
+# into the chassis-serial fallback and each shelf keeps its own identity.
+_PLACEHOLDER_DEVICE_NAMES = frozenset({"unknown", "error", "n/a", "none"})
+
+# ``extract_shelf_detail`` synthesises "Nokia <product>" (e.g. "Nokia 1830")
+# when 'show general system-identification' carries no hostname line. That is a
+# product label shared by every 1830 on the network, not a TID.
+_GENERIC_PRODUCT_NAME_RE = re.compile(r"^nokia\s+\d+$", re.IGNORECASE)
+
+
+def _real_name(name: str) -> str:
+    """Return *name* when it identifies one specific device, else ""."""
+    n = (name or "").strip()
+    if not n or n.lower() in _PLACEHOLDER_DEVICE_NAMES:
+        return ""
+    if _GENERIC_PRODUCT_NAME_RE.match(n):
+        return ""
+    return n
+
+
 def _chassis_serial_from_df(df: pd.DataFrame) -> str:
     """Return the chassis serial number from *df*, or "" if not found.
 
@@ -2374,18 +2397,32 @@ class WorkbookBuilder:
         for ip, data_dict in sorted(outputs.items(), key=lambda x: extract_ip_sort_key(x[0])):
             try:
                 system_name = system_type = source_val = ""
-                for key in ("shelf_detail", "shelf_inventory", "card_inventory"):
+                # ``system_name`` is consulted first: 'show general name' is the
+                # only command that reports the TID. 'show general
+                # system-identification' (-> shelf_detail) has no hostname line,
+                # so its parser synthesises "Nokia <product>" -- identical on
+                # every 1830. Reading shelf_detail first therefore named every
+                # PSI "Nokia 1830", and since the tab title and the
+                # rescan-same-device match below both key off that name, each
+                # shelf deleted the previous shelf's tab instead of adding one.
+                #
+                # The loop cannot break on system_name alone: the system_name
+                # DataFrame carries no "System Type" column, so breaking early
+                # would leave the shelf type (PSI-4L/8L) blank in F7.
+                for key in (
+                    "system_name", "shelf_detail", "shelf_inventory", "card_inventory",
+                ):
                     entry = data_dict.get(key)
                     if entry:
                         df = _df(entry)
                         if not df.empty:
                             if not system_name:
-                                system_name = _s(_first(df.get("System Name")))
+                                system_name = _real_name(_s(_first(df.get("System Name"))))
                             if not system_type:
                                 system_type = _s(_first(df.get("System Type")))
                             if not source_val:
                                 source_val = _s(_first(df.get("Source"), str(ip)))
-                    if system_name:
+                    if system_name and system_type and source_val:
                         break
                 if not system_name:
                     # Three-tier fallback: no TID → try chassis serial
@@ -2408,7 +2445,8 @@ class WorkbookBuilder:
                             f"device-tab name."
                         )
                     system_name = device_name_with_serial_fallback(
-                        "", chassis_for_name, ip, ip_prefix="PSI",
+                        "", chassis_for_name, ip,
+                        serial_prefix="PSI", ip_prefix="PSI",
                     )
                 if not source_val:
                     source_val = str(ip)
