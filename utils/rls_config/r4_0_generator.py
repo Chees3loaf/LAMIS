@@ -9,9 +9,9 @@ adapter.
 The generated CLI is a documented *pre-calibration candidate*.  Ciena's own
 commissioning manual warns that example scripts can contain errors.  ATLAS
 therefore corrects only defects that are independently resolved by the
-equipment/topology tables, emits dependency-sized batch transactions, and
-requires a successful ``validate`` result on the matching blank R4.0 shelf
-before any operator proceeds to ``commit``.
+equipment/topology tables and emits dependency-sized validation transactions.
+Candidate files deliberately omit ``commit``; a separately approved
+deployment workflow is required after successful on-box validation.
 """
 
 from __future__ import annotations
@@ -51,12 +51,22 @@ R40ProviderCandidateStatus = Literal[
 ]
 
 SUPPORTED_RELEASE = SUPPORTED_SOFTWARE_RELEASE
-GENERATOR_VERSION = "1.6.0"
+GENERATOR_VERSION = "1.7.0"
 READINESS_STATE = "documented_pre_calibration_candidate"
 READINESS_LABEL = "Documented R4.0 pre-calibration candidate"
+CANDIDATE_ARTIFACT_KIND = "pre_calibration_candidate"
+CANDIDATE_SAFETY_MODE = "validate_without_commit"
+DEPLOYMENT_APPROVAL_STATE = "not_approved"
 
 R40_PAYLOAD_SCHEMA_ID = "ciena.rls.r4-0-exact-request"
-R40_PAYLOAD_SCHEMA_VERSION = "1.4"
+R40_PAYLOAD_SCHEMA_VERSION = "1.5"
+_LEGACY_R40_PAYLOAD_SCHEMA_VERSIONS = frozenset({"1.4"})
+R40_SUPPORTED_PAYLOAD_SCHEMA_VERSIONS = frozenset(
+    {
+        R40_PAYLOAD_SCHEMA_VERSION,
+        *_LEGACY_R40_PAYLOAD_SCHEMA_VERSIONS,
+    }
+)
 R40_ROUTE_SIDES = ("A", "Z")
 COLAN_TERMINAL_REQUIRED = "terminal_required"
 COLAN_TERMINAL_OPTIONAL = "terminal_optional"
@@ -1140,7 +1150,7 @@ class R40ExactRequest:
     line_2: R40LinePath | None
     line_1_route_side: str
     shelf_label: str = ""
-    site_id: int = 0
+    site_id: int | None = None
     site_description: str = ""
     site_address: str = ""
     bay_number: int = 0
@@ -1332,7 +1342,19 @@ class R40ExactConfigGenerator:
             request.member_name, "member_name", "Member name", issues
         )
         self._hostname(request.hostname, issues)
-        self._integer(request.site_id, "site_id", 0, 65_536, issues)
+        if request.site_id is None:
+            issues.append(
+                self._warning(
+                    "SITE_ID_DEFERRED",
+                    "site_id",
+                    "Numeric site ID is not known. ATLAS will omit the site "
+                    "identity command instead of inventing ID 0; add the "
+                    "customer-approved value later if required.",
+                    "LightRiver factory-staging and onsite workflow.",
+                )
+            )
+        else:
+            self._integer(request.site_id, "site_id", 0, 65_536, issues)
         self._integer(request.bay_number, "bay_number", 0, 99, issues)
         self._integer(
             request.physical_shelf, "physical_shelf", 0, 9, issues
@@ -1526,8 +1548,9 @@ class R40ExactConfigGenerator:
                     "ON_BOX_VALIDATE_REQUIRED",
                     "deployment",
                     "Run each emitted batch on an empty matching shelf, capture "
-                    "a successful validate result, and stop before commit on any "
-                    "error. Offline validation is not on-box authorization.",
+                    "a successful validate result, and stop on any error. The "
+                    "candidate deliberately contains no commit command; offline "
+                    "validation is not on-box authorization.",
                     "323-2051-220 printed p.189; 323-2051-190 printed pp.11-13",
                 ),
                 self._warning(
@@ -1573,6 +1596,14 @@ class R40ExactConfigGenerator:
         if profile.application == "cdc_roadm_rla32_c":
             commands.extend(self._roadm_cv_commands())
 
+        if any(
+            command.text.strip().casefold() == "commit"
+            for command in commands
+        ):
+            raise RuntimeError(
+                "Pre-calibration candidate safety invariant violated: a commit "
+                "command was generated."
+            )
         cli_text = self._render_cli(commands)
         annotated = self._render_annotated(request, profile, commands, issues)
         report = self._render_report(request, profile, commands, issues)
@@ -1675,9 +1706,7 @@ class R40ExactConfigGenerator:
             )
 
     @classmethod
-    def _hostname(
-        cls, value: object, issues: list[ValidationIssue]
-    ) -> None:
+    def _hostname(cls, value: object, issues: list[ValidationIssue]) -> None:
         if not isinstance(value, str):
             issues.append(
                 cls._error(
@@ -1701,6 +1730,42 @@ class R40ExactConfigGenerator:
                     "Hostname must use valid DNS labels.",
                 )
             )
+
+    @classmethod
+    def _neighbor_node(
+        cls,
+        value: object,
+        field_name: str,
+        issues: list[ValidationIssue],
+    ) -> None:
+        """Accept an existing CLI-safe TID or a strict customer DNS name."""
+
+        if (
+            isinstance(value, str)
+            and "." not in value
+            and _MEMBER_RE.fullmatch(value)
+        ):
+            return
+        if isinstance(value, str):
+            clean = value[:-1] if value.endswith(".") else value
+            if (
+                clean
+                and len(clean) <= 253
+                and "." in clean
+                and all(
+                    _DNS_LABEL_RE.fullmatch(label) is not None
+                    for label in clean.split(".")
+                )
+            ):
+                return
+        issues.append(
+            cls._error(
+                "INVALID_NEIGHBOR_NODE",
+                field_name,
+                "Neighbor node must be a 1-32 character CLI-safe TID or a "
+                "syntactically valid DNS FQDN of at most 253 characters.",
+            )
+        )
 
     @classmethod
     def _integer(
@@ -2039,10 +2104,9 @@ class R40ExactConfigGenerator:
                 )
             )
             return
-        self._member(
+        self._neighbor_node(
             line.neighbor_node,
             f"{field_name}.neighbor_node",
-            "Neighbor node",
             issues,
         )
         for suffix, label, value in (
@@ -2153,7 +2217,6 @@ class R40ExactConfigGenerator:
         commands.extend(
             (
                 _Command(section, "validate", source),
-                _Command(section, "commit", source),
                 _Command(section, "quit", source),
             )
         )
@@ -2168,15 +2231,16 @@ class R40ExactConfigGenerator:
         ]
         if request.shelf_label:
             body.append(f'set shelf label "{request.shelf_label}"')
-        site = (
-            "set ciena-6500r-system:system id site "
-            f'id {request.site_id} name "{request.site_name}"'
-        )
-        if request.site_description:
-            site += f' description "{request.site_description}"'
-        if request.site_address:
-            site += f' address "{request.site_address}"'
-        body.append(site)
+        if request.site_id is not None:
+            site = (
+                "set ciena-6500r-system:system id site "
+                f'id {request.site_id} name "{request.site_name}"'
+            )
+            if request.site_description:
+                site += f' description "{request.site_description}"'
+            if request.site_address:
+                site += f' address "{request.site_address}"'
+            body.append(site)
         if request.frame_identification_code.strip():
             body.append(
                 "set shelf shelf-location "
@@ -2997,8 +3061,15 @@ class R40ExactConfigGenerator:
                     "commands emitted."
                 )
             ),
-            "# Never paste an entire file blindly. Run one transaction at a "
-            "time and stop before commit if validate reports any error.",
+            (
+                "# Numeric site identity: deferred; site identity command omitted."
+                if request.site_id is None
+                else f"# Numeric site identity: configured as {request.site_id}."
+            ),
+            "# CANDIDATE SAFETY: this file contains validate transactions but "
+            "no commit command.",
+            "# Run one transaction at a time and stop if validate reports any "
+            "error. Deployment requires a separately approved workflow.",
             f"# Fixed BOM: {profile.bom_note}",
             "# Licensed features and runtime calibration are intentionally deferred.",
             "# NTP is customer-managed and intentionally not requested or emitted.",
@@ -3054,7 +3125,10 @@ class R40ExactConfigGenerator:
             "ATLAS Ciena RLS R4.0 Exact Provider Validation",
             "=" * 50,
             "OFFLINE RESULT: VALID",
-            "DEPLOYMENT RESULT: ON-BOX VALIDATE REQUIRED",
+            "CANDIDATE RESULT: GENERATION READY",
+            "DEPLOYMENT RESULT: NOT APPROVED",
+            "CANDIDATE SAFETY: VALIDATE WITHOUT COMMIT",
+            "ON-BOX VALIDATE REQUIRED: YES",
             "",
             f"Provider ID: {profile.provider_id}",
             f"Layout: {profile.display_name}",
@@ -3089,6 +3163,11 @@ class R40ExactConfigGenerator:
             ),
             "NTP policy: customer-managed; no ATLAS NTP commands",
             (
+                "Numeric site identity: deferred (site identity command omitted)"
+                if request.site_id is None
+                else f"Numeric site identity: configured ({request.site_id})"
+            ),
+            (
                 "Fixed physical degree 1 route side: "
                 f"{request.line_1_route_side} (bidirectional mux/demux degree)"
                 if profile.line_semantics == "bidirectional_degree"
@@ -3096,6 +3175,7 @@ class R40ExactConfigGenerator:
                 f"{request.line_1_route_side}"
             ),
             f"Command lines: {len(commands)}",
+            "Commit commands emitted: 0",
             f"Warnings: {len(warnings)}",
             "",
             "Fixed scope",
@@ -3135,7 +3215,13 @@ class R40ExactConfigGenerator:
                 ),
                 (
                     f"{len(controls) + 4}. Capture a successful validate "
-                    "result before commit; stop on any error."
+                    "result and stop on any error. This candidate contains no "
+                    "commit command."
+                ),
+                (
+                    f"{len(controls) + 5}. Obtain explicit deployment approval "
+                    "and use a separately controlled deployment workflow before "
+                    "committing any change."
                 ),
                 "ATLAS carries the listed controls automatically but does not "
                 "assert that physical verification has occurred.",
@@ -3165,7 +3251,7 @@ class R40ExactConfigGenerator:
         return MappingProxyType(
             {
                 "schema": "atlas.ciena.rls.config-artifact",
-                "schema_version": "2.0",
+                "schema_version": "2.1",
                 "generator": "R40ExactConfigGenerator",
                 "generator_version": GENERATOR_VERSION,
                 "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -3175,7 +3261,14 @@ class R40ExactConfigGenerator:
                 "route_profile": request.profile,
                 "readiness_state": READINESS_STATE,
                 "readiness_label": READINESS_LABEL,
+                "artifact_kind": CANDIDATE_ARTIFACT_KIND,
+                "candidate_generation_ready": True,
+                "candidate_safety_mode": CANDIDATE_SAFETY_MODE,
+                "commit_commands_emitted": False,
+                "commit_command_count": 0,
+                "deployment_approval_state": DEPLOYMENT_APPROVAL_STATE,
                 "deployment_approved": False,
+                "deployable_cli": False,
                 "on_box_validate_required": True,
                 "partial_or_legacy_template_output": False,
                 "licensed_features_emitted": [],
@@ -3189,6 +3282,12 @@ class R40ExactConfigGenerator:
                 ),
                 "ntp_managed_by_customer": True,
                 "ntp_commands_emitted": False,
+                "numeric_site_id_state": (
+                    "deferred" if request.site_id is None else "configured"
+                ),
+                "numeric_site_identity_command_emitted": (
+                    request.site_id is not None
+                ),
                 "deployment_controls": [
                     {
                         "id": control.control_id,
@@ -3282,7 +3381,8 @@ def decode_r40_exact_payload(
         )
     if payload.get("schema_id") != R40_PAYLOAD_SCHEMA_ID:
         raise ValueError("Unsupported R4.0 exact payload schema_id.")
-    if payload.get("schema_version") != R40_PAYLOAD_SCHEMA_VERSION:
+    payload_schema_version = payload.get("schema_version")
+    if payload_schema_version not in R40_SUPPORTED_PAYLOAD_SCHEMA_VERSIONS:
         raise ValueError("Unsupported R4.0 exact payload schema_version.")
     raw = payload.get("request")
     if not isinstance(raw, Mapping):
@@ -3310,6 +3410,13 @@ def decode_r40_exact_payload(
             + "."
         )
     values = dict(raw)
+    if (
+        payload_schema_version in _LEGACY_R40_PAYLOAD_SCHEMA_VERSIONS
+        and values.get("site_id") is None
+    ):
+        raise ValueError(
+            "Legacy R4.0 exact payload site_id must be an integer."
+        )
     string_fields = {
         "provider_id",
         "profile",
@@ -3331,7 +3438,7 @@ def decode_r40_exact_payload(
         "site_address",
         "osc_profile",
     }
-    integer_fields = {"site_id", "bay_number", "physical_shelf"}
+    integer_fields = {"bay_number", "physical_shelf"}
     boolean_fields = {
         "installed_inventory_confirmed",
         "planner_runtime_mop_confirmed",
@@ -3347,6 +3454,10 @@ def decode_r40_exact_payload(
     for name in integer_fields & set(values):
         if type(values[name]) is not int:
             problems.append(f"request.{name} must be an integer")
+    if "site_id" in values and (
+        values["site_id"] is not None and type(values["site_id"]) is not int
+    ):
+        problems.append("request.site_id must be an integer or null")
     for name in boolean_fields & set(values):
         if type(values[name]) is not bool:
             problems.append(f"request.{name} must be Boolean")
@@ -3469,10 +3580,13 @@ def _decode_line(
 
 
 __all__ = [
+    "CANDIDATE_ARTIFACT_KIND",
+    "CANDIDATE_SAFETY_MODE",
     "COLAN_PROHIBITED",
     "COLAN_TERMINAL_OPTIONAL",
     "COLAN_TERMINAL_REQUIRED",
     "DEFAULT_R40_TARGET_BUILD_SCHEMA",
+    "DEPLOYMENT_APPROVAL_STATE",
     "GENERATOR_VERSION",
     "R40_CDA_RLA12_C_2DEG_NO_SRA",
     "R40_CDC_ROADM_RLA32_C_2DEG_CCMD8X24_NO_SRA",
@@ -3482,6 +3596,7 @@ __all__ = [
     "R40_R2_CL_DLE_S1_SRA4",
     "R40_PAYLOAD_SCHEMA_ID",
     "R40_PAYLOAD_SCHEMA_VERSION",
+    "R40_SUPPORTED_PAYLOAD_SCHEMA_VERSIONS",
     "R40_PROVIDER_CATALOG",
     "R40_ROUTE_SIDES",
     "R40ConfigArtifact",

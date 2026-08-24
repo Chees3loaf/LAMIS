@@ -513,7 +513,7 @@ def test_route_readiness_and_build_accept_wholly_deferred_terminal_colan() -> No
         if issue.severity == "warning"
     }
 
-    assert payload["schema_version"] == "1.4"
+    assert payload["schema_version"] == "1.5"
     assert decode_r40_exact_payload(payload) == request
     assert readiness.ready is True
     assert readiness.shelf_statuses[0].reason_codes == ()
@@ -1303,13 +1303,21 @@ def test_r4_2_profile_and_release_are_explicitly_rejected() -> None:
 def test_bundle_config_stems_use_each_artifact_release(tmp_path) -> None:
     def artifact(release: str) -> SimpleNamespace:
         return SimpleNamespace(
-            cli_text="batch\nvalidate\ncommit\nquit\n",
+            cli_text="batch\nvalidate\nquit\n",
             annotated_text="annotated\n",
             validation_report="valid\n",
             manifest={
                 "release": release,
                 "generator": "R40ExactConfigGenerator",
                 "provider_id": R40_CDA_RLA12_C_2DEG_NO_SRA,
+                "artifact_kind": "pre_calibration_candidate",
+                "candidate_safety_mode": "validate_without_commit",
+                "deployment_approval_state": "not_approved",
+                "deployment_approved": False,
+                "deployable_cli": False,
+                "commit_commands_emitted": False,
+                "commit_command_count": 0,
+                "on_box_validate_required": True,
             },
         )
 
@@ -1337,6 +1345,6 @@ def test_bundle_config_stems_use_each_artifact_release(tmp_path) -> None:
         record["files"]["cli"]["filename"] for record in records
     }
 
-    assert "RLS-01_RLS_R4.0_add_drop.cli" in filenames
-    assert "RLS-02_RLS_R4.0_roadm.cli" in filenames
+    assert "RLS-01_RLS_R4.0_add_drop_candidate.cli" in filenames
+    assert "RLS-02_RLS_R4.0_roadm_candidate.cli" in filenames
     assert all("R4.2" not in filename for filename in filenames)

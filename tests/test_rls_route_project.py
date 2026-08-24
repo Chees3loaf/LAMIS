@@ -17,13 +17,18 @@ from utils.rls_config.r4_0_generator import (
     R40LinePath,
 )
 from utils.rls_config.route_project import (
+    PATH_SOURCE_DISCREPANCIES_KEY,
+    PATH_SOURCE_DISCREPANCY_PENDING,
+    PATH_SOURCE_DISCREPANCY_SUPERSEDED,
     PROFILE_REGISTRY,
     REVIEW_STATES,
     ROUTE_SCHEMA_NAME,
     ROUTE_SCHEMA_VERSION,
     OpticalPath,
+    OpticalPathSegment,
     PathEndpointReview,
     RouteLink,
+    RouteCustomerPolicy,
     RouteProject,
     RouteProjectFormatError,
     RouteProjectValidationError,
@@ -37,6 +42,7 @@ from utils.rls_config.route_project import (
     save_route_project,
     save_route_project_draft,
     _provider_available_for_shelf,
+    _neighbor_identity_matches_tid,
     _r40_route_topology_mismatches,
 )
 
@@ -161,6 +167,30 @@ def _route_native_fiber_marker(token: str = "NDSF") -> dict[str, object]:
         "status": "confirmed",
         "deployable_cli": False,
     }
+
+
+@pytest.mark.parametrize(
+    ("identity", "tid", "matches"),
+    (
+        ("USABC1-L8I2", "USABC1-L8I2", True),
+        ("usabc1-l8i2", "USABC1-L8I2", True),
+        ("USABC1-L8I2.customer.example", "USABC1-L8I2", True),
+        ("usabc1-l8i2.customer.example.", "USABC1-L8I2", True),
+        ("XUSABC1-L8I2.customer.example", "USABC1-L8I2", False),
+        ("USABC1-L8I2X.customer.example", "USABC1-L8I2", False),
+        ("node-USABC1-L8I2.customer.example", "USABC1-L8I2", False),
+        ("USABC1-L8I2..customer.example", "USABC1-L8I2", False),
+        ("USABC1-L8I2_customer.example", "USABC1-L8I2", False),
+        ("USABC1-L8I2.", "USABC1-L8I2", False),
+        ("", "USABC1-L8I2", False),
+    ),
+)
+def test_neighbor_identity_matches_exact_tid_or_first_fqdn_label(
+    identity: str,
+    tid: str,
+    matches: bool,
+) -> None:
+    assert _neighbor_identity_matches_tid(identity, tid) is matches
 
 
 def _reviewed_route_native_path(
@@ -814,6 +844,55 @@ def test_ospf_and_parallel_optical_paths_round_trip_deeply_immutable():
         first_path.source_evidence["new"] = "value"  # type: ignore[index]
 
 
+def test_route_customer_policy_round_trips_and_legacy_missing_policy_defaults():
+    policy = RouteCustomerPolicy(
+        neighbor_dns_suffix=".customer.example",
+        a_input_patch_loss_db=0.5,
+        a_output_patch_loss_db=0.6,
+        z_input_patch_loss_db=0.2,
+        z_output_patch_loss_db=0.3,
+        colan_ospf_metric=25,
+    )
+    project = replace(_project(), customer_policy=policy)
+
+    raw = project.to_dict()
+
+    assert raw["customer_policy"] == {
+        "neighbor_dns_suffix": ".customer.example",
+        "a_input_patch_loss_db": 0.5,
+        "a_output_patch_loss_db": 0.6,
+        "z_input_patch_loss_db": 0.2,
+        "z_output_patch_loss_db": 0.3,
+        "colan_ospf_metric": 25,
+    }
+    assert RouteProject.from_dict(raw) == project
+    assert policy.normalized_neighbor_dns_suffix == ".customer.example"
+
+    raw.pop("customer_policy")
+    restored = RouteProject.from_dict(raw)
+    assert restored.customer_policy == RouteCustomerPolicy()
+
+
+def test_route_customer_policy_validation_rejects_unsafe_defaults():
+    invalid = replace(
+        _project(),
+        customer_policy=RouteCustomerPolicy(
+            neighbor_dns_suffix="bad..suffix",
+            a_input_patch_loss_db=-0.1,
+            a_output_patch_loss_db=10.1,
+            z_input_patch_loss_db=float("nan"),
+            z_output_patch_loss_db=0.5,
+            colan_ospf_metric=0,
+        ),
+    )
+
+    assert {
+        "INVALID_NEIGHBOR_DNS_SUFFIX",
+        "INVALID_PATCH_LOSS_DEFAULT",
+        "INVALID_COLAN_OSPF_METRIC_DEFAULT",
+    } <= _codes(invalid, "error")
+
+
 def test_link_validation_enforces_count_order_endpoints_and_paths():
     shelves = (_shelf(1), _shelf(2), _shelf(3))
     links = (
@@ -915,6 +994,172 @@ def test_path_validation_rejects_invalid_values_review_and_evidence(
     assert not (tmp_path / "unsafe-links.json").exists()
 
 
+def test_composite_path_segments_round_trip_and_validate_generically() -> None:
+    shelves = (_shelf(1), _shelf(2))
+    segments = (
+        OpticalPathSegment(
+            order=1,
+            from_tid=shelves[0].tid,
+            to_tid="REMOVED-RLS",
+            expected_loss_db=6.5,
+            distance_km=20.0,
+            fiber_type="NDSF",
+            circuit_id="SECTION-A",
+            fiber_start=1,
+            fiber_end=2,
+            source_evidence={"fields": [{"field": "expected_loss_db"}]},
+        ),
+        OpticalPathSegment(
+            order=2,
+            from_tid="REMOVED-RLS",
+            to_tid=shelves[1].tid,
+            expected_loss_db=7.0,
+            distance_km=31.0,
+            fiber_type="NDSF",
+            circuit_id="SECTION-B",
+            fiber_start=3,
+            fiber_end=4,
+            source_evidence={"fields": [{"field": "expected_loss_db"}]},
+        ),
+    )
+    path = replace(_path(1), segments=segments)
+    restored = OpticalPath.from_dict(path.to_dict())
+
+    assert restored == path
+    assert len(restored.to_dict()["segments"]) == 2
+    legacy = path.to_dict()
+    legacy.pop("segments")
+    assert OpticalPath.from_dict(legacy).segments == ()
+
+    project = _project(
+        shelves=shelves,
+        sites=(_site(1), _site(2)),
+        links=(
+            RouteLink(
+                link_id="link-01",
+                order=1,
+                from_shelf_id=shelves[0].shelf_id,
+                to_shelf_id=shelves[1].shelf_id,
+                paths=(path,),
+            ),
+        ),
+    )
+    segment_errors = {
+        issue.code
+        for issue in project.validate()
+        if issue.is_error and "SEGMENT" in issue.code
+    }
+    assert segment_errors == set()
+
+    invalid = replace(
+        path,
+        segments=(
+            segments[0],
+            replace(
+                segments[1],
+                from_tid="WRONG-BOUNDARY",
+                expected_loss_db=8.0,
+            ),
+        ),
+    )
+    invalid_project = replace(
+        project,
+        links=(replace(project.links[0], paths=(invalid,)),),
+    )
+    assert {
+        "PATH_SEGMENT_DISCONTINUITY",
+        "PATH_SEGMENT_AGGREGATE_MISMATCH",
+    } <= {
+        issue.code
+        for issue in invalid_project.validate()
+        if issue.is_error
+    }
+
+
+def test_source_discrepancy_requires_both_endpoint_reviews_to_be_superseded():
+    shelves = (_shelf(1), _shelf(2))
+    pending_marker = {
+        "field": "expected_loss_db",
+        "source_field": "spans[1].expected_loss_db",
+        "issue_code": "SOURCE_EVIDENCE_DISCREPANCY",
+        "status": PATH_SOURCE_DISCREPANCY_PENDING,
+        "deployable_cli": False,
+    }
+    pending_path = replace(
+        _path(
+            1,
+            review_state="pending",
+            source_evidence={
+                PATH_SOURCE_DISCREPANCIES_KEY: [pending_marker],
+            },
+        ),
+        expected_loss_db=None,
+    )
+
+    def project_for(path: OpticalPath) -> RouteProject:
+        return _project(
+            shelves=shelves,
+            sites=(_site(1), _site(2)),
+            links=(
+                RouteLink(
+                    link_id="link-01",
+                    order=1,
+                    from_shelf_id=shelves[0].shelf_id,
+                    to_shelf_id=shelves[1].shelf_id,
+                    paths=(path,),
+                ),
+            ),
+        )
+
+    assert "UNRESOLVED_SOURCE_EVIDENCE_DISCREPANCY" in _codes(
+        project_for(pending_path),
+        "error",
+    )
+
+    superseded_marker = {
+        **pending_marker,
+        "status": PATH_SOURCE_DISCREPANCY_SUPERSEDED,
+    }
+    one_endpoint = replace(
+        pending_path,
+        review_state="corrected",
+        source_evidence={
+            PATH_SOURCE_DISCREPANCIES_KEY: [superseded_marker],
+        },
+        endpoint_reviews=(
+            PathEndpointReview(
+                shelf_id=shelves[0].shelf_id,
+                link_name="A-LOCAL",
+                expected_loss_db=14.68,
+                fiber_type="NDSF",
+            ),
+        ),
+    )
+    assert "INVALID_SOURCE_EVIDENCE_DISCREPANCY" in _codes(
+        project_for(one_endpoint),
+        "error",
+    )
+
+    paired = replace(
+        one_endpoint,
+        endpoint_reviews=(
+            *one_endpoint.endpoint_reviews,
+            PathEndpointReview(
+                shelf_id=shelves[1].shelf_id,
+                link_name="Z-LOCAL",
+                expected_loss_db=14.68,
+                fiber_type="NDSF",
+            ),
+        ),
+    )
+    discrepancy_codes = {
+        code
+        for code in _codes(project_for(paired), "error")
+        if "SOURCE_EVIDENCE_DISCREPANCY" in code
+    }
+    assert discrepancy_codes == set()
+
+
 def test_current_schema_requires_explicit_ospf_and_links_fields():
     raw = _project().to_dict()
     raw.pop("ospf_area")
@@ -959,7 +1204,7 @@ def test_legacy_schema_load_migrates_with_blank_route_engineering(
 
     migrated = load_route_project(legacy_path)
 
-    assert ROUTE_SCHEMA_VERSION == "1.2"
+    assert ROUTE_SCHEMA_VERSION == "1.3"
     assert migrated.schema_version == ROUTE_SCHEMA_VERSION
     assert migrated.ospf_area == ""
     assert migrated.links == ()
@@ -967,7 +1212,7 @@ def test_legacy_schema_load_migrates_with_blank_route_engineering(
     assert all(shelf.review_state == "manual" for shelf in migrated.shelves)
     assert all(shelf.source_evidence == {} for shelf in migrated.shelves)
     migrated_raw = migrated.to_dict()
-    assert migrated_raw["schema_version"] == "1.2"
+    assert migrated_raw["schema_version"] == "1.3"
     assert migrated_raw["ospf_area"] == ""
     assert migrated_raw["links"] == []
     assert migrated_raw["diagram_source"] == {}
@@ -979,6 +1224,29 @@ def test_legacy_schema_load_migrates_with_blank_route_engineering(
     assert route_project_fingerprint(migrated) == route_project_fingerprint(
         original
     )
+
+
+def test_schema_1_2_migration_preserves_links_and_adds_empty_segments() -> None:
+    shelves = (_shelf(1), _shelf(2))
+    original = _project(
+        shelves=shelves,
+        sites=(_site(1), _site(2)),
+        ospf_area="0.0.0.1",
+        links=_links_for(shelves),
+    )
+    raw = original.to_dict()
+    raw["schema_version"] = "1.2"
+    for link in raw["links"]:
+        for path in link["paths"]:
+            path.pop("segments")
+
+    migrated = RouteProject.from_dict(raw)
+
+    assert migrated.schema_version == "1.3"
+    assert migrated.ospf_area == original.ospf_area
+    assert len(migrated.links) == 1
+    assert migrated.links[0].paths[0].segments == ()
+    assert migrated.links[0].paths[0].expected_loss_db == 13.5
 
 
 def test_provenance_rejects_secret_keys_and_non_json_values_without_leaks():
@@ -1105,6 +1373,15 @@ def test_route_project_fingerprint_hashes_complete_canonical_document():
     )
     assert fingerprint != route_project_fingerprint(
         replace(project_a, ospf_area="0.0.0.0")
+    )
+    assert fingerprint != route_project_fingerprint(
+        replace(
+            project_a,
+            customer_policy=replace(
+                project_a.customer_policy,
+                z_input_patch_loss_db=0.25,
+            ),
+        )
     )
     links = _links_for(project_a.shelves)
     linked = replace(project_a, links=links)

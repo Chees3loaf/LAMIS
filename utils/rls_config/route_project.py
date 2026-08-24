@@ -37,12 +37,29 @@ LOGGER = logging.getLogger(__name__)
 
 
 ROUTE_SCHEMA_NAME = "atlas.ciena.rls.route-project"
-ROUTE_SCHEMA_VERSION = "1.2"
-_LEGACY_ROUTE_SCHEMA_VERSIONS = frozenset({"1.0", "1.1"})
+ROUTE_SCHEMA_VERSION = "1.3"
+_LEGACY_ROUTE_SCHEMA_VERSIONS = frozenset({"1.0", "1.1", "1.2"})
+_PRE_LINK_ROUTE_SCHEMA_VERSIONS = frozenset({"1.0", "1.1"})
 RACK_CAPACITY = 8
 _ROUTE_NATIVE_FIBER_REVIEW_KEY = "route_native_fiber_review"
 _ROUTE_NATIVE_FIBER_REVIEW_KEYS = frozenset(
     {"value", "scope", "action", "status", "deployable_cli"}
+)
+PATH_SOURCE_DISCREPANCIES_KEY = "source_discrepancies"
+PATH_SOURCE_DISCREPANCY_PENDING = "pending_operator_review"
+PATH_SOURCE_DISCREPANCY_SUPERSEDED = "superseded_by_endpoint_reviews"
+_PATH_SOURCE_DISCREPANCY_KEYS = frozenset(
+    {
+        "field",
+        "source_field",
+        "issue_code",
+        "status",
+        "deployable_cli",
+    }
+)
+_CLI_MEMBER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
+_DNS_LABEL_RE = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
 )
 
 Severity = Literal["error", "warning"]
@@ -73,6 +90,33 @@ _R40_EXACT_ROLE_PROFILES = frozenset(
 
 R40_PENDING_SRA_PEER_REVIEW = "R40_PENDING_SRA_PEER_REVIEW"
 R40_ROUTE_TOPOLOGY_MISMATCH = "R40_ROUTE_TOPOLOGY_MISMATCH"
+
+
+def _neighbor_identity_matches_tid(identity: object, tid: object) -> bool:
+    """Match one exact adjacent TID or a strict FQDN rooted at that TID."""
+
+    if not isinstance(identity, str) or not isinstance(tid, str):
+        return False
+    candidate = identity.strip()
+    expected = tid.strip()
+    if not candidate or not expected or _CLI_MEMBER_RE.fullmatch(expected) is None:
+        return False
+    if candidate.casefold() == expected.casefold():
+        return _CLI_MEMBER_RE.fullmatch(candidate) is not None
+
+    clean = candidate[:-1] if candidate.endswith(".") else candidate
+    if (
+        not clean
+        or len(clean) > 253
+        or "." not in clean
+        or _DNS_LABEL_RE.fullmatch(expected) is None
+    ):
+        return False
+    labels = clean.split(".")
+    return (
+        all(_DNS_LABEL_RE.fullmatch(label) is not None for label in labels)
+        and labels[0].casefold() == expected.casefold()
+    )
 
 
 @dataclass(frozen=True)
@@ -320,6 +364,93 @@ class PathEndpointReview:
 
 
 @dataclass(frozen=True)
+class OpticalPathSegment:
+    """One source-observed physical section of a composite optical path."""
+
+    order: int
+    from_tid: str
+    to_tid: str
+    expected_loss_db: float | None = None
+    distance_km: float | None = None
+    fiber_type: str = ""
+    circuit_id: str = ""
+    fiber_start: int | None = None
+    fiber_end: int | None = None
+    source_evidence: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_evidence, Mapping):
+            raise TypeError("source_evidence must be a mapping")
+        object.__setattr__(
+            self,
+            "source_evidence",
+            MappingProxyType(
+                {
+                    str(key): _freeze_json_value(value)
+                    for key, value in self.source_evidence.items()
+                }
+            ),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "order": self.order,
+            "from_tid": self.from_tid,
+            "to_tid": self.to_tid,
+            "expected_loss_db": self.expected_loss_db,
+            "distance_km": self.distance_km,
+            "fiber_type": self.fiber_type,
+            "circuit_id": self.circuit_id,
+            "fiber_start": self.fiber_start,
+            "fiber_end": self.fiber_end,
+            "source_evidence": _thaw_json_value(self.source_evidence),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "OpticalPathSegment":
+        data = _expect_mapping(value, "optical path segment")
+        source_evidence = data.get("source_evidence", {})
+        if not isinstance(source_evidence, Mapping):
+            raise RouteProjectFormatError(
+                "optical_path_segment.source_evidence must be a JSON object"
+            )
+        return cls(
+            order=_required_json_integer(
+                data, "order", "optical_path_segment.order"
+            ),
+            from_tid=_required_json_string(
+                data, "from_tid", "optical_path_segment.from_tid"
+            ),
+            to_tid=_required_json_string(
+                data, "to_tid", "optical_path_segment.to_tid"
+            ),
+            expected_loss_db=_optional_json_number(
+                data,
+                "expected_loss_db",
+                "optical_path_segment.expected_loss_db",
+            ),
+            distance_km=_optional_json_number(
+                data,
+                "distance_km",
+                "optical_path_segment.distance_km",
+            ),
+            fiber_type=_optional_json_string(
+                data, "fiber_type", "optical_path_segment.fiber_type"
+            ),
+            circuit_id=_optional_json_string(
+                data, "circuit_id", "optical_path_segment.circuit_id"
+            ),
+            fiber_start=_optional_json_integer(
+                data, "fiber_start", "optical_path_segment.fiber_start"
+            ),
+            fiber_end=_optional_json_integer(
+                data, "fiber_end", "optical_path_segment.fiber_end"
+            ),
+            source_evidence=dict(source_evidence),
+        )
+
+
+@dataclass(frozen=True)
 class OpticalPath:
     """One reviewed physical span/path carried by a route link.
 
@@ -344,11 +475,13 @@ class OpticalPath:
     review_state: ReviewState = "manual"
     source_evidence: Mapping[str, object] = field(default_factory=dict)
     endpoint_reviews: tuple[PathEndpointReview, ...] = ()
+    segments: tuple[OpticalPathSegment, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_evidence, Mapping):
             raise TypeError("source_evidence must be a mapping")
         object.__setattr__(self, "endpoint_reviews", tuple(self.endpoint_reviews))
+        object.__setattr__(self, "segments", tuple(self.segments))
         object.__setattr__(
             self,
             "source_evidence",
@@ -376,6 +509,7 @@ class OpticalPath:
             "endpoint_reviews": [
                 review.to_dict() for review in self.endpoint_reviews
             ],
+            "segments": [segment.to_dict() for segment in self.segments],
         }
 
     @classmethod
@@ -394,6 +528,10 @@ class OpticalPath:
         raw_endpoint_reviews = _expect_json_array(
             data.get("endpoint_reviews", []),
             "optical_path.endpoint_reviews",
+        )
+        raw_segments = _expect_json_array(
+            data.get("segments", []),
+            "optical_path.segments",
         )
         return cls(
             path_id=_required_json_string(
@@ -435,6 +573,15 @@ class OpticalPath:
                     )
                 )
                 for index, item in enumerate(raw_endpoint_reviews)
+            ),
+            segments=tuple(
+                OpticalPathSegment.from_dict(
+                    _expect_mapping(
+                        item,
+                        f"optical_path.segments[{index}]",
+                    )
+                )
+                for index, item in enumerate(raw_segments)
             ),
         )
 
@@ -884,6 +1031,95 @@ class R40RouteTopologyIssue:
 
 
 @dataclass(frozen=True)
+class RouteCustomerPolicy:
+    """Customer-specific route defaults applied to exact-provider reviews.
+
+    These values are deliberately project data, not product constants.  A
+    blank neighbor suffix preserves the diagram-derived bare TID, while a
+    configured suffix turns that TID into the customer's expected FQDN.
+    Patch-panel losses remain directional because the A- and Z-side plant
+    standards can differ for two-sided ILA/intermediate shelves. Endpoint
+    terminal roles use their separately audited route-degree workflow default;
+    exact-review fields remain editable.
+    """
+
+    neighbor_dns_suffix: str = ""
+    a_input_patch_loss_db: float = 0.5
+    a_output_patch_loss_db: float = 0.5
+    z_input_patch_loss_db: float = 0.2
+    z_output_patch_loss_db: float = 0.2
+    colan_ospf_metric: int = 10
+
+    @property
+    def normalized_neighbor_dns_suffix(self) -> str:
+        suffix = self.neighbor_dns_suffix.strip()
+        if not suffix:
+            return ""
+        return "." + suffix.lstrip(".")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "neighbor_dns_suffix": self.neighbor_dns_suffix,
+            "a_input_patch_loss_db": self.a_input_patch_loss_db,
+            "a_output_patch_loss_db": self.a_output_patch_loss_db,
+            "z_input_patch_loss_db": self.z_input_patch_loss_db,
+            "z_output_patch_loss_db": self.z_output_patch_loss_db,
+            "colan_ospf_metric": self.colan_ospf_metric,
+        }
+
+    def validate(self) -> tuple[RouteValidationIssue, ...]:
+        issues: list[RouteValidationIssue] = []
+        _validate_route_customer_policy(self, issues)
+        return tuple(issues)
+
+    def assert_valid(self) -> None:
+        issues = tuple(issue for issue in self.validate() if issue.is_error)
+        if issues:
+            raise RouteProjectValidationError(issues)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "RouteCustomerPolicy":
+        data = _expect_mapping(value, "route.customer_policy")
+
+        def required_number(key: str) -> float:
+            raw = _optional_json_number(
+                data,
+                key,
+                f"route.customer_policy.{key}",
+            )
+            if raw is None:
+                raise RouteProjectFormatError(
+                    f"route.customer_policy.{key} must be a JSON number"
+                )
+            return float(raw)
+
+        return cls(
+            neighbor_dns_suffix=_required_json_string(
+                data,
+                "neighbor_dns_suffix",
+                "route.customer_policy.neighbor_dns_suffix",
+            ),
+            a_input_patch_loss_db=required_number(
+                "a_input_patch_loss_db"
+            ),
+            a_output_patch_loss_db=required_number(
+                "a_output_patch_loss_db"
+            ),
+            z_input_patch_loss_db=required_number(
+                "z_input_patch_loss_db"
+            ),
+            z_output_patch_loss_db=required_number(
+                "z_output_patch_loss_db"
+            ),
+            colan_ospf_metric=_required_json_integer(
+                data,
+                "colan_ospf_metric",
+                "route.customer_policy.colan_ospf_metric",
+            ),
+        )
+
+
+@dataclass(frozen=True)
 class RouteProject:
     """A complete, ordered route from which a deliverable can be rendered."""
 
@@ -898,10 +1134,15 @@ class RouteProject:
     notes: str = ""
     schema_version: str = ROUTE_SCHEMA_VERSION
     diagram_source: Mapping[str, object] = field(default_factory=dict)
+    customer_policy: RouteCustomerPolicy = field(
+        default_factory=RouteCustomerPolicy
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.diagram_source, Mapping):
             raise TypeError("diagram_source must be a mapping")
+        if not isinstance(self.customer_policy, RouteCustomerPolicy):
+            raise TypeError("customer_policy must be a RouteCustomerPolicy")
         object.__setattr__(self, "sites", tuple(self.sites))
         object.__setattr__(self, "shelves", tuple(self.shelves))
         object.__setattr__(self, "links", tuple(self.links))
@@ -1013,6 +1254,7 @@ class RouteProject:
             "revision": self.revision,
             "notes": self.notes,
             "diagram_source": _thaw_json_value(self.diagram_source),
+            "customer_policy": self.customer_policy.to_dict(),
             "sites": [site.to_dict() for site in self.sites],
             "shelves": [shelf.to_dict() for shelf in self.shelves],
             "links": [link.to_dict() for link in self.links],
@@ -1042,7 +1284,7 @@ class RouteProject:
             )
         raw_sites = _expect_json_array(data.get("sites"), "route.sites")
         raw_shelves = _expect_json_array(data.get("shelves"), "route.shelves")
-        if schema_version in _LEGACY_ROUTE_SCHEMA_VERSIONS:
+        if schema_version in _PRE_LINK_ROUTE_SCHEMA_VERSIONS:
             ospf_area = ""
             raw_links: list[Any] = []
         else:
@@ -1055,6 +1297,17 @@ class RouteProject:
             raise RouteProjectFormatError(
                 "route.diagram_source must be a JSON object"
             )
+        raw_customer_policy = data.get("customer_policy")
+        customer_policy = (
+            RouteCustomerPolicy()
+            if raw_customer_policy is None
+            else RouteCustomerPolicy.from_dict(
+                _expect_mapping(
+                    raw_customer_policy,
+                    "route.customer_policy",
+                )
+            )
+        )
         return cls(
             project_id=_required_json_string(
                 data, "project_id", "route.project_id"
@@ -1085,11 +1338,12 @@ class RouteProject:
                 for index, item in enumerate(raw_links)
             ),
             # Version 1.0 had no diagram provenance/review state and versions
-            # 1.0/1.1 had no first-class OSPF area or optical links. Legacy
-            # documents are upgraded in memory with blank route engineering
-            # data rather than inferring values from provenance or payloads.
+            # 1.0/1.1 had no first-class OSPF area or optical links. Version
+            # 1.2 links are preserved and gain an empty ``segments`` tuple.
+            # No migration infers engineering values from provenance/payloads.
             schema_version=ROUTE_SCHEMA_VERSION,
             diagram_source=dict(diagram_source),
+            customer_policy=customer_policy,
         )
 
     def save(self, path: str | os.PathLike[str]) -> Path:
@@ -1163,6 +1417,7 @@ def validate_route_project(project: RouteProject) -> tuple[RouteValidationIssue,
                 )
             )
     _validate_optional_text(project.notes, "notes", "Project notes", issues)
+    _validate_route_customer_policy(project.customer_policy, issues)
     for key_path in _secret_key_paths(project.diagram_source):
         issues.append(
             _error(
@@ -1583,6 +1838,12 @@ def validate_route_project(project: RouteProject) -> tuple[RouteValidationIssue,
         for shelf in project.shelves
         if isinstance(shelf.shelf_id, str)
     }
+    shelf_tid_by_id = {
+        shelf.shelf_id: shelf.tid
+        for shelf in project.shelves
+        if isinstance(shelf.shelf_id, str)
+        and isinstance(shelf.tid, str)
+    }
     link_ids: dict[str, int] = {}
     path_ids: dict[str, int] = {}
     route_native_fiber_tokens: list[tuple[str, str]] = []
@@ -1779,6 +2040,13 @@ def validate_route_project(project: RouteProject) -> tuple[RouteValidationIssue,
                         "Fiber start cannot be greater than fiber end.",
                     )
                 )
+            _validate_optical_path_segments(
+                path,
+                path_prefix,
+                from_tid=shelf_tid_by_id.get(link.from_shelf_id, ""),
+                to_tid=shelf_tid_by_id.get(link.to_shelf_id, ""),
+                issues=issues,
+            )
             reviewed_endpoint_ids: dict[str, int] = {}
             valid_link_endpoints = {
                 endpoint.casefold()
@@ -2001,6 +2269,94 @@ def validate_route_project(project: RouteProject) -> tuple[RouteValidationIssue,
                         ),
                     )
                 )
+            raw_discrepancies = path.source_evidence.get(
+                PATH_SOURCE_DISCREPANCIES_KEY,
+                (),
+            )
+            discrepancy_field = (
+                f"{path_prefix}.source_evidence."
+                f"{PATH_SOURCE_DISCREPANCIES_KEY}"
+            )
+            if not isinstance(raw_discrepancies, (list, tuple)):
+                issues.append(
+                    _error(
+                        "INVALID_SOURCE_EVIDENCE_DISCREPANCY",
+                        discrepancy_field,
+                        "Optical-path source discrepancies must be a JSON array.",
+                    )
+                )
+            else:
+                for discrepancy_index, discrepancy in enumerate(
+                    raw_discrepancies
+                ):
+                    item_field = (
+                        f"{discrepancy_field}[{discrepancy_index}]"
+                    )
+                    if (
+                        not isinstance(discrepancy, Mapping)
+                        or set(discrepancy) != _PATH_SOURCE_DISCREPANCY_KEYS
+                        or not isinstance(discrepancy.get("field"), str)
+                        or not str(discrepancy.get("field", "")).strip()
+                        or not isinstance(
+                            discrepancy.get("source_field"),
+                            str,
+                        )
+                        or not str(
+                            discrepancy.get("source_field", "")
+                        ).strip()
+                        or not isinstance(discrepancy.get("issue_code"), str)
+                        or not str(discrepancy.get("issue_code", "")).strip()
+                        or discrepancy.get("deployable_cli") is not False
+                        or discrepancy.get("status")
+                        not in {
+                            PATH_SOURCE_DISCREPANCY_PENDING,
+                            PATH_SOURCE_DISCREPANCY_SUPERSEDED,
+                        }
+                    ):
+                        issues.append(
+                            _error(
+                                "INVALID_SOURCE_EVIDENCE_DISCREPANCY",
+                                item_field,
+                                (
+                                    "Each source-discrepancy marker must "
+                                    "contain exactly field, source_field, "
+                                    "issue_code, status, and deployable_cli "
+                                    "with controlled values."
+                                ),
+                            )
+                        )
+                        continue
+                    if (
+                        discrepancy.get("status")
+                        == PATH_SOURCE_DISCREPANCY_PENDING
+                    ):
+                        issues.append(
+                            _error(
+                                "UNRESOLVED_SOURCE_EVIDENCE_DISCREPANCY",
+                                item_field,
+                                (
+                                    "Direct source observations disagree for "
+                                    "this optical path. Review both connected "
+                                    "endpoints before the source value can be "
+                                    "superseded."
+                                ),
+                            )
+                        )
+                    elif {
+                        endpoint.casefold()
+                        for endpoint in reviewed_endpoint_ids
+                    } < valid_link_endpoints:
+                        issues.append(
+                            _error(
+                                "INVALID_SOURCE_EVIDENCE_DISCREPANCY",
+                                item_field,
+                                (
+                                    "A source discrepancy can be marked "
+                                    "superseded only after both connected "
+                                    "endpoint reviews are present."
+                                ),
+                            )
+                        )
 
     if len({token for token, _field in route_native_fiber_tokens}) > 1:
         issues.append(
@@ -2015,6 +2371,252 @@ def validate_route_project(project: RouteProject) -> tuple[RouteValidationIssue,
         )
 
     return tuple(issues)
+
+
+def _validate_optical_path_segments(
+    path: OpticalPath,
+    path_prefix: str,
+    *,
+    from_tid: str,
+    to_tid: str,
+    issues: list[RouteValidationIssue],
+) -> None:
+    """Validate optional physical-section provenance for a composite path."""
+
+    if not path.segments:
+        return
+    prefix = f"{path_prefix}.segments"
+    if len(path.segments) < 2:
+        issues.append(
+            _error(
+                "INVALID_PATH_SEGMENT_COUNT",
+                prefix,
+                "A composite optical path requires at least two sections.",
+            )
+        )
+    valid_segments: list[OpticalPathSegment] = []
+    for index, segment in enumerate(path.segments):
+        item_prefix = f"{prefix}[{index}]"
+        if not isinstance(segment, OpticalPathSegment):
+            issues.append(
+                _error(
+                    "INVALID_PATH_SEGMENT",
+                    item_prefix,
+                    "Every component section must be an OpticalPathSegment.",
+                )
+            )
+            continue
+        valid_segments.append(segment)
+        if (
+            isinstance(segment.order, bool)
+            or not isinstance(segment.order, int)
+            or segment.order != index + 1
+        ):
+            issues.append(
+                _error(
+                    "INVALID_PATH_SEGMENT_ORDER",
+                    f"{item_prefix}.order",
+                    (
+                        "Component section order must be contiguous and match "
+                        f"its path position {index + 1}."
+                    ),
+                )
+            )
+        _validate_required_text(
+            segment.from_tid,
+            f"{item_prefix}.from_tid",
+            "Section source TID",
+            issues,
+        )
+        _validate_required_text(
+            segment.to_tid,
+            f"{item_prefix}.to_tid",
+            "Section destination TID",
+            issues,
+        )
+        for field_name, label, value in (
+            ("fiber_type", "Section fiber type", segment.fiber_type),
+            ("circuit_id", "Section circuit ID", segment.circuit_id),
+        ):
+            _validate_optional_text(
+                value,
+                f"{item_prefix}.{field_name}",
+                label,
+                issues,
+            )
+        for field_name, label, value in (
+            (
+                "expected_loss_db",
+                "Section expected optical loss",
+                segment.expected_loss_db,
+            ),
+            ("distance_km", "Section optical distance", segment.distance_km),
+        ):
+            _validate_optional_nonnegative_number(
+                value,
+                f"{item_prefix}.{field_name}",
+                label,
+                issues,
+            )
+        if segment.distance_km is not None and not (
+            isinstance(segment.distance_km, bool)
+            or not isinstance(segment.distance_km, (int, float))
+        ) and float(segment.distance_km) == 0:
+            issues.append(
+                _error(
+                    "INVALID_PATH_SEGMENT_NUMBER",
+                    f"{item_prefix}.distance_km",
+                    "Section optical distance must be greater than zero.",
+                )
+            )
+        for field_name, label, value in (
+            ("fiber_start", "Section fiber start", segment.fiber_start),
+            ("fiber_end", "Section fiber end", segment.fiber_end),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+            ):
+                issues.append(
+                    _error(
+                        "INVALID_PATH_SEGMENT_FIBER_RANGE",
+                        f"{item_prefix}.{field_name}",
+                        f"{label} must be a positive integer when provided.",
+                    )
+                )
+        if (segment.fiber_start is None) != (segment.fiber_end is None):
+            issues.append(
+                _error(
+                    "INCOMPLETE_PATH_SEGMENT_FIBER_RANGE",
+                    item_prefix,
+                    (
+                        "A section fiber range must include both start and "
+                        "end when either value is provided."
+                    ),
+                )
+            )
+        elif (
+            isinstance(segment.fiber_start, int)
+            and not isinstance(segment.fiber_start, bool)
+            and isinstance(segment.fiber_end, int)
+            and not isinstance(segment.fiber_end, bool)
+            and segment.fiber_start > segment.fiber_end
+        ):
+            issues.append(
+                _error(
+                    "INVALID_PATH_SEGMENT_FIBER_RANGE",
+                    f"{item_prefix}.fiber_start",
+                    "Section fiber start cannot be greater than fiber end.",
+                )
+            )
+        for key_path in _secret_key_paths(segment.source_evidence):
+            issues.append(
+                _error(
+                    "SECRET_FIELD_NOT_ALLOWED",
+                    f"{item_prefix}.source_evidence{key_path}",
+                    (
+                        "Credential- or secret-bearing fields are not allowed "
+                        "in component-section source evidence."
+                    ),
+                )
+            )
+        try:
+            json.dumps(
+                _thaw_json_value(segment.source_evidence),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            issues.append(
+                _error(
+                    "PATH_SEGMENT_SOURCE_EVIDENCE_NOT_JSON_SAFE",
+                    f"{item_prefix}.source_evidence",
+                    (
+                        "Component-section source evidence must contain only "
+                        "finite JSON-safe values."
+                    ),
+                )
+            )
+
+    if len(valid_segments) != len(path.segments):
+        return
+    if (
+        valid_segments[0].from_tid != from_tid
+        or valid_segments[-1].to_tid != to_tid
+        or any(
+            left.to_tid != right.from_tid
+            for left, right in zip(valid_segments, valid_segments[1:])
+        )
+    ):
+        issues.append(
+            _error(
+                "PATH_SEGMENT_DISCONTINUITY",
+                prefix,
+                (
+                    "Component sections must form one continuous TID chain "
+                    "between the route link's two shelves."
+                ),
+            )
+        )
+    _validate_path_segment_aggregate(
+        path.expected_loss_db,
+        tuple(segment.expected_loss_db for segment in valid_segments),
+        f"{path_prefix}.expected_loss_db",
+        "loss",
+        issues,
+    )
+    _validate_path_segment_aggregate(
+        path.distance_km,
+        tuple(segment.distance_km for segment in valid_segments),
+        f"{path_prefix}.distance_km",
+        "distance",
+        issues,
+    )
+    if path.fiber_type and (
+        any(not segment.fiber_type for segment in valid_segments)
+        or any(
+            segment.fiber_type != path.fiber_type
+            for segment in valid_segments
+        )
+    ):
+        issues.append(
+            _error(
+                "PATH_SEGMENT_FIBER_TYPE_MISMATCH",
+                f"{path_prefix}.fiber_type",
+                (
+                    "A composite path fiber type is valid only when every "
+                    "section carries the same value."
+                ),
+            )
+        )
+
+
+def _validate_path_segment_aggregate(
+    aggregate: float | None,
+    components: Sequence[float | None],
+    field_name: str,
+    label: str,
+    issues: list[RouteValidationIssue],
+) -> None:
+    if aggregate is None or any(value is None for value in components):
+        return
+    total = sum(float(value) for value in components if value is not None)
+    if not math.isclose(
+        float(aggregate),
+        total,
+        rel_tol=0.0,
+        abs_tol=0.02,
+    ):
+        issues.append(
+            _error(
+                "PATH_SEGMENT_AGGREGATE_MISMATCH",
+                field_name,
+                (
+                    f"The combined path {label} does not match the sum of its "
+                    "component sections."
+                ),
+            )
+        )
 
 
 def _route_native_fiber_readiness_findings(
@@ -3586,9 +4188,9 @@ def _r40_route_topology_issues(
             )
             continue
         path = propagation.shared_span
-        if (
-            getattr(line, "neighbor_node", "").strip().casefold()
-            != neighbor.tid.strip().casefold()
+        if not _neighbor_identity_matches_tid(
+            getattr(line, "neighbor_node", ""),
+            neighbor.tid,
         ):
             add_issue(
                 f"R4.0 local line-output {line_record_number} neighbor node "
@@ -3722,8 +4324,10 @@ def _r40_route_topology_issues(
             local_profile.line_pfg_names[local_direction]
         )
         if (
-            peer_line.neighbor_node.strip().casefold()
-            != shelf.tid.strip().casefold()
+            not _neighbor_identity_matches_tid(
+                peer_line.neighbor_node,
+                shelf.tid,
+            )
             or peer_line.neighbor_line_mux_pfg != expected_local_mux
             or peer_line.neighbor_line_demux_pfg != expected_local_demux
         ):
@@ -3845,6 +4449,106 @@ def _validate_optional_nonnegative_number(
                 "INVALID_PATH_NUMBER",
                 field_name,
                 f"{label} must be a finite non-negative number when provided.",
+            )
+        )
+
+
+def _validate_route_customer_policy(
+    policy: object,
+    issues: list[RouteValidationIssue],
+) -> None:
+    if not isinstance(policy, RouteCustomerPolicy):
+        issues.append(
+            _error(
+                "INVALID_CUSTOMER_POLICY",
+                "customer_policy",
+                "Customer route policy is invalid.",
+            )
+        )
+        return
+
+    suffix = policy.neighbor_dns_suffix
+    _validate_optional_text(
+        suffix,
+        "customer_policy.neighbor_dns_suffix",
+        "Node/neighbor DNS suffix",
+        issues,
+    )
+    if isinstance(suffix, str) and suffix.strip():
+        domain = suffix.strip().lstrip(".")
+        labels = domain.split(".")
+        if (
+            len(domain) > 253
+            or not domain
+            or any(
+                not label
+                or len(label) > 63
+                or re.fullmatch(
+                    r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?",
+                    label,
+                )
+                is None
+                for label in labels
+            )
+        ):
+            issues.append(
+                _error(
+                    "INVALID_NEIGHBOR_DNS_SUFFIX",
+                    "customer_policy.neighbor_dns_suffix",
+                    (
+                        "Node/neighbor DNS suffix must be blank or a valid DNS "
+                        "suffix such as .example.net."
+                    ),
+                )
+            )
+
+    for field_name, label, value in (
+        (
+            "a_input_patch_loss_db",
+            "A-side input patch loss",
+            policy.a_input_patch_loss_db,
+        ),
+        (
+            "a_output_patch_loss_db",
+            "A-side output patch loss",
+            policy.a_output_patch_loss_db,
+        ),
+        (
+            "z_input_patch_loss_db",
+            "Z-side input patch loss",
+            policy.z_input_patch_loss_db,
+        ),
+        (
+            "z_output_patch_loss_db",
+            "Z-side output patch loss",
+            policy.z_output_patch_loss_db,
+        ),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or not 0.0 <= float(value) <= 10.0
+        ):
+            issues.append(
+                _error(
+                    "INVALID_PATCH_LOSS_DEFAULT",
+                    f"customer_policy.{field_name}",
+                    f"{label} must be a finite number from 0 through 10 dB.",
+                )
+            )
+
+    metric = policy.colan_ospf_metric
+    if (
+        isinstance(metric, bool)
+        or not isinstance(metric, int)
+        or not 1 <= metric <= 65_535
+    ):
+        issues.append(
+            _error(
+                "INVALID_COLAN_OSPF_METRIC_DEFAULT",
+                "customer_policy.colan_ospf_metric",
+                "COLAN OSPF metric must be an integer from 1 through 65535.",
             )
         )
 
@@ -4014,6 +4718,10 @@ __all__ = [
     "DeploymentReadiness",
     "IRMCounts",
     "OpticalPath",
+    "OpticalPathSegment",
+    "PATH_SOURCE_DISCREPANCIES_KEY",
+    "PATH_SOURCE_DISCREPANCY_PENDING",
+    "PATH_SOURCE_DISCREPANCY_SUPERSEDED",
     "PathEndpointReview",
     "PROPAGATION_DIRECTIONS",
     "PROFILE_IDS",
@@ -4029,6 +4737,7 @@ __all__ = [
     "PropagationDirection",
     "ReviewState",
     "RouteLink",
+    "RouteCustomerPolicy",
     "RoutePropagationView",
     "RouteProject",
     "RouteProjectFormatError",

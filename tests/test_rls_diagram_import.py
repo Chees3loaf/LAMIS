@@ -21,6 +21,7 @@ from utils.rls_config.diagram_import import (
     DiagramImportLimits,
     PROVIDER_SCHEMA,
     PROVIDER_RESPONSE_NAME,
+    SOURCE_EVIDENCE_DISCREPANCY_CODE,
     import_route_diagram,
     load_diagram_source,
     parse_provider_result,
@@ -254,6 +255,7 @@ def _span(
         "fiber_start": 9,
         "fiber_end": 10,
         "fiber_type": "LEAF",
+        "segments": [],
         "lifecycle": "active",
         "notes": None,
     }
@@ -271,6 +273,40 @@ def _span(
         )
     ]
     return values
+
+
+def _segment(
+    order: int,
+    left: str,
+    right: str,
+    *,
+    loss: float,
+    distance: float,
+    circuit_id: str,
+    fiber_start: int,
+    fiber_end: int,
+    fiber_type: str = "LEAF",
+) -> dict[str, object]:
+    index = order - 1
+    values: dict[str, object] = {
+        "order": order,
+        "from_tid": left,
+        "to_tid": right,
+        "expected_loss_db": loss,
+        "distance_km": distance,
+        "circuit_id": circuit_id,
+        "fiber_start": fiber_start,
+        "fiber_end": fiber_end,
+        "fiber_type": fiber_type,
+    }
+    return {
+        **values,
+        "evidence": [
+            _ev(f"segments.{index}.{field}", value)
+            for field, value in values.items()
+            if field != "order"
+        ],
+    }
 
 
 def _line_endpoint(
@@ -671,7 +707,7 @@ def test_import_calls_injected_provider_and_builds_review_only_gui_rows(
     assert images[0][1] == "png"
     assert schema["additionalProperties"] is False
     assert name == PROVIDER_RESPONSE_NAME
-    assert name == "ciena_rls_route_diagram_v5"
+    assert name == "ciena_rls_route_diagram_v6"
     assert "small-red-slot-port-v1" not in system
     assert "red color alone" in normalized_system
 
@@ -745,7 +781,7 @@ def test_import_calls_injected_provider_and_builds_review_only_gui_rows(
     assert (
         rows[0]["source_evidence"]["schema_version"]
         == DIAGRAM_EVIDENCE_SCHEMA_VERSION
-        == "1.7"
+        == "1.8"
     )
     assert (
         rows[0]["source_evidence"]["status"]
@@ -1827,6 +1863,8 @@ def test_live_provider_schema_excludes_removed_r42_configuration_contract() -> N
     required = set(shelf_item["required"])
     families = set(shelf_schema["profile_family"]["enum"])
     response_required = set(PROVIDER_SCHEMA["required"])
+    span_item = PROVIDER_SCHEMA["properties"]["spans"]["items"]
+    segment_item = span_item["properties"]["segments"]["items"]
     callout_item = PROVIDER_SCHEMA["properties"]["raman_callouts"]["items"]
     callout_schema = callout_item["properties"]
 
@@ -1845,6 +1883,19 @@ def test_live_provider_schema_excludes_removed_r42_configuration_contract() -> N
         shelf_schema["site_name"]["description"]
     )
     assert "raman_callouts" in response_required
+    assert "segments" in set(span_item["required"])
+    assert set(segment_item["required"]) == {
+        "order",
+        "from_tid",
+        "to_tid",
+        "expected_loss_db",
+        "distance_km",
+        "circuit_id",
+        "fiber_start",
+        "fiber_end",
+        "fiber_type",
+        "evidence",
+    }
     assert "optical_band" in route_item["required"]
     assert set(route_schema["optical_band"]["enum"]) == {
         None,
@@ -2634,6 +2685,215 @@ def test_missing_values_low_confidence_and_duplicate_exact_ip_block(
     assert result.active_shelves[0].power_label is None
     assert result.active_shelves[0].raman_label is None
     assert result.deployable_cli is False
+
+
+def test_span_loss_raw_text_disagreement_clears_unsafe_prepopulation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "source-loss-disagreement.png"
+    path.write_bytes(_png_bytes())
+    response = _complete_response()
+    span = response["spans"][0]
+    span["expected_loss_db"] = 14.88
+    loss_evidence = next(
+        item
+        for item in span["evidence"]
+        if item["field"] == "expected_loss_db"
+    )
+    # A high-confidence normalization changed one visible digit. The
+    # source-preserving raw token is the independent guardrail.
+    loss_evidence.update(
+        {
+            "raw_text": "14.68 dB",
+            "normalized_value": "14.88",
+            "confidence": 0.99,
+        }
+    )
+
+    result = parse_provider_result(load_diagram_source(path), response)
+
+    imported = result.active_spans[0]
+    assert imported.expected_loss_db is None
+    assert any(
+        item.field == "expected_loss_db"
+        and item.raw_text == "14.68 dB"
+        and item.normalized_value == "14.88"
+        for item in imported.evidence
+    )
+    assert any(
+        issue.code == SOURCE_EVIDENCE_DISCREPANCY_CODE
+        and issue.field == "spans[1].expected_loss_db"
+        for issue in result.blocking_issues
+    )
+
+
+def test_paired_direct_span_loss_observations_must_agree(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "paired-loss-disagreement.png"
+    path.write_bytes(_png_bytes())
+    response = _complete_response()
+    span = response["spans"][0]
+    span["expected_loss_db"] = 14.68
+    first = next(
+        item
+        for item in span["evidence"]
+        if item["field"] == "expected_loss_db"
+    )
+    first.update(
+        {
+            "raw_text": "14.68 dB",
+            "normalized_value": "14.68",
+            "confidence": 0.99,
+        }
+    )
+    second = _ev("expected_loss_db", 14.88, confidence=0.98)
+    second["raw_text"] = "14.88 dB"
+    span["evidence"].append(second)
+
+    result = parse_provider_result(load_diagram_source(path), response)
+
+    assert result.active_spans[0].expected_loss_db is None
+    assert {
+        item.raw_text
+        for item in result.active_spans[0].evidence
+        if item.field == "expected_loss_db"
+    } == {"14.68 dB", "14.88 dB"}
+    assert [
+        issue.code
+        for issue in result.blocking_issues
+        if issue.field == "spans[1].expected_loss_db"
+    ].count(SOURCE_EVIDENCE_DISCREPANCY_CODE) == 1
+
+
+def test_repeated_matching_span_loss_observations_remain_prepopulated(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "matching-loss-observations.png"
+    path.write_bytes(_png_bytes())
+    response = _complete_response()
+    span = response["spans"][0]
+    loss = span["expected_loss_db"]
+    first = next(
+        item
+        for item in span["evidence"]
+        if item["field"] == "expected_loss_db"
+    )
+    first["raw_text"] = f"{loss} dB"
+    span["evidence"].append(
+        {
+            **_ev("expected_loss_db", loss, confidence=0.98),
+            "raw_text": f"{loss} dB",
+        }
+    )
+
+    result = parse_provider_result(load_diagram_source(path), response)
+
+    assert result.active_spans[0].expected_loss_db == loss
+    assert not any(
+        issue.code == SOURCE_EVIDENCE_DISCREPANCY_CODE
+        for issue in result.issues
+    )
+
+
+def test_explicit_composite_span_sections_preserve_source_provenance(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "composite-span.png"
+    path.write_bytes(_png_bytes())
+    response = _complete_response()
+    span = response["spans"][1]
+    span.update(
+        {
+            "expected_loss_db": 22.95,
+            "distance_km": 90.63,
+            "circuit_id": None,
+            "fiber_start": None,
+            "fiber_end": None,
+            "segments": [
+                _segment(
+                    1,
+                    "USQTN1-L8I2",
+                    "USSAT3-L8I2",
+                    loss=15.85,
+                    distance=58.03,
+                    circuit_id="SECTION-A",
+                    fiber_start=45,
+                    fiber_end=46,
+                ),
+                _segment(
+                    2,
+                    "USSAT3-L8I2",
+                    "USSAT4-L8R3",
+                    loss=7.10,
+                    distance=32.60,
+                    circuit_id="SECTION-B",
+                    fiber_start=1,
+                    fiber_end=2,
+                ),
+            ],
+        }
+    )
+    for evidence in span["evidence"]:
+        field = evidence["field"]
+        if field in {"expected_loss_db", "distance_km"}:
+            evidence["raw_text"] = str(span[field])
+            evidence["normalized_value"] = str(span[field])
+
+    result = parse_provider_result(load_diagram_source(path), response)
+
+    imported = result.active_spans[1]
+    assert len(imported.segments) == 2
+    assert [
+        (segment.from_tid, segment.to_tid)
+        for segment in imported.segments
+    ] == [
+        ("USQTN1-L8I2", "USSAT3-L8I2"),
+        ("USSAT3-L8I2", "USSAT4-L8R3"),
+    ]
+    assert imported.segments[0].evidence[0].field.startswith("segments.0.")
+    assert not {
+        "SPAN_SEGMENT_DISCONTINUITY",
+        "SPAN_SEGMENT_AGGREGATE_MISMATCH",
+    } & {issue.code for issue in result.blocking_issues}
+
+
+def test_composite_span_rejects_discontinuous_or_wrong_aggregate_sections(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "invalid-composite-span.png"
+    path.write_bytes(_png_bytes())
+    response = _complete_response()
+    span = response["spans"][1]
+    span["segments"] = [
+        _segment(
+            1,
+            "USQTN1-L8I2",
+            "USSAT3-L8I2",
+            loss=10.0,
+            distance=20.0,
+            circuit_id="SECTION-A",
+            fiber_start=1,
+            fiber_end=2,
+        ),
+        _segment(
+            2,
+            "WRONG-BOUNDARY",
+            "USSAT4-L8R3",
+            loss=10.0,
+            distance=20.0,
+            circuit_id="SECTION-B",
+            fiber_start=3,
+            fiber_end=4,
+        ),
+    ]
+
+    result = parse_provider_result(load_diagram_source(path), response)
+    codes = {issue.code for issue in result.blocking_issues}
+
+    assert "SPAN_SEGMENT_DISCONTINUITY" in codes
+    assert "UNKNOWN_SPAN_SEGMENT_ENDPOINT" in codes
+    assert "SPAN_SEGMENT_AGGREGATE_MISMATCH" in codes
 
 
 @pytest.mark.parametrize("bad_ip", [".133", "010.006.022.133", "10.6.22.133/24"])

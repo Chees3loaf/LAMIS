@@ -24,7 +24,12 @@ from .diagram_assets import (
     validate_workbook_diagram_for_project,
 )
 from .mop_export import TEMPLATE_SHA256, export_mop
-from .r4_0_generator import R40_PROVIDER_CATALOG
+from .r4_0_generator import (
+    CANDIDATE_ARTIFACT_KIND,
+    CANDIDATE_SAFETY_MODE,
+    DEPLOYMENT_APPROVAL_STATE,
+    R40_PROVIDER_CATALOG,
+)
 from .route_config import (
     RouteConfigBuild,
     RouteConfigError,
@@ -32,6 +37,7 @@ from .route_config import (
 )
 from .route_project import (
     DeploymentReadiness,
+    RACK_CAPACITY,
     RouteProject,
     RouteValidationIssue,
     route_native_fiber_review,
@@ -39,7 +45,7 @@ from .route_project import (
 
 
 ROUTE_BUNDLE_SCHEMA = "atlas.ciena.rls.route-deliverable-bundle"
-ROUTE_BUNDLE_SCHEMA_VERSION = "2.1"
+ROUTE_BUNDLE_SCHEMA_VERSION = "2.2"
 
 
 class RouteBundleError(ValueError):
@@ -109,7 +115,17 @@ def _issue_dict(issue: RouteValidationIssue) -> dict[str, str]:
 
 def _readiness_dict(readiness: DeploymentReadiness) -> dict[str, Any]:
     return {
-        "route_cli_ready": readiness.ready,
+        "assessment_scope": "pre_calibration_candidate_generation",
+        "candidate_generation_ready": readiness.ready,
+        # ``route_cli_ready`` historically meant that ATLAS could generate all
+        # shelf candidates.  It was too easy for a consumer to mistake that for
+        # deployment authorization, so the deployment-scoped key now fails
+        # closed and the legacy meaning has an explicit replacement above.
+        "route_cli_ready": False,
+        "deployable_cli_ready": False,
+        "deployment_approval_state": DEPLOYMENT_APPROVAL_STATE,
+        "deployment_approved": False,
+        "on_box_validate_required": True,
         "partial_cli_export_allowed": False,
         "shelves": [
             {
@@ -126,6 +142,77 @@ def _readiness_dict(readiness: DeploymentReadiness) -> dict[str, Any]:
     }
 
 
+def _commit_command_count(cli_text: object) -> int:
+    """Count executable commit lines, ignoring blank/comment text."""
+
+    count = 0
+    for raw_line in str(cli_text or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("#", "!", "//")):
+            continue
+        if line.split(maxsplit=1)[0].casefold() == "commit":
+            count += 1
+    return count
+
+
+def _candidate_summary(build: RouteConfigBuild) -> dict[str, Any]:
+    """Aggregate warning and advisory scope without conflating deployment."""
+
+    shelves: list[dict[str, Any]] = []
+    total_warnings = 0
+    total_advisories = 0
+    total_commits = 0
+    for shelf_build in build.shelf_builds:
+        artifact = shelf_build.artifact
+        manifest = dict(getattr(artifact, "manifest", {}) or {})
+        artifact_issues = tuple(getattr(artifact, "issues", ()) or ())
+        warning_count = (
+            sum(
+                getattr(issue, "severity", "") == "warning"
+                for issue in artifact_issues
+            )
+            if artifact_issues
+            else int(manifest.get("warning_count", 0) or 0)
+        )
+        advisory_count = len(
+            tuple(manifest.get("deployment_controls", ()) or ())
+        )
+        commit_count = _commit_command_count(
+            getattr(artifact, "cli_text", "")
+        )
+        total_warnings += warning_count
+        total_advisories += advisory_count
+        total_commits += commit_count
+        shelves.append(
+            {
+                "order": shelf_build.order,
+                "shelf_id": shelf_build.shelf_id,
+                "tid": shelf_build.tid,
+                "validation_warning_count": warning_count,
+                "deployment_control_advisory_count": advisory_count,
+                "warning_and_advisory_count": (
+                    warning_count + advisory_count
+                ),
+                "commit_command_count": commit_count,
+            }
+        )
+    return {
+        "candidate_generation_ready": build.ready,
+        "candidate_count": build.config_count,
+        "validation_warning_count": total_warnings,
+        "deployment_control_advisory_count": total_advisories,
+        "warning_and_advisory_count": (
+            total_warnings + total_advisories
+        ),
+        "commit_command_count": total_commits,
+        "candidate_safety_mode": CANDIDATE_SAFETY_MODE,
+        "deployment_approval_state": DEPLOYMENT_APPROVAL_STATE,
+        "deployment_approved": False,
+        "on_box_validate_required": True,
+        "shelves": shelves,
+    }
+
+
 def _validation_text(
     project: RouteProject,
     issues: tuple[RouteValidationIssue, ...],
@@ -135,6 +222,11 @@ def _validation_text(
     counts = project.irm_counts()
     errors = tuple(issue for issue in issues if issue.severity == "error")
     warnings = tuple(issue for issue in issues if issue.severity == "warning")
+    candidate_summary = (
+        _candidate_summary(config_build)
+        if config_build is not None and config_build.ready
+        else None
+    )
     endpoint_a, endpoint_z = project.endpoint_sites()
     native_fiber_status, native_fiber_token = route_native_fiber_review(
         project.links
@@ -171,6 +263,8 @@ def _validation_text(
             if config_build is not None and config_build.ready
             else "DOCUMENTED PRE-CALIBRATION CLI CANDIDATES: BLOCKED"
         ),
+        "DEPLOYMENT RESULT: NOT APPROVED",
+        "CANDIDATE SAFETY: VALIDATE WITHOUT COMMIT",
         "",
         f"Route: {project.route_code}",
         f"Title: {project.title}",
@@ -189,6 +283,10 @@ def _validation_text(
             f"{route_optical_band or 'not available'} (context only)"
         ),
         f"Rack diagrams: {project.rack_count}",
+        (
+            "Rack placement: PLANNING ONLY; frame and RU locations are not "
+            "field verified"
+        ),
         f"Distinct sites: {counts.total_distinct_sites}",
         f"Site A: {endpoint_a.code if endpoint_a is not None else 'N/A'}",
         f"Site Z: {endpoint_z.code if endpoint_z is not None else 'N/A'}",
@@ -202,8 +300,8 @@ def _validation_text(
         f"Add/Drop side unresolved: {counts.add_drop_unassigned_shelves}",
         f"Add/Drop total: {counts.total_add_drop_shelves}",
         "",
-        f"Validation errors: {len(errors)}",
-        f"Validation warnings: {len(warnings)}",
+        f"Route-project validation errors: {len(errors)}",
+        f"Route-project validation warnings: {len(warnings)}",
     ]
     for issue in issues:
         lines.append(
@@ -228,6 +326,39 @@ def _validation_text(
                 f"COLAN commands emitted: {'yes' if emitted else 'no'}"
             )
 
+    if candidate_summary is not None:
+        lines.extend(
+            [
+                "",
+                "Shelf candidate warnings and deployment advisories",
+                "--------------------------------------------------",
+                (
+                    "Shelf candidate validation warnings: "
+                    f"{candidate_summary['validation_warning_count']}"
+                ),
+                (
+                    "Shelf deployment-control advisories: "
+                    f"{candidate_summary['deployment_control_advisory_count']}"
+                ),
+                (
+                    "Total shelf warnings/advisories: "
+                    f"{candidate_summary['warning_and_advisory_count']}"
+                ),
+                (
+                    "Candidate commit commands emitted: "
+                    f"{candidate_summary['commit_command_count']}"
+                ),
+            ]
+        )
+        for shelf in candidate_summary["shelves"]:
+            lines.append(
+                f"{shelf['order']:03d} {shelf['tid']}: "
+                f"warnings={shelf['validation_warning_count']}; "
+                "deployment-control advisories="
+                f"{shelf['deployment_control_advisory_count']}; "
+                f"commit commands={shelf['commit_command_count']}"
+            )
+
     lines.extend(["", "CLI deployment gate", "-------------------"])
     if config_build is not None and config_build.ready:
         lines.extend(
@@ -235,6 +366,11 @@ def _validation_text(
                 f"Generated {config_build.config_count} complete, validated "
                 "pre-calibration CLI candidate artifact(s), one per ordered "
                 "shelf.",
+                "Candidate generation readiness is complete; deployment "
+                "approval is NOT granted.",
+                "Every raw candidate uses validate-without-commit safety. "
+                "Candidate files contain no commit command and require on-box "
+                "validation plus a separately approved deployment workflow.",
                 "Provider-specific deployment controls are included "
                 "automatically in every candidate validation report and "
                 "manifest. They are requirements, not facts observed or "
@@ -284,6 +420,7 @@ def _write_config_candidates(
         safe_tid = _safe_component(shelf_build.tid, "shelf")
         artifact = shelf_build.artifact
         artifact_manifest = dict(artifact.manifest)
+        cli_text = str(artifact.cli_text).rstrip() + "\n"
         if (
             artifact_manifest.get("release") != SUPPORTED_SOFTWARE_RELEASE
             or artifact_manifest.get("generator") != "R40ExactConfigGenerator"
@@ -292,6 +429,26 @@ def _write_config_candidates(
             raise RouteBundleError(
                 "Configuration staging rejected a non-R4.0 or unregistered "
                 "provider artifact; no route bundle was published."
+            )
+        commit_count = _commit_command_count(cli_text)
+        if (
+            artifact_manifest.get("artifact_kind")
+            != CANDIDATE_ARTIFACT_KIND
+            or artifact_manifest.get("candidate_safety_mode")
+            != CANDIDATE_SAFETY_MODE
+            or artifact_manifest.get("deployment_approval_state")
+            != DEPLOYMENT_APPROVAL_STATE
+            or artifact_manifest.get("deployment_approved") is not False
+            or artifact_manifest.get("deployable_cli") is not False
+            or artifact_manifest.get("commit_commands_emitted") is not False
+            or artifact_manifest.get("commit_command_count") != 0
+            or artifact_manifest.get("on_box_validate_required") is not True
+            or commit_count
+        ):
+            raise RouteBundleError(
+                "Configuration staging rejected an artifact that is not an "
+                "explicit validate-without-commit candidate; no route bundle "
+                "was published."
             )
         directory = configs_root / f"{shelf_build.order:03d}_{safe_tid}"
         directory.mkdir()
@@ -304,13 +461,13 @@ def _write_config_candidates(
             f"{_safe_component(shelf_build.profile_id)}"
         )
         paths = {
-            "cli": directory / f"{stem}.cli",
+            "cli": directory / f"{stem}_candidate.cli",
             "annotated": directory / f"{stem}_annotated.txt",
             "validation": directory / f"{stem}_validation.txt",
             "manifest": directory / f"{stem}_manifest.json",
         }
         paths["cli"].write_text(
-            str(artifact.cli_text).rstrip() + "\n",
+            cli_text,
             encoding="utf-8",
             newline="\n",
         )
@@ -349,6 +506,19 @@ def _write_config_candidates(
                 "colan_state": artifact_manifest.get("colan_state", ""),
                 "colan_commands_emitted": bool(
                     artifact_manifest.get("colan_commands_emitted", False)
+                ),
+                "artifact_kind": artifact_manifest["artifact_kind"],
+                "candidate_safety_mode": artifact_manifest[
+                    "candidate_safety_mode"
+                ],
+                "deployment_approved": False,
+                "commit_commands_emitted": False,
+                "commit_command_count": commit_count,
+                "validation_warning_count": int(
+                    artifact_manifest.get("warning_count", 0) or 0
+                ),
+                "deployment_control_advisory_count": int(
+                    artifact_manifest.get("deployment_control_count", 0) or 0
                 ),
                 "files": {
                     role: {
@@ -442,6 +612,7 @@ def export_route_bundle(
             config_build,
             files["configs"],
         )
+        candidate_summary = _candidate_summary(config_build)
         counts = project.irm_counts()
         native_fiber_status, native_fiber_token = route_native_fiber_review(
             project.links
@@ -465,13 +636,31 @@ def export_route_bundle(
                 "deployment_approved": False,
             },
             "rack_count": project.rack_count,
+            "rack_layout": {
+                "status": "planning_only",
+                "rack_count": project.rack_count,
+                "max_shelves_per_rack": RACK_CAPACITY,
+                "ordered_route_shelves": True,
+                "frame_locations_field_verified": False,
+                "ru_locations_field_verified": False,
+                "construction_placement_authorized": False,
+                "note": (
+                    "Rack diagrams preserve route order and the established "
+                    "planning offset; they do not assert on-site frame or RU "
+                    "locations."
+                ),
+            },
             "irm_counts": counts.to_dict(),
             "validation_issues": [_issue_dict(issue) for issue in issues],
             "deployment_readiness": _readiness_dict(readiness),
+            "configuration_candidate_validation": candidate_summary,
             "configuration_candidates_complete": True,
             "configuration_candidate_count": config_build.config_count,
             "configuration_candidates": config_records,
             "cli_candidate_files_included": True,
+            "candidate_cli_commit_commands_emitted": False,
+            "deployment_approval_state": DEPLOYMENT_APPROVAL_STATE,
+            "deployment_approved": False,
             "deployable_cli_included": False,
             "secret_material_included": False,
             "diagram_source": project.to_dict().get("diagram_source", {}),

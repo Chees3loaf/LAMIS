@@ -925,19 +925,45 @@ def parse_interface_inventory(text):
     Uses finditer (not line-anchored re.match) so the rows are still found when
     Nokia wexpect flattens the whole table onto a single space-padded line —
     otherwise this tab comes back empty (no OSC optics).
+
+    Nokia prints NO part number for third-party pluggables, so a copper SFP in
+    a LAN port is a three-value row::
+
+         1/3/OSCSFP1  SWE1GOL   3AL82260AAAA   ALLU25--OF50000209
+          1/10/LAN3   1000B-T                  NDHAEXU
+          1/10/LAN4   1000B-T                  N8DEVPQ
+
+    The previous pattern separated all four values with ``\\s+`` and had no
+    guard on the trailing groups. Because ``\\s`` spans newlines, LAN3's row
+    took ``NDHAEXU`` as its part number and then swallowed ``1/10/LAN4`` — the
+    next row's location — as its serial, after which finditer resumed past
+    LAN4 and never emitted it. One optic came out mislabelled and the other
+    vanished. Two changes fix it: ``[ \\t]+`` cannot cross a line boundary, and
+    the negative lookaheads stop a location from ever being consumed as a part
+    or serial. The final two values stay optional so a three-value row still
+    matches, and ``_classify_iface_values`` decides which column the lone
+    value belongs to.
+
+    The lookaheads also reject any token containing ``#``. In flattened output
+    there is no row terminator, so the trailing CLI prompt (``usuma1-l9r2#``)
+    otherwise becomes the last row's serial. Part numbers and serials on these
+    shelves are alphanumeric with dashes; ``#`` only ever appears in a prompt.
     """
     rows = []
     seen = set()
     for m in re.finditer(
-        r'(\d+/\d+/\S+)\s+(\S+)\s+(\S+)\s+(\S+)',
+        r'(\d+/\d+/\S+)[ \t]+(\S+)'
+        r'(?:[ \t]+(?!\d+/\d+/)(?!\S*#)(\S+))?'
+        r'(?:[ \t]+(?!\d+/\d+/)(?!\S*#)(\S+))?',
         text,
     ):
-        loc, mod, part, serial = m.groups()
+        loc, mod, third, fourth = m.groups()
         if mod == 'Type':
             continue
         if loc in seen:
             continue
         seen.add(loc)
+        part, serial = _classify_iface_values(third, fourth)
         rows.append({
             'iface_name':   loc,
             'port_type':    mod,
@@ -946,6 +972,30 @@ def parse_interface_inventory(text):
             'manufacturer': part,  # store part number where manufacturer would go
         })
     return rows
+
+
+# Nokia part numbers are '<digit><2 letters><5 digits>...' (3AL82260AAAA,
+# 3KC90395AA, 8DG63029ABNF02). No serial on these shelves takes that shape,
+# so a row carrying only one right-hand value can still be attributed to the
+# correct column.
+_NOKIA_PN_SHAPE_RE = re.compile(r'^\d[A-Za-z]{2}\d{5}')
+
+
+def _classify_iface_values(third, fourth):
+    """Return ``(part_number, serial)`` for an interface-inventory row.
+
+    With both values present the layout is unambiguous. With one, the Nokia
+    part-number shape decides: anything else is a serial, so a third-party
+    pluggable reports a blank part rather than a serial masquerading as one.
+    """
+    if third and fourth:
+        return third, fourth
+    value = third or fourth
+    if not value:
+        return '', ''
+    if _NOKIA_PN_SHAPE_RE.match(value):
+        return value, ''
+    return '', value
 
 
 def parse_software(text):

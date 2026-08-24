@@ -37,6 +37,7 @@
    - 7.2 [Connection Type](#72-connection-type)
    - 7.3 [Device-Specific Options](#73-device-specific-options)
    - 7.4 [Running Provisioning](#74-running-provisioning)
+   - 7.5 [Ciena RLS Route Builder](#75-ciena-rls-route-builder)
 8. [Credential Management](#8-credential-management)
    - 8.1 [Default Credential Order](#81-default-credential-order)
    - 8.2 [Saving New Credentials](#82-saving-new-credentials)
@@ -580,9 +581,9 @@ The output Excel file has the same structure as a live scan report: Summary shee
 
 ## 7. Mode: Provisioning
 
-> **Use this when:** You need to push initial configuration (management IP, hostname, routing, protocols) to a factory-default Nokia or Ciena device.
+> **Use this when:** You need to push initial configuration to a supported device or prepare an offline Ciena RLS route deliverable for review.
 
-The Provisioning mode connects to a single device via serial console or LAN SSH and applies a templated configuration script. It supports Nokia SAR, Nokia IXR, Nokia 1830 OLS, Ciena SAOS 6, and Ciena SAOS 10.
+The live Provisioning workflows connect to a single device via serial console or LAN SSH and apply a templated configuration script. They support Nokia SAR, Nokia IXR, Nokia 1830 OLS, Ciena SAOS 6, and Ciena SAOS 10. The **Ciena RLS Route Builder** is the single offline RLS workflow; it does not connect to a shelf or send commands.
 
 ---
 
@@ -679,6 +680,323 @@ Progress is streamed to the output terminal in the panel. Click **■ Stop** to 
 
 ---
 
+### 7.5 Ciena RLS Route Builder
+
+Select **Ciena RLS Route Builder** under **Provisioning Mode**. Route Builder
+is the single offline entry for Ciena RLS diagram import, ordered-shelf review,
+exact R4.0 configuration review, MOP preview, and final bundle export.
+
+#### Diagram-first workflow
+
+1. Select **Upload Route Diagram…**.
+2. Read and accept the privacy confirmation only if the customer has approved
+   sending the diagram to the configured external AI vision service.
+3. Review the extracted route while its status is **Pending human review**.
+4. Select each record in **Ordered route shelves**. Inspect or correct its site,
+   TID, primary OAM IP, variant/PEC, RAMAN, POWER, and shelf type. Software
+   release is fixed to `RLS R4.0`. ATLAS supplies `DC` for an ILA and `AC` for
+   Add/Drop or ROADM when power was not explicitly supplied; the value remains
+   editable. Use **Move Up** and **Move Down** to correct physical route order.
+   Select **Confirm & Next Pending** to save the current record and load the
+   next pending shelf, or **Update Selected** when you want to remain on the
+   same shelf. A reviewed role-only row displays **Confirmed - CLI Pending**
+   until an exact compatible provider payload is applied.
+5. After every imported shelf and structured RAMAN callout has been reviewed,
+   select a shelf, choose **Review Configuration…**, and complete the
+   release-specific review described below.
+6. Select **Preview MOP** and inspect the watermarked FBN/IRM workbook generated
+   from the current route snapshot.
+7. Resolve all route, shelf, review, provider, and validation blockers.
+8. Select **Export Route Bundle…**. Export is allowed only when the saved
+   preview still represents the unchanged current route.
+
+Diagram extraction uses a dedicated high-reasoning vision pass with the full
+overview and overlapping detail views where needed. It is facts-only:
+ATLAS transcribes visible route identity, shelves, adjacency, ports, span
+distance/loss, circuits, fibers, and lifecycle notes with source evidence. It
+does not invent a missing release, complete a TID/IP sequence, turn a role
+label into a hardware build, or apply configuration defaults during vision
+extraction. Extracted values remain review candidates, not approved engineering
+values.
+
+If an otherwise valid evidence rectangle crosses only the right or bottom
+image edge by at most 2.5%, ATLAS clips it to the boundary only when at least
+60% of the reported rectangle remains. The original and normalized rectangles
+are retained under evidence schema 1.8 and logged without customer values.
+Larger, negative, zero-area, or mostly out-of-frame rectangles remain invalid
+and can block route replacement when they carried identity or topology
+evidence.
+
+A coherent shelf/span route can enter pending review when an OAM IP, chassis
+label, shelf role, or site name was not transcribed; those fields must be
+corrected before configuration validation. For a visible hyphenated TID, ATLAS
+may offer its prefix as an editable site-code suggestion with explicit
+review-only provenance. It does not invent a site name. An unknown role is
+shown as **Unresolved — select shelf role**. ATLAS leaves the current route
+unchanged when the TID is missing, a shelf has neither source site data nor a
+usable TID-prefix suggestion, or shelf order, span count, or adjacent-span
+continuity is unresolved. The log identifies the exact structural field paths
+responsible for that decision.
+
+An explicit role label or an unambiguous diagram legend may support the
+planning-only Add/Drop, ILA, or ROADM classification. Legend and shelf-box
+evidence are retained separately. Role classification alone never chooses an
+exact hardware topology or configuration provider. A separate fail-closed
+resolver may later offer one non-executable provider candidate when direct
+diagram hardware facts are compatible with exactly one audited provider.
+
+When the diagram has no separate site-code, exact shelf variant, release, or
+revision label, Route Builder distinguishes controlled scope values from
+pending-review suggestions. Revision `1` and fixed product-scope release
+`RLS R4.0` receive explicit default provenance. The alphanumeric TID prefix
+before its first hyphen may be suggested as the site code, and directly
+evidenced chassis text may be suggested as the editable shelf variant. These
+are identified as workflow values rather than diagram evidence and cannot
+authorize configuration generation until reviewed.
+
+Route-title prepopulation follows a separate deterministic rule. If a directly
+printed header pair is corroborated by the first and last active terminal TIDs,
+ATLAS removes their shared `US` prefix and uses the remaining terminal labels.
+For example, `USELP1-USSAT4` with terminal TIDs `USELP1-L8R2` and
+`USSAT4-L8R3` becomes the editable route title `ELP1-SAT4`. ATLAS preserves the
+original header and terminal-TID evidence. `Ciena RLS` remains a product
+descriptor, while the printed `RL-...` value remains the route code; neither is
+part of the title. Per-shelf site-code suggestions are unchanged and
+review-only, and this title prepopulation does not authorize CLI. In MOP
+preview/export, the reviewed title appears in the FBN headline and IRM route
+cell, while the source-bound terminal display codes appear in the IRM A/Z
+cells. ATLAS falls back to the reviewed shelf site codes if that provenance no
+longer matches the title, source, or ordered endpoint TIDs.
+
+Changing the ordered route recomputes endpoint A/Z roles and the controlled
+terminal title. It invalidates the imported local-port direction suggestion
+and clears route-bound exact payloads, because the old
+`preceding`/`following` evidence no longer proves the edited topology.
+
+The import log preserves the raw source-absence count for audit and separately
+reports the values that remain unresolved after workflow accounting. For the
+latest supplied ELP1–SAT4 transcription, the 85 raw missing fields reduce to
+zero unresolved required values after the 16 role-derived POWER labels and
+other controlled scope values are applied. All 15 active spans carried direct
+`LEAF` labels in that run. The raw omissions remain in the audit. RLS R4.0
+commissioning printed p.199 and the audited legacy workbook both emit the
+exact `LEAF` token, so ATLAS may preselect `LEAF` when the direct route
+evidence is uniform; the operator must still apply it before configuration
+review. The other findings
+are controlled defaults, pending site-code/chassis suggestions, optional
+metadata, or the planned-removal shelf. This does not bypass review: all 16
+active shelves and all 15 optical paths still require explicit disposition.
+
+When the route header explicitly prints `C`, `L`, or `C+L`, ATLAS transcribes
+that optical-band observation with direct evidence and shows it as read-only
+exact-review context. It is not copied into every shelf or treated as a
+software release. The route-wide band may narrow the compatible review list
+and populate a sole catalog candidate, but it cannot qualify the installed
+BOM, create a provider payload, or authorize CLI. Stronger directly evidenced
+per-shelf band facts remain authoritative, and a conflict blocks the
+incompatible choice. Missing or unverified band evidence leaves the context
+blank.
+
+ATLAS refuses to change shelf selection, route order, or remove a shelf while
+the shelf editor contains unapplied changes. Apply the changes or clear the
+editor first; visible edits are never silently discarded.
+
+`R2`, `R4`, `R6-300`, `R8-300`, and labels such as `R4/R2 600mm` identify
+physical chassis families, not software releases. Add/Drop, ILA, and ROADM are
+site roles rather than complete configuration variants. A blank RAMAN field is
+not treated as “No Raman,” and a visible span-loss number still requires review
+of whether it represents planned expected loss or measured actual loss.
+
+Use the route-level **Native CLI fiber type** selector and **Apply to all
+spans** once for the whole route. The diagram label remains visible as source
+evidence, while the selected value must be an exact audited RLS R4.0 native
+token. A uniform directly evidenced `LEAF` route may preselect `LEAF`, but
+ATLAS does not translate it into `Enhanced LEAF` or confirm it without the
+operator.
+Changing this route-wide choice clears existing exact-provider payloads and
+endpoint-path reviews and makes the prior MOP preview stale.
+
+#### Review Configuration for the selected shelf
+
+The selected shelf must use one of the supported RLS R4.0 Add/Drop, ILA, or
+ROADM roles. ATLAS first requires every imported shelf and structured RAMAN
+callout in the route to be reviewed; this prevents later identity corrections
+from invalidating exact-provider work already performed elsewhere.
+**Review Configuration…** then opens the exact-provider editor. A stored valid
+versioned payload is reloaded. Current exact payload schema is 1.5. Schema 1.4
+remains readable when it carries its original numeric site identity; schemas
+1.2 and 1.3 require deliberate re-review. Older
+payloads are retained but must be deliberately re-reviewed when their
+provider, line-cardinality, or neighbor semantics differ; they are never
+regenerated silently. Otherwise, ATLAS may populate a review-only
+provider candidate when high-confidence direct chassis, PEC/module, optical
+band, topology, protection, or SRA facts leave exactly one compatible audited
+provider. Missing, ambiguous, conflicting, or unsupported-SRA evidence leaves
+the provider blank. Provider and direction suggestions are explicitly
+non-executable and still require installed-inventory review and validation.
+ATLAS prepopulates every applicable reviewed route value: shelf/site identity,
+primary OAM candidate, OSPF area, adjacent neighbor TID, circuit/link name,
+reviewed native fiber, directional loss, distance, source fiber range, and the
+original diagram fiber label. Passive span facts without an exact request
+field are shown read-only. The activity log records privacy-safe counts of
+prepopulated fields, controlled derivations/defaults, and manual review groups.
+Explicitly choose one compatible audited layout, then review the fixed
+BOM/discriminators, exact target build, Identity, OAM, both local line/PFG
+records, and workbook-field context. ATLAS automatically includes the
+provider-specific inventory, runtime-engineering, build, staging, and packout
+controls in the candidate validation report and manifest. These background
+controls are requirements, not claims that ATLAS observed or verified the
+physical shelf. Select **Validate & Preview**, review all three artifacts, and
+select **Apply Reviewed Configuration** to save that exact request on the
+selected shelf. Other shelves' reviewed payloads are preserved.
+
+Confirm whether the first fixed local line-output faces the route A-side
+(preceding shelf) or Z-side (following shelf); the second faces the other
+side. ATLAS first uses a
+directly evidenced local output port—and slot when necessary—to match the
+preselected provider's immutable line map. When the vision result omits
+all endpoint observations, a uniquely preselected provider may use its audited
+route-role convention as a non-executable fallback. Ambiguous or conflicting
+endpoint evidence remains blank and never falls back. A resolved choice loads
+the adjacent neighbor, link, fiber, and loss into both line-record tabs
+immediately. The assignment maps side-keyed diagram facts into the matching
+fixed local outputs; it does not only rename the tabs. Changing the assignment
+swaps the complete edited line records so no values are discarded. ATLAS
+keeps each span endpoint's egress CLI link name and expected loss
+independently: the ordered from shelf is A→Z and the to shelf is Z→A. Apply
+refuses route identity/OAM/OSPF or
+adjacent-path mismatches, and closing with unapplied edits asks before
+discarding them.
+
+For Add/Drop and ROADM, one RLA degree is already bidirectional: its line mux
+transmits and paired line demux receives, so the represented terminal degree
+carries both A→Z and Z→A traffic. At a first or last route shelf, the other
+degree of a two-degree provider can be outside the uploaded route. ATLAS
+leaves it blank for independently engineered neighbor, link, and loss values;
+that blank degree is additional hardware, not the return route.
+
+For the DLE ILA, the two records are instead unidirectional amplifier
+through-paths. PFG-1-to-2 uses its output-side neighbor downstream and the
+opposite-side neighbor upstream; PFG-2-to-1 swaps them. ATLAS rejects using
+one neighbor for both physical sides.
+
+RLS 4.0 vendor material supports broader Add/Drop, ILA, ROADM,
+protected-ROADM, and DCI families, but a role name or variant alone cannot
+select the chassis, topology, band, module PEC/slot inventory, add/drop
+structure, protection design, or exact path endpoints. ATLAS therefore does
+not call the quarantined legacy workbook generator and does not describe its
+fixed assumptions as vendor defaults. Current exact scope contains these six
+audited providers:
+
+- two-degree C-band CDA Add/Drop using R4, two RLA12-C modules, and local
+  CCMD16-C with no SRA;
+- two-degree C-band CDC ROADM using R4, two RLA32-C modules, CCMD8x24-C,
+  CFIM1/CFIM2/OMC2, and no SRA;
+- one-degree C+L RLA12/LRU12 terminal core on R4 with no SRA;
+- the same one-degree C+L terminal core with the audited slot-6 C+L SRA;
+- R2 slot-1 C+L DLE ILA, single rail, no SRA/protection/cascade, OSPFv2 RNE,
+  and no direct-DCN COLAN; and
+- the same R2 C+L DLE ILA core with the audited slot-4 C+L SRA.
+
+Both SRA providers remain disabled pre-calibration candidates and require the
+paired endpoint, fixed slot/port map, approved runtime engineering, OTDR
+go/no-go, and activation-alarm gates described by the vendor audit.
+
+The Project panel persists one route customer policy. Its optional DNS suffix
+prepopulates shelf hostnames and adjacent-neighbor identities as FQDNs while
+keeping member/shelf identity as the bare TID. Blank suffix keeps those values
+as bare TIDs. Independent editable A- and Z-facing patch-loss defaults seed
+two-sided shelves; the known-good route starts at 0.5/0.5 dB on the A-facing
+input/output pair and 0.2/0.2 dB on the Z-facing pair. A route-facing terminal
+degree starts at 0.5/0.5 dB at either endpoint. The policy also carries the
+optional terminal-COLAN OSPF metric. Changing any policy value invalidates
+stored route-bound payloads and requires fresh validation.
+
+Add/Drop and ROADM terminals open with COLAN explicitly deferred, so factory
+staging remains available without a customer DCN design. If a complete
+customer-approved design is supplied, choose one all-or-nothing `colan-a` or
+`colan-x` record. Deferred candidates emit no COLAN interface or routing
+commands and carry warning `TERMINAL_COLAN_DEFERRED`; configured records are
+strictly validated. ATLAS never derives COLAN from the diagram OAM IP. ILA
+shelves have no COLAN, so those controls are hidden and no COLAN CLI can be
+generated. The customer owns NTP configuration; the RLS Route Builder does not
+request, store, validate, or emit NTP settings.
+
+ATLAS prepopulates target build/schema as editable `4.00.00`, the build
+documented by the supplied R4.0.0 upgrade procedures. This is an unverified
+planning default, not target-shelf telemetry; replace it when the shelf is on
+another R4.0 build. Physical frame/rack location is optional. Leaving it blank
+omits the complete shelf-location command. Numeric site ID is also optional
+during staging: a blank value is stored as `null` and omits the complete
+site-identity command rather than inventing ID `0`. ATLAS still requires real
+site and TID identity and never substitutes either one for the optional frame
+or site ID.
+
+An advisory provider or line-map preselection is only a shortcut into review;
+it is never a generated request or CLI authorization. The legacy-assumption
+narrative and exact column-B `<...>` input contract are shown as review context,
+while quarantined spreadsheet formulas and commands are never executed. Every
+output remains a documented pre-calibration candidate. Raw CLI uses `batch`,
+the dependency-safe configuration commands, `validate`, and `quit`; it
+contains no `commit`. Run it only against the matching reviewed R4.0 build,
+capture a successful on-box validation result, and use a separate explicitly
+approved deployment workflow for any later commit.
+
+#### MOP preview and final bundle boundary
+
+The styled MOP uses the controlled Ciena FBN workbook as an immutable template.
+FBN creates one rack diagram for every eight ordered shelves and places
+additional racks to the right. The SITE/TID/IP/RAMAN/POWER register, route
+summary, and IRM count-driver cells come from the same route project. Existing
+IRM formulas and the requested checklist, procedure, packout, fibering, test,
+script, label, and teardown sheets are preserved.
+
+The uploaded customer diagram is normalized and embedded directly in the
+workbook's **Diagram** tab; the generated file contains no external image
+relationship. Saved route projects retain hashes and provenance rather than
+the source pixels. After reopening a project, select **Reattach Diagram…** and
+choose the matching original source before preview or export. Reattachment is
+local-only: it verifies the saved hashes and does not call the vision service
+or replace the reviewed route.
+
+**Preview MOP** creates a temporary watermarked workbook and records a
+fingerprint of that exact route snapshot. Preview is available while
+documentation blockers are being resolved, but it does not make the route
+configuration-ready. Every route, order, shelf, OSPF, span, or configuration
+change makes the prior preview stale. Run **Preview MOP** again after the last
+change; **Export Route Bundle…** refuses to continue without a current preview.
+
+There is no separate RLS configuration export or **Export Styled FBN MOP**
+action. Final export revalidates and regenerates the MOP, every eligible
+per-shelf pre-calibration configuration candidate, annotated reviews,
+validation report, route project, and hash manifest from the unchanged current
+snapshot.
+
+Route publication fails closed as one transaction. If any shelf is unsupported,
+incomplete, unreviewed, lacks an authorized provider, has a stale configuration,
+or fails validation, ATLAS publishes no final bundle and no partial
+CLI/configuration set. Consequently, confirming a role-only R4.0 row does not
+make it exportable; every R4.0 shelf needs a valid compatible exact payload.
+Before asking for a destination, Route Builder runs a fresh readiness preflight
+and lists grouped next actions. A blocked attempt starts no export worker and
+creates no staging artifacts. Accepted RAMAN/SRA evidence with no compatible
+audited provider is reported as a provider-capability gap rather than a generic
+unreviewed configuration.
+ATLAS rejects projects or diagram rows that explicitly identify another
+software release before they can replace the current Route Builder state; it
+never rewrites them as R4.0.
+Every optical path must also be confirmed or corrected; a pending/manual path
+blocks the whole atomic configuration set.
+
+See [Ciena RLS Route Builder](docs/RLS_ROUTE_BUILDER.md) for extraction
+evidence, field mappings, template provenance, and bundle contents. See
+[Integrated Ciena RLS configuration review](docs/RLS_CONFIG_GENERATOR.md)
+for exact R4.0 field and deployment-review rules, and
+[Ciena RLS 4.0 vendor audit](docs/RLS_R4_0_VENDOR_AUDIT.md) for the page-backed
+R4.0 support boundary.
+
+---
+
 ## 8. Credential Management
 
 ATLAS stores device credentials in an encrypted file at `%APPDATA%\ATLAS\credentials_config.json`. Credentials are encrypted with Fernet symmetric encryption. The key is unique to your machine and user account.
@@ -754,11 +1072,21 @@ Device Sheet (one per IP)
 
 ### Log Files
 
-Every ATLAS run writes a timestamped log file to `%APPDATA%\ATLAS\logs\`. Log level detail:
+Every ATLAS run writes a timestamped log file to `%APPDATA%\ATLAS\logs\`.
+The shared output terminal at the bottom of the window mirrors the same
+redacted activity stream. Operator actions, background-task transitions,
+validation results, cancellations, output paths, counts, warnings, and
+failures are therefore available both during the run and afterward.
+
+ATLAS deliberately does not record passwords, API keys, tokens, or raw
+secret-bearing request payloads. Credential-like values that reach the logging
+system are replaced with `[REDACTED]`.
+
+Log level detail:
 
 | Level | Content |
 |-------|---------|
-| INFO | Run start/end, devices found, files saved |
+| INFO | Operator actions, run phases, devices found, validation outcomes, files saved |
 | DEBUG | Every CLI command sent, every response received, all SSH connection events |
 | WARNING | SSH key exchange issues, file validation rejections |
 | ERROR | Unexpected exceptions |

@@ -22,14 +22,16 @@ from PIL import Image, UnidentifiedImageError
 
 WORKBOOK_DIAGRAM_MARKER_KEY = "workbook_diagram"
 WORKBOOK_DIAGRAM_REPRESENTATION = "normalized_png"
-WORKBOOK_DIAGRAM_NORMALIZATION = "canonical-rgb-png-v2-max2048"
+WORKBOOK_DIAGRAM_NORMALIZATION = "canonical-rgb-png-v3-full-resolution-max4096"
+LEGACY_WORKBOOK_DIAGRAM_NORMALIZATION_V2 = "canonical-rgb-png-v2-max2048"
 
 MAX_WORKBOOK_DIAGRAM_IMAGES = 32
 MAX_WORKBOOK_DIAGRAM_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_WORKBOOK_DIAGRAM_TOTAL_BYTES = 80 * 1024 * 1024
-MAX_WORKBOOK_DIAGRAM_DIMENSION = 2_048
-MAX_WORKBOOK_DIAGRAM_PIXELS = 2_048 * 2_048
+MAX_WORKBOOK_DIAGRAM_DIMENSION = 4_096
+MAX_WORKBOOK_DIAGRAM_PIXELS = 4_096 * 4_096
 MAX_WORKBOOK_DIAGRAM_TEXT = 4096
+_LEGACY_V2_MAX_DIMENSION = 2_048
 
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -106,7 +108,7 @@ def _workbook_png(
     data: bytes,
     field: str,
 ) -> tuple[bytes, int, int]:
-    """Create one deterministic, opaque, workbook-sized PNG."""
+    """Create one deterministic opaque PNG without reducing its resolution."""
 
     try:
         with Image.open(BytesIO(data)) as source:
@@ -116,23 +118,19 @@ def _workbook_png(
             rgb = source.convert("RGB")
             try:
                 width, height = rgb.size
-                if max(width, height) > MAX_WORKBOOK_DIAGRAM_DIMENSION:
-                    scale = MAX_WORKBOOK_DIAGRAM_DIMENSION / max(
-                        width,
-                        height,
+                if (
+                    width > MAX_WORKBOOK_DIAGRAM_DIMENSION
+                    or height > MAX_WORKBOOK_DIAGRAM_DIMENSION
+                    or width * height > MAX_WORKBOOK_DIAGRAM_PIXELS
+                ):
+                    raise DiagramAssetError(
+                        f"{field} exceeds the full-resolution workbook "
+                        "image limits."
                     )
-                    resized = rgb.resize(
-                        (
-                            max(1, round(width * scale)),
-                            max(1, round(height * scale)),
-                        ),
-                        Image.Resampling.LANCZOS,
-                    )
-                else:
-                    resized = rgb.copy()
+                canonical = rgb.copy()
                 try:
                     output = BytesIO()
-                    resized.save(
+                    canonical.save(
                         output,
                         format="PNG",
                         compress_level=6,
@@ -140,11 +138,11 @@ def _workbook_png(
                     )
                     return (
                         output.getvalue(),
-                        resized.width,
-                        resized.height,
+                        canonical.width,
+                        canonical.height,
                     )
                 finally:
-                    resized.close()
+                    canonical.close()
             finally:
                 rgb.close()
     except DiagramAssetError:
@@ -152,6 +150,59 @@ def _workbook_png(
     except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
         raise DiagramAssetError(
             f"{field} could not be normalized for the workbook: {exc}"
+        ) from exc
+
+
+def _legacy_v2_workbook_png(data: bytes, field: str) -> tuple[bytes, int, int]:
+    """Reproduce the retired v2 normalization only for marker migration.
+
+    Saved projects contain the digest and dimensions of their original v2
+    derivative. Recomputing that derivative from the reattached full source
+    lets ATLAS authenticate the same pixels before upgrading to v3; the legacy
+    derivative is never embedded in a new workbook.
+    """
+
+    try:
+        with Image.open(BytesIO(data)) as source:
+            if str(source.format or "").upper() != "PNG":
+                raise DiagramAssetError(f"{field} is not a PNG image.")
+            source.load()
+            rgb = source.convert("RGB")
+            try:
+                width, height = rgb.size
+                if max(width, height) > _LEGACY_V2_MAX_DIMENSION:
+                    scale = _LEGACY_V2_MAX_DIMENSION / max(width, height)
+                    normalized = rgb.resize(
+                        (
+                            max(1, round(width * scale)),
+                            max(1, round(height * scale)),
+                        ),
+                        Image.Resampling.LANCZOS,
+                    )
+                else:
+                    normalized = rgb.copy()
+                try:
+                    output = BytesIO()
+                    normalized.save(
+                        output,
+                        format="PNG",
+                        compress_level=6,
+                        optimize=False,
+                    )
+                    return (
+                        output.getvalue(),
+                        normalized.width,
+                        normalized.height,
+                    )
+                finally:
+                    normalized.close()
+            finally:
+                rgb.close()
+    except DiagramAssetError:
+        raise
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise DiagramAssetError(
+            f"{field} could not be checked against legacy provenance: {exc}"
         ) from exc
 
 
@@ -411,7 +462,13 @@ def validate_workbook_diagram_for_project(
             "normalization",
             WORKBOOK_DIAGRAM_NORMALIZATION,
         )
-        if normalization != WORKBOOK_DIAGRAM_NORMALIZATION:
+        legacy_v2_marker = (
+            normalization == LEGACY_WORKBOOK_DIAGRAM_NORMALIZATION_V2
+        )
+        if (
+            normalization != WORKBOOK_DIAGRAM_NORMALIZATION
+            and not legacy_v2_marker
+        ):
             raise DiagramAssetError(
                 "workbook diagram normalization rule is unsupported."
             )
@@ -419,10 +476,17 @@ def validate_workbook_diagram_for_project(
             "max_render_dimension",
             MAX_WORKBOOK_DIAGRAM_DIMENSION,
         )
-        if max_render_dimension != MAX_WORKBOOK_DIAGRAM_DIMENSION:
+        expected_render_dimension = (
+            _LEGACY_V2_MAX_DIMENSION
+            if legacy_v2_marker
+            else MAX_WORKBOOK_DIAGRAM_DIMENSION
+        )
+        if max_render_dimension != expected_render_dimension:
             raise DiagramAssetError(
                 "workbook diagram render-dimension rule is unsupported."
             )
+    if marker is None:
+        legacy_v2_marker = False
 
     if diagram is None:
         if required:
@@ -546,7 +610,23 @@ def validate_workbook_diagram_for_project(
                 raise DiagramAssetError(
                     "workbook diagram image record order is invalid."
                 )
-            expected = image.provenance_dict(order=order)
+            if legacy_v2_marker:
+                legacy_data, legacy_width, legacy_height = (
+                    _legacy_v2_workbook_png(
+                        image.png_bytes,
+                        f"attached diagram image {order}",
+                    )
+                )
+                expected = {
+                    "order": order,
+                    "source_label": image.source_label,
+                    "source_part": image.source_part,
+                    "normalized_sha256": sha256(legacy_data).hexdigest(),
+                    "width": legacy_width,
+                    "height": legacy_height,
+                }
+            else:
+                expected = image.provenance_dict(order=order)
             for key in (
                 "source_label",
                 "source_part",

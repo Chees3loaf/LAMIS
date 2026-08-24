@@ -16,8 +16,12 @@ from PIL import Image
 
 from utils.rls_config.diagram_assets import (
     DiagramAssetError,
+    LEGACY_WORKBOOK_DIAGRAM_NORMALIZATION_V2,
+    MAX_WORKBOOK_DIAGRAM_DIMENSION,
+    WORKBOOK_DIAGRAM_NORMALIZATION,
     WorkbookDiagram,
     WorkbookDiagramImage,
+    validate_workbook_diagram_for_project,
     workbook_diagram_from_source,
 )
 from utils.rls_config.mop_export import (
@@ -25,6 +29,7 @@ from utils.rls_config.mop_export import (
     DEFAULT_TEMPLATE_PATH,
     DIAGRAM_DRAWING_PART,
     DIAGRAM_DRAWING_RELS_PART,
+    DIAGRAM_SHEET_PART,
     FBN_PART,
     IRM_PART,
     MopExportError,
@@ -118,6 +123,27 @@ def _terminal_title_route_snapshot() -> dict[str, object]:
             "deployable_cli": False,
         },
     }
+    return route
+
+
+def _authoritative_irm_count_snapshot() -> dict[str, object]:
+    """Route whose 14/2/0/0 drivers match the audited template caches."""
+
+    route = _route_snapshot()
+    route["route_code"] = "RL-0037805"
+    route["title"] = "ELP1-SAT4"
+    route["sites"] = route["sites"][:16]
+    route["sites"][0]["code"] = "ELP1"
+    route["sites"][-1]["code"] = "SAT4"
+    route["shelves"] = route["shelves"][:16]
+    for index, shelf in enumerate(route["shelves"]):
+        shelf["site_key"] = route["sites"][index]["site_key"]
+        shelf["profile_id"] = "ila"
+        shelf["shelf_variant"] = "K74-C894-900"
+    route["shelves"][0]["profile_id"] = "roadm_a"
+    route["shelves"][0]["shelf_variant"] = "K74-C890-900"
+    route["shelves"][-1]["profile_id"] = "roadm_z"
+    route["shelves"][-1]["shelf_variant"] = "K74-C890-900"
     return route
 
 
@@ -246,12 +272,28 @@ class MopExportFidelityTests(unittest.TestCase):
         with zipfile.ZipFile(self.output) as result:
             self.assertIsNone(result.testzip())
 
+    def test_only_fbn_is_selected_and_workbook_is_not_grouped(self) -> None:
+        with zipfile.ZipFile(self.output) as result:
+            selected_parts = []
+            for sheet_number in range(1, 15):
+                part = f"xl/worksheets/sheet{sheet_number}.xml"
+                root = _xml(result, part)
+                view = root.find(f"{Q('sheetViews')}/{Q('sheetView')}")
+                if view is not None and view.get("tabSelected") == "1":
+                    selected_parts.append(part)
+            self.assertEqual([FBN_PART], selected_parts)
+
+            workbook = _xml(result, WORKBOOK_PART)
+            view = workbook.find(f"{Q('bookViews')}/{Q('workbookView')}")
+            self.assertEqual("0", view.get("activeTab"))
+
     def test_every_non_dynamic_package_part_is_byte_exact(self) -> None:
         changed_parts = {
             FBN_PART,
             IRM_PART,
             WORKBOOK_PART,
             CALC_CHAIN_PART,
+            DIAGRAM_SHEET_PART,
         }
         with zipfile.ZipFile(DEFAULT_TEMPLATE_PATH) as source, zipfile.ZipFile(
             self.output
@@ -265,7 +307,7 @@ class MopExportFidelityTests(unittest.TestCase):
                         f"Static OOXML part was rewritten: {part}",
                     )
 
-    def test_irm_formula_nodes_are_preserved_exactly_and_recalculate(self) -> None:
+    def test_irm_formula_nodes_and_current_cached_results_are_preserved(self) -> None:
         with zipfile.ZipFile(DEFAULT_TEMPLATE_PATH) as source, zipfile.ZipFile(
             self.output
         ) as result:
@@ -276,7 +318,16 @@ class MopExportFidelityTests(unittest.TestCase):
             self.assertEqual(186, len(original_formulas))
             self.assertEqual(original_formulas, rendered_formulas)
             for formula in rendered.findall(f".//{Q('f')}"):
-                self.assertIsNone(formula.getparent().find(Q("v")))
+                cached = formula.getparent().find(Q("v"))
+                self.assertIsNotNone(cached)
+                self.assertIsNotNone(cached.text)
+
+            self.assertEqual("8", _cell_text(rendered, "G15"))
+            self.assertEqual("S01", _cell_text(rendered, "H15"))
+            self.assertEqual("S18", _cell_text(rendered, "I15"))
+            self.assertEqual("17", _cell_text(rendered, "F24"))
+            self.assertEqual("17", _cell_text(rendered, "G24"))
+            self.assertEqual("10 ft", _cell_text(rendered, "H47"))
 
             sheet_view = rendered.find(f"{Q('sheetViews')}/{Q('sheetView')}")
             self.assertEqual("0", sheet_view.get("showFormulas"))
@@ -305,12 +356,54 @@ class MopExportFidelityTests(unittest.TestCase):
                 chain_references,
             )
 
+    def test_all_186_formula_caches_match_authoritative_reference_counts(
+        self,
+    ) -> None:
+        reference_output = self.output.with_name("irm-reference.xlsx")
+        export_mop(_authoritative_irm_count_snapshot(), reference_output)
+
+        with zipfile.ZipFile(DEFAULT_TEMPLATE_PATH) as source, zipfile.ZipFile(
+            reference_output
+        ) as result:
+            original = _xml(source, IRM_PART)
+            rendered = _xml(result, IRM_PART)
+            for original_cell in original.findall(f".//{Q('c')}"):
+                if original_cell.find(Q("f")) is None:
+                    continue
+                reference = original_cell.get("r")
+                rendered_cell = _cell(rendered, reference)
+                self.assertEqual(
+                    _cell_text(original, reference),
+                    _cell_text(rendered, reference),
+                    f"Incorrect cached IRM result at {reference}",
+                )
+                self.assertEqual(
+                    original_cell.get("t"),
+                    rendered_cell.get("t"),
+                    f"Incorrect cached IRM result type at {reference}",
+                )
+
     def test_ordered_shelves_are_chunked_at_eight_per_rack(self) -> None:
         with zipfile.ZipFile(self.output) as result:
             fbn = _xml(result, FBN_PART)
             self.assertEqual("RACK 1 (FRONT)", _cell_text(fbn, "F2"))
             self.assertEqual("RACK 2 (FRONT)", _cell_text(fbn, "N2"))
             self.assertEqual("RACK 3 (FRONT)", _cell_text(fbn, "V2"))
+            self.assertEqual(
+                "RACK 1 — PLANNING LAYOUT\n"
+                "RU LOCATIONS NOT FIELD VERIFIED",
+                _cell_text(fbn, "D50"),
+            )
+            self.assertEqual(
+                "RACK 2 — PLANNING LAYOUT\n"
+                "RU LOCATIONS NOT FIELD VERIFIED",
+                _cell_text(fbn, "L50"),
+            )
+            self.assertEqual(
+                "RACK 3 — PLANNING LAYOUT\n"
+                "RU LOCATIONS NOT FIELD VERIFIED",
+                _cell_text(fbn, "T50"),
+            )
 
             all_values = {
                 cell.get("r"): "".join(cell.find(Q("is")).itertext())
@@ -377,16 +470,31 @@ class MopExportFidelityTests(unittest.TestCase):
                 child_names.index("pageSetup"),
             )
 
-    def test_summary_uses_real_per_family_release_and_variant(self) -> None:
+    def test_summary_preserves_fixed_hardware_labels_and_dynamic_counts(
+        self,
+    ) -> None:
         with zipfile.ZipFile(self.output) as result:
             fbn = _xml(result, FBN_PART)
-            # Every family uses the fixed R4.0 contract; variants remain honest.
-            self.assertEqual("RLS R4.0 ADD/DROP", _cell_text(fbn, "AB8"))
-            self.assertEqual("(2) MIXED Shelves", _cell_text(fbn, "AB9"))
-            self.assertEqual("RLS R4.0 ROADM", _cell_text(fbn, "AD8"))
-            self.assertEqual("(8) K74-ROADM Shelves", _cell_text(fbn, "AD9"))
-            self.assertEqual("RLS R4.0 ILAs", _cell_text(fbn, "AF8"))
-            self.assertEqual("(8) MIXED Shelves", _cell_text(fbn, "AF9"))
+            self.assertEqual("R4 ADD/DROP", _cell_text(fbn, "AB8"))
+            self.assertEqual(
+                "(2) K74-C948-900 Shelves",
+                _cell_text(fbn, "AB9"),
+            )
+            self.assertEqual(
+                "Includes (1) RLA 64x1 each",
+                _cell_text(fbn, "AB10"),
+            )
+            self.assertEqual("495", _cell(fbn, "AB10").get("s"))
+            self.assertEqual("R4 ROADM", _cell_text(fbn, "AD8"))
+            self.assertEqual(
+                "(8) K74-C890-900 Shelves",
+                _cell_text(fbn, "AD9"),
+            )
+            self.assertEqual("R2 ILAs", _cell_text(fbn, "AF8"))
+            self.assertEqual(
+                "(8) K74-C894-900 Shelves",
+                _cell_text(fbn, "AF9"),
+            )
 
     def test_irm_drivers_match_exact_fbn_profile_register(self) -> None:
         with zipfile.ZipFile(self.output) as result:
@@ -435,9 +543,20 @@ class MopDiagramEmbeddingTests(unittest.TestCase):
             self.output
         ) as result:
             self.assertIsNone(result.testzip())
+            source_sheet = _xml(source, DIAGRAM_SHEET_PART)
+            rendered_sheet = _xml(result, DIAGRAM_SHEET_PART)
+            source_view = source_sheet.find(
+                f"{Q('sheetViews')}/{Q('sheetView')}"
+            )
+            rendered_view = rendered_sheet.find(
+                f"{Q('sheetViews')}/{Q('sheetView')}"
+            )
+            self.assertEqual("1", source_view.get("tabSelected"))
+            self.assertEqual("0", rendered_view.get("tabSelected"))
+            source_view.set("tabSelected", "0")
             self.assertEqual(
-                source.read("xl/worksheets/sheet4.xml"),
-                result.read("xl/worksheets/sheet4.xml"),
+                etree.tostring(source_sheet, method="c14n"),
+                etree.tostring(rendered_sheet, method="c14n"),
             )
             self.assertEqual(
                 source.read("xl/worksheets/_rels/sheet4.xml.rels"),
@@ -491,6 +610,7 @@ class MopDiagramEmbeddingTests(unittest.TestCase):
                 IRM_PART,
                 WORKBOOK_PART,
                 CALC_CHAIN_PART,
+                DIAGRAM_SHEET_PART,
                 DIAGRAM_DRAWING_PART,
             }
             for part in source.namelist():
@@ -626,6 +746,128 @@ class MopDiagramEmbeddingTests(unittest.TestCase):
             ["document image 2", "document image 1"],
             [item.source_label for item in docx.images],
         )
+
+    def test_full_resolution_raster_is_not_downsampled_before_embedding(
+        self,
+    ) -> None:
+        data = _png_bytes((7, 8, 9), width=2300, height=1200)
+        diagram = workbook_diagram_from_source(
+            SimpleNamespace(
+                file_name="full-resolution-route.png",
+                source_type="png",
+                sha256=hashlib.sha256(data).hexdigest(),
+                images=(
+                    SimpleNamespace(
+                        source_label="full-resolution-route.png",
+                        source_part="full-resolution-route.png",
+                        normalized_sha256=hashlib.sha256(data).hexdigest(),
+                        width=2300,
+                        height=1200,
+                        format="png",
+                        data=data,
+                        view_kind="overview",
+                        source_image_index=0,
+                    ),
+                ),
+            )
+        )
+        image = diagram.images[0]
+        self.assertGreater(image.width, 2048)
+        self.assertEqual((2300, 1200), (image.width, image.height))
+        self.assertEqual(4096, MAX_WORKBOOK_DIAGRAM_DIMENSION)
+        self.assertEqual(
+            "canonical-rgb-png-v3-full-resolution-max4096",
+            WORKBOOK_DIAGRAM_NORMALIZATION,
+        )
+
+        export_mop(
+            _route_with_workbook_diagram(diagram),
+            self.output,
+            diagram=diagram,
+        )
+        with zipfile.ZipFile(self.output) as result:
+            embedded = result.read(
+                "xl/media/atlas_route_diagram_001.png"
+            )
+            self.assertEqual(image.png_bytes, embedded)
+            self.assertEqual(
+                image.normalized_sha256,
+                hashlib.sha256(embedded).hexdigest(),
+            )
+            with Image.open(BytesIO(embedded)) as embedded_image:
+                self.assertEqual((2300, 1200), embedded_image.size)
+
+    def test_v2_marker_authenticates_then_migrates_full_resolution_pixels(
+        self,
+    ) -> None:
+        data = _png_bytes((7, 8, 9), width=3000, height=1000)
+        diagram = workbook_diagram_from_source(
+            SimpleNamespace(
+                file_name="legacy-route.png",
+                source_type="png",
+                sha256=hashlib.sha256(data).hexdigest(),
+                images=(
+                    SimpleNamespace(
+                        source_label="legacy-route.png",
+                        source_part="legacy-route.png",
+                        width=3000,
+                        height=1000,
+                        format="png",
+                        data=data,
+                        view_kind="overview",
+                        source_image_index=0,
+                    ),
+                ),
+            )
+        )
+        with Image.open(BytesIO(diagram.images[0].png_bytes)) as source:
+            legacy = source.convert("RGB").resize(
+                (2048, 683),
+                Image.Resampling.LANCZOS,
+            )
+            try:
+                output = BytesIO()
+                legacy.save(
+                    output,
+                    format="PNG",
+                    compress_level=6,
+                    optimize=False,
+                )
+            finally:
+                legacy.close()
+        legacy_data = output.getvalue()
+        marker = diagram.marker_dict()
+        marker["normalization"] = (
+            LEGACY_WORKBOOK_DIAGRAM_NORMALIZATION_V2
+        )
+        marker["max_render_dimension"] = 2048
+        marker["images"][0]["normalized_sha256"] = hashlib.sha256(
+            legacy_data
+        ).hexdigest()
+        marker["images"][0]["width"] = 2048
+        marker["images"][0]["height"] = 683
+        project = _route_snapshot()
+        project["diagram_source"] = {
+            "file_name": diagram.source_file_name,
+            "source_type": diagram.source_type,
+            "source_sha256": diagram.source_sha256,
+            "workbook_diagram": marker,
+        }
+
+        validated = validate_workbook_diagram_for_project(project, diagram)
+
+        self.assertEqual(validated, diagram)
+        self.assertEqual((3000, 1000), (
+            validated.images[0].width,
+            validated.images[0].height,
+        ))
+
+        marker["images"][0]["normalized_sha256"] = "0" * 64
+        with self.assertRaisesRegex(
+            DiagramAssetError,
+            "normalized_sha256 does not match",
+        ):
+            validate_workbook_diagram_for_project(project, diagram)
 
     def test_required_missing_diagram_fails_without_replacing_destination(self) -> None:
         diagram = _workbook_diagram()

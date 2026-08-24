@@ -1,0 +1,401 @@
+environment no more
+A:MOPN001_7250# show system information
+
+===============================================================================
+System Information
+===============================================================================
+System Name            : MOPN001_7250
+System Type            : 7250 IXR-R6
+Chassis Topology       : Standalone
+System Version         : B-25.10.R2
+System Active Slot     : A
+
+Configuration Mode Cfg : mixed
+
+Tel/Tel6/SSH/FTP Admin : Disabled/Disabled/Enabled/Disabled
+Tel/Tel6/SSH/FTP Oper  : Down/Down/Up/Down
+
+Management IPv4 Addr   : 10.9.102.140/22
+Last Boot Config Header: # TiMOS-B-25.10.R2 both/hops64 Nokia 7250 IXR
+                         Copyright (c) 2000-2025 Nokia. # All rights reserved.
+===============================================================================
+A:MOPN001_7250# show chassis detail
+===============================================================================
+System Information
+===============================================================================
+  Name                              : MOPN001_7250
+  Type                              : 7250 IXR-R6
+  Number of slots                   : 4
+===============================================================================
+Chassis 1 Detail
+===============================================================================
+  Chassis Status                    : up
+  Hardware Data
+    Part number                     : 3HE11278AARC01
+    Serial number                   : NS254360070
+===============================================================================
+A:MOPN001_7250# show card state
+
+===============================================================================
+Card State
+===============================================================================
+Slot/  Provisioned Type                  Admin Operational   Num   Num Comments
+Id         Equipped Type (if different)  State State         Ports MDA
+-------------------------------------------------------------------------------
+1      iom-ixr-r6                        up    up                  6
+1/1    m6-10g-sfp++1-100g-qsfp28         up    up            7
+1/2    m6-10g-sfp++1-100g-qsfp28         up    up            7
+2      iom-ixr-r6                        up    up                  6
+A      cpiom-ixr-r6                      up    up                      Active
+B      cpiom-ixr-r6                      up    up                      Standby
+===============================================================================
+A:MOPN001_7250# show port
+
+===============================================================================
+Ports on Slot 1
+===============================================================================
+Port          Admin Link Port    Cfg  Oper LAG/ Port Port Port   C/QS/S/XFP/
+Id            State      State   MTU  MTU  Bndl Mode Encp Type   MDIMDX
+-------------------------------------------------------------------------------
+1/1/1         Up    Yes  Up      9100 9100    2 netw null vspeed 10GBASE-LR  *
+1/1/2         Up    Yes  Up      9100 9100    3 netw null vspeed 10GBASE-LR  *
+1/1/3         Down  No   Down    9212 9212    - netw null vspeed
+1/1/c7        Up         Link Up                          conn   4WDM-40 MSA *
+1/1/c7/1      Up    Yes  Up      9100 9100    - netw null cgige
+1/2/c7        Up         Link Up                          conn   100GBASE-ZR *
+1/2/c7/1      Up    Yes  Up      9100 9100    - netw null cgige
+
+===============================================================================
+Ports on Slot A
+===============================================================================
+Port          Admin Link Port    Cfg  Oper LAG/ Port Port Port   C/QS/S/XFP/
+Id            State      State   MTU  MTU  Bndl Mode Encp Type   MDIMDX
+-------------------------------------------------------------------------------
+A/1           Up    Yes  Up      1514 1514    - netw null faste  MDI
+A/gnss        Down  No   Down                             gnss
+===============================================================================
+A:MOPN001_7250# show port detail
+
+===============================================================================
+Ethernet Interface
+===============================================================================
+Description        : 10/100 Ethernet TX
+Interface          : A/1                        Oper Speed       : 100 Mbps
+Link-level         : Ethernet                   Config Speed     : 100 Mbps
+Admin State        : up                         Oper Duplex      : full
+Oper State         : up
+Config Duplex      : full
+Physical Link      : Yes                        MTU              : 1514
+Last State Change  : 07/18/2026 16:50:21        Hold time down   : 0 seconds
+
+Configured Address : e4:41:64:17:db:a6
+Hardware Address   : e4:41:64:17:db:a6
+
+===============================================================================
+
+===============================================================================
+Traffic Statistics
+===============================================================================
+                                                   Input                 Output
+-------------------------------------------------------------------------------
+Octets                                         938028697                 717623
+
+===============================================================================
+GNSS Physical Interface
+===============================================================================
+Description        : GNSS receiver
+Interface          : A/gnss                 Port IfIndex         : 101711872
+Admin Status       : down                   Oper Status          : down
+Physical Link      : No
+Constellation      : gps
+===============================================================================
+
+===============================================================================
+Ethernet Interface
+===============================================================================
+Description        : MOPN001_7250 1/1/1 to MOPN001_7705 1/1/5
+Interface          : 1/1/1                      Oper Speed       : 10 Gbps
+Link-level         : Ethernet                   Config Speed     : 10 Gbps
+Admin State        : up                         Oper Duplex      : full
+Oper State         : up - Active in LAG 2
+Config Duplex      : N/A
+Physical Link      : Yes                        MTU              : 9100
+Last State Change  : 07/18/2026 16:50:24        Hold time down   : 0 seconds
+Last Cleared Time  : 07/18/2026 16:50:22        DDM Events       : Enabled
+Phys State Chng Cnt: 2
+
+Configured Address : 24:f6:8d:f2:85:1a
+Hardware Address   : 24:f6:8d:f2:85:1a
+Cfg Alarm          : remote local
+
+Transceiver Data
+
+Transceiver Status : operational
+Transceiver Type   : SFP                        DCO              : Disabled
+Model Number       : 3HE04823AAAA01  NOK  IPU3ANKEAA
+TX Laser Wavelength: 1310 nm                    Diag Capable     : yes
+Serial Number      : NK2531Q0946
+Part Number        : RTXM228-401-C85
+Optical Compliance : 10GBASE-LR
+
+===============================================================================
+Transceiver Digital Diagnostic Monitoring (DDM), Internally Calibrated
+===============================================================================
+                              Value High Alarm  High Warn   Low Warn  Low Alarm
+-------------------------------------------------------------------------------
+Temperature (C)               +37.5     +80.0      +70.0       +0.0      -10.0
+Supply Voltage (V)             3.21      3.63       3.47       3.14       2.97
+Tx Bias Current (mA)           31.4      80.0       75.0       15.0       10.0
+Tx Output Power (dBm)         -2.25      2.50       0.50      -8.20     -10.20
+Rx Optical Power (avg dBm)    -1.58      2.50       0.50     -14.40     -16.40
+===============================================================================
+
+===============================================================================
+Ethernet Interface
+===============================================================================
+Description        : 1-Gig/10-Gig Ethernet
+Interface          : 1/1/3                      Oper Speed       : 10 Gbps
+Link-level         : Ethernet                   Config Speed     : 10 Gbps
+Admin State        : down                       Oper Duplex      : full
+Oper State         : down
+Config Duplex      : N/A
+Physical Link      : No                         MTU              : 9212
+
+Configured Address : 24:f6:8d:f2:85:1c
+Hardware Address   : 24:f6:8d:f2:85:1c
+
+Transceiver Data
+
+Transceiver Status : not-equipped
+===============================================================================
+
+===============================================================================
+QSFP28 Connector
+===============================================================================
+Description        : QSFP28 Connector
+Interface          : 1/2/c7
+Admin State        : up
+Oper State         : up
+IfIndex            : 1292444096
+Breakout           : c1-100g
+RS-FEC Config Mode : None
+
+Transceiver Data
+
+Transceiver Status : operational
+Transceiver Type   : QSFP+ or later with CMIS   DCO              : Enabled
+Model Number       : 3HE19775AARA01  NOK  INUIA27GAA
+TX Laser Wavelength: 1552.524 nm
+Laser Tunability   : fully-tunable
+Config Freq (MHz)  : 193100000                  Min Freq (MHz)   : 191350000
+Oper Freq (MHz)    : 193100000                  Max Freq (MHz)   : 196100000
+Supported Grids    : 100GHz 50GHz
+Number of Lanes    : 1
+Serial Number      : NK2547G0077
+Part Number        : FTLC3351S3PL1-A5
+Optical Compliance : 100GBASE-ZR Custom (192)
+
+===============================================================================
+Transceiver Digital Diagnostic Monitoring (DDM)
+===============================================================================
+                              Value High Alarm  High Warn   Low Warn  Low Alarm
+-------------------------------------------------------------------------------
+Temperature (C)               +49.9     +75.0      +70.0       +0.0       -5.0
+Supply Voltage (V)             3.26      3.60       3.46       3.13       3.00
+===============================================================================
+
+===============================================================================
+Transceiver Lane Digital Diagnostic Monitoring (DDM)
+===============================================================================
+                                 High Alarm   High Warn    Low Warn   Low Alarm
+-------------------------------------------------------------------------------
+Lane Tx Output Power (dBm)            -3.00       -5.00      -13.00      -14.00
+Lane Rx Optical Pwr (avg dBm)          2.00        1.00      -21.02      -23.01
+
+-------------------------------------------------------------------------------
+Lane ID Temp(C)/Alm       Tx Bias(mA)/Alm   Tx Pwr(dBm)/Alm   Rx Pwr(dBm)/Alm
+-------------------------------------------------------------------------------
+    1              -                 -             -6.87              5.89/H-WA
+===============================================================================
+
+===============================================================================
+Coherent Optical Module
+===============================================================================
+Cfg Tx Target Power:   1.00 dBm
+Cfg Rx LOS Thresh  : -23.00 dBm
+
+Rx Q Margin        :    3.6 dB                Chromatic Disp     :   1384 ps/nm
+SNR/OSNR X Polar   :   12.2 dB / 20.6 dB      Diff Group Delay   :      4 ps
+SNR/OSNR Y Polar   :   12.2 dB / 20.6 dB      Pre-FEC BER        : 4.200E-05
+
+Module State       : ready
+
+-------------------------------------------------------------------------------
+Coherent Optical Port Statistics (Elapsed Seconds: 1084847)
+-------------------------------------------------------------------------------
+Statistic                        Current      Average      Minimum      Maximum
+-------------------------------------------------------------------------------
+Rx BER                         4.200E-05    2.145E-05    0.000E+00    4.290E-05
+Rx OSNR (dB)                        20.6         13.2          0.0         26.5
+Rx Per-Channel Power (dBm)          9.63         6.70       -99.00         9.71
+Tx Total Power (dBm)               -6.85        -9.81       -99.00        -6.80
+Rx Total Power (dBm)                5.88         2.87       -99.00         5.88
+-------------------------------------------------------------------------------
+===============================================================================
+
+===============================================================================
+Ethernet Interface
+===============================================================================
+Description        : MOPN001_7250 1/2/7 to GRIZ001_7250 1/1/7
+Interface          : 1/2/c7/1                   Oper Speed       : 100 Gbps
+Link-level         : Ethernet                   Config Speed     : N/A
+Admin State        : up                         Oper Duplex      : full
+Oper State         : up
+Config Duplex      : N/A
+Physical Link      : Yes                        MTU              : 9100
+RS-FEC Config Mode : cl91-514/528
+
+Configured Address : 24:f6:8d:f2:88:68
+Hardware Address   : 24:f6:8d:f2:88:68
+Cfg Alarm          : remote local
+===============================================================================
+A:MOPN001_7250# show lag
+
+===============================================================================
+Lag Data
+===============================================================================
+Lag-id         Adm     Opr     Weighted Threshold Up-Count MC Act/Stdby
+    name
+-------------------------------------------------------------------------------
+2              up      up      No       0         2        N/A
+    lag-2
+3              up      up      No       0         2        N/A
+    lag-3
+-------------------------------------------------------------------------------
+Total Lag-ids: 2       Single Chassis: 2        MC Act: 0       MC Stdby: 0
+===============================================================================
+A:MOPN001_7250# show lag detail
+
+===============================================================================
+LAG Details
+===============================================================================
+-------------------------------------------------------------------------------
+Lag-id : 2 Lag-name : lag-2
+-------------------------------------------------------------------------------
+Description        : to_MOPN001_7705
+-------------------------------------------------------------------------------
+Details
+-------------------------------------------------------------------------------
+Lag-id              : 2                     Mode                 : network
+Lag-name            : lag-2
+Adm                 : up                    Opr                  : up
+Dynamic Cost        : false                 Encap Type           : null
+LACP                : enabled               Mode                 : active
+LACP Transmit Intvl : fast                  LACP xmit stdby      : enabled
+System Id           : 24:f6:8d:3c:90:00     System Priority      : 32768
+Admin Key           : 121                   Oper Key             : 121
+Prtr System Id      : 24:f6:8d:8d:ec:00     Prtr System Priority : 32768
+Ports Up            : 2
+
+-------------------------------------------------------------------------------
+Port-id         Adm     Act/Stdby Opr     Primary  Sub-group     Forced  Prio
+-------------------------------------------------------------------------------
+1/1/1           up      active    up      yes      1             -       1
+1/2/1           up      active    up               1             -       32768
+
+-------------------------------------------------------------------------------
+Port-id         Role      Exp   Def   Dist  Col   Syn   Aggr  Timeout  Activity
+-------------------------------------------------------------------------------
+1/1/1           actor     No    No    Yes   Yes   Yes   Yes   Yes      Yes
+1/1/1           partner   No    No    Yes   Yes   Yes   Yes   Yes      Yes
+1/2/1           actor     No    No    Yes   Yes   Yes   Yes   Yes      Yes
+1/2/1           partner   No    No    Yes   Yes   Yes   Yes   Yes      Yes
+
+-------------------------------------------------------------------------------
+Lag-id : 3 Lag-name : lag-3
+-------------------------------------------------------------------------------
+Description        : to_MOPN002_7705
+-------------------------------------------------------------------------------
+Details
+-------------------------------------------------------------------------------
+Lag-id              : 3                     Mode                 : network
+Lag-name            : lag-3
+Adm                 : up                    Opr                  : up
+LACP                : enabled               Mode                 : active
+System Id           : 24:f6:8d:3c:90:00     System Priority      : 32768
+Prtr System Id      : 24:f6:8d:8d:2c:00     Prtr System Priority : 32768
+Ports Up            : 2
+
+-------------------------------------------------------------------------------
+Port-id         Adm     Act/Stdby Opr     Primary  Sub-group     Forced  Prio
+-------------------------------------------------------------------------------
+1/1/2           up      active    up      yes      1             -       1
+1/2/2           up      active    up               1             -       32768
+
+-------------------------------------------------------------------------------
+Port-id         Role      Exp   Def   Dist  Col   Syn   Aggr  Timeout  Activity
+-------------------------------------------------------------------------------
+1/1/2           actor     No    No    Yes   Yes   Yes   Yes   Yes      Yes
+1/2/2           partner   No    No    Yes   Yes   Yes   Yes   Yes      Yes
+===============================================================================
+A:MOPN001_7250# show router interface
+
+===============================================================================
+Interface Table (Router: Base)
+===============================================================================
+Interface-Name                   Adm       Opr(v4/v6)  Mode    Port/SapId
+   IP-Address                                                  PfxState
+-------------------------------------------------------------------------------
+system                           Up        Up/Down     Network system
+   172.16.245.191/32                                           n/a
+to_BKLY001_7250                  Up        Up/Down     Network 1/1/c7/1
+   172.18.6.104/31                                             n/a
+to_MOPN001_7705                  Up        Up/Down     Network lag-2
+   172.18.6.106/31                                             n/a
+-------------------------------------------------------------------------------
+Interfaces : 3
+===============================================================================
+A:MOPN001_7250# show router ospf neighbor
+
+===============================================================================
+Rtr Base OSPFv2 Instance 0 Neighbors
+===============================================================================
+Interface-Name                   Rtr Id          State      Pri  RetxQ   TTL
+   Area-Id
+-------------------------------------------------------------------------------
+to_BKLY001_7250                  172.16.245.201  Full       1    0       39
+   0.0.0.0
+to_MOPN001_7705                  172.16.245.193  Full       1    0       38
+   0.0.0.0
+-------------------------------------------------------------------------------
+No. of Neighbors: 2
+===============================================================================
+A:MOPN001_7250# show router isis adjacency
+MINOR: CLI ISIS instance 0 is not configured.
+A:MOPN001_7250# show router bgp neighbor
+MINOR: CLI BGP is not configured.
+A:MOPN001_7250# show router ldp session
+
+==============================================================================
+LDP IPv4 Sessions
+==============================================================================
+Peer LDP Id         Adj Type  State         Msg Sent  Msg Recv  Up Time
+------------------------------------------------------------------------------
+172.16.245.193:0    Link      Established   411704    411549    12d 13:20:33
+172.16.245.201:0    Link      Established   55160     55165     1d 16:50:01
+------------------------------------------------------------------------------
+No. of IPv4 Sessions: 2
+==============================================================================
+A:MOPN001_7250# show service service-using
+
+===============================================================================
+Services
+===============================================================================
+ServiceId    Type      Adm  Opr  CustomerId Service Name
+-------------------------------------------------------------------------------
+No Matching Entries
+===============================================================================
+A:MOPN001_7250# show aps
+                     ^
+Error: Invalid parameter.
+A:MOPN001_7250#

@@ -1,0 +1,876 @@
+Table A-80 1830 PSS optical translator and uplink card channels (continued)
+Card Name
+Pluggable
+optics
+support1
+Channel (GHz) User Interface Channel (4.3 format)
+Min2 Max Step Min Max Step
+112SDX11 yes
+191700 196050 50 9170.000 9605.000 5.000
+191700 196000 100 9170.000 9600.000 10.000
+112SNA1 191700 196050 50 9170.000 9605.000 5.000
+112SNX10 191700 196050 50 9170.000 9605.000 5.000
+11DPE12 yes 191700 196050 50 9170.000 9605.000 5.000
+11DPE12A yes 191700 196050 50 9170.000 9605.000 5.000
+11DPE12E yes 191700 196050 50 9170.000 9605.000 5.000
+11DPM12 yes 191700 196050 50 9170.000 9605.000 5.000
+11DPM4M yes 191700 196050 50 9170.000 9605.000 5.000
+11DPM4M +
+11DPM4E
+yes 191700 196050 50 9170.000 9605.000 5.000
+11DPM8 yes 191700 196050 50 9170.000 9605.000 5.000
+11OPE8 yes 191700 196050 50 9170.000 9605.000 5.000
+11QCE12X yes 191700 196050 50 9170.000 9605.000 5.000
+11QPA4 yes 191700 196050 50 9170.000 9605.000 5.000
+11QPA4B yes 191700 196050 50 9170.000 9605.000 5.000
+11QPE24 yes 191700 196050 50 9170.000 9605.000 5.000
+11QPEN4 yes 191700 196050 50 9170.000 9605.000 5.000
+11STAR1 191700 196050 50 9170.000 9605.000 5.000
+11STAR1A 191700 196050 50 9170.000 9605.000 5.000
+11STGE12 191700 196050 50 9170.000 9605.000 5.000
+11STMM10 191700 196050 50 9170.000 9605.000 5.000
+12CE120 yes 191700 196050 50 9170.000 9605.000 5.000
+12P120 yes 191700 196050 50 9170.000 9605.000 5.000
+12P120S yes 191700 196050 50 9170.000 9605.000 5.000
+130SCA1 191700 196050 50 9170.000 9605.000 5.000
+130SCX10 191300 196050 6.25 9130.000 9605.000 0.625
+130SLA1 186100 190850 6.25 8610.000 9085.000 0.625
+130SLX10 186100 190850 6.25 8610.000 9085.000 0.625
+130SNX10 191300 196050 6.25 9130.000 9605.000 0.625
+18CE300 yes 191700 196050 50 9170.000 9605.000 5.000
+Reference tables
+Channel frequency details
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10965
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Table A-80 1830 PSS optical translator and uplink card channels (continued)
+Card Name
+Pluggable
+optics
+support1
+Channel (GHz) User Interface Channel (4.3 format)
+Min2 Max Step Min Max Step
+1UD200 191700 196050 50 9170.000 9605.000 5.000
+1UX100 yes
+191300 196050 6.25 9130.000 9605.000 0.625
+191300 196050 50 9130.000 9605.000 5.000
+1UX500 191300 196050 6.25 9130.000 9605.000 0.625
+20AX200
+yes 191700 196050 50 9170.000 9605.000 5.000
+yes 191700 196000 100 9170.000 9600.000 10.000
+20MX80 yes 191700 196050 50 9170.000 9605.000 5.000
+20P200
+yes 191700 196050 50 9170.000 9605.000 5.000
+yes 191700 196000 100 9170.000 9600.000 10.000
+20UC200 yes 191700 196050 50 9170.000 9605.000 5.000
+260SCX2 191300 196050 6.25 9130.000 9605.000 0.625
+2UC1T BMDCO6 191300 196050 6.25 9130.000 9605.000 0.625
+2UC1T BMDCO6L 186100 190850 6.25 8610.000 9085.000 0.625
+2UC1TE BMDCO6 191300 196050 6.25 9130.000 9605.000 0.625
+2UC1TE BMDCO6L 186100 190850 6.25 8610.000 9085.000 0.625
+2UC400 191300 196050 6.25 9130.000 9605.000 0.625
+2UC400E 191300 196050 6.25 9130.000 9605.000 0.625
+2UX200 yes 191300 196050 6.25 9130.000 9605.000 0.625
+2UX500 yes 191300 196050 6.25 9130.000 9605.000 0.625
+43SCA1 191700 196050 50 9170.000 9605.000 5.000
+43SCGE1 191700 196050 50 9170.000 9605.000 5.000
+43SCX4 191700 196050 50 9170.000 9605.000 5.000
+43SCX4E 191700 196050 50 9170.000 9605.000 5.000
+43STA1P 191700 196050 50 9170.000 9605.000 5.000
+43STX4 191700 196000 100 9170.000 9600.000 10.000
+43STX4P 191700 196050 50 9170.000 9605.000 5.000
+4DPA2 yes 191700 196000 100 9170.000 9600.000 10.000
+4DPA4 yes 191700 196000 100 9170.000 9600.000 10.000
+4QPA8 yes 191700 196000 100 9170.000 9600.000 10.000
+4UC1T yes 191300 196050 6.25 9130.000 9605.000 0.625
+Reference tables
+Channel frequency details
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10966 Issue 1
+Table A-80 1830 PSS optical translator and uplink card channels (continued)
+Card Name
+Pluggable
+optics
+support1
+Channel (GHz) User Interface Channel (4.3 format)
+Min2 Max Step Min Max Step
+4UC400 yes
+191300 196050 6.25 9130.000 9605.000 0.625
+191300 196050 50 9130.000 9605.000 5.000
+8P20 yes 191700 196050 50 9170.000 9605.000 5.000
+8P20B yes 191700 196050 50 9170.000 9605.000 5.000
+8UC1T yes 191300 196050 6.25 9130.000 9605.000 0.625
+D5X500 191300 196050 6.25 9130.000 9605.000 0.625
+D5X500L 186100 190850 6.25 8610.000 9085.000 0.625
+D5X500Q3 191300 196050 6.25 9130.000 9605.000 0.625
+D6AD2T4H5 191300 196050 0.1 9130.000 9605.000 0.010
+D6AD2T4L5 186100 190850 0.1 8610.000 9605.000 0.010
+S13X100E 191300 196050 6.25 9130.000 9605.000 0.625
+S13X100L 186100 190850 6.25 8610.000 9085.000 0.625
+S13X100R 191300 196050 6.25 9130.000 9605.000 0.625
+S2AD200H 191300 196050 6.25 9130.000 9605.000 0.625
+S2AD200R 191300 196050 6.25 9130.000 9605.000 0.625
+S4X400H3 191300 196050 6.25 9130.000 9605.000 0.625
+S4X400L3 186100 190850 6.25 8610.000 9085.000 0.625
+S5AD400H3 191300 196050 6.25 9130.000 9605.000 0.625
+S6AD600E3,4 191300 196050 6.25 9130.000 9605.000 0.625
+S6AD600H3,4 191300 196050 6.25 9130.000 9605.000 0.625
+S6AD600L 186100 190850 6.25 8610.000 9085.000 0.625
+Notes:
+1. These cards support pluggable optics for WDM optical line applications. Depending on pluggable optic
+module type used, only a subset of frequencies may be available for a given port.
+2. The channel frequency for the channeltx and channelrx parameters may be stated lower or higher in user
+interface manuals for use in 3rd party optical line systems. This table is for use in the 1830 PSS optical line
+system.
+3. If gridstepsize = 1.25 GHz, offsets of {-2, -1, 0, 1, 2} * 1.25 GHz are permitted from the 6.25 GHz
+frequencies.
+4. If gridstepsize = 0.1 GHz, offsets of {-6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6} * 0.1 GHz are permitted from the
+1.25 GHz frequencies. Frequencies must lie on or between min and max.
+5. Gridstepsize = 0.1 GHz.
+Reference tables
+Channel frequency details
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10967
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+A.11 User service interfaces
+A.11.1 User service interfaces
+Table A-81 User service interface details
+Shelf Type
+Equip-
+ment
+Port
+OAMP VOIP
+E1/E2
+LAN3/LAN4
+AUX-
+A/B1
+ES1/ES2 CIT2 CON/CRAFT USB
+PSS-4 EC3
+X
+(OAM)
+- - - X
+X
+(CIT/CRAFT)
+-
+PSS-4II 4EC3 X - - - X X
+X
+(CRAFT: RJ-45)
+X4
+(USB-A)
+PSS-8
+8EC2 - - - - X X
+X
+(CRAFT: RJ-45)
+X4
+(USB-A)
+8EC3 - - - - X X5
+X
+(CRAFT: RJ-45)
+X4
+(USB-A)
+SHFPNL X - - - - - - -
+8USRPNL - -
+X
+(E1 only)
+- - - - -
+PSS-16
+EC - - - X X X -
+X
+(USB-A)
+32EC2 - - - X X X -
+X4
+(USB-A)
+32EC3 - - - X7 X X7 -
+X4
+(USB-A)
+USRPNL X X
+X
+(E1/E2
+only)
+- - -
+X
+(CRAFT:
+USB-B)
+-
+PSS-16II
+32EC2 - - - X X X -
+X4
+(USB-A)
+32EC3 - - - X7 X X7 -
+X4
+(USB-A)
+USRPNL X6 X
+X
+(E1/E2
+only)
+- - -
+X
+(CRAFT: RJ-45
+or USB-B)
+-
+Reference tables
+User service interfaces
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10968 Issue 1
+Table A-81 User service interface details (continued)
+Shelf Type
+Equip-
+ment
+Port
+OAMP VOIP
+E1/E2
+LAN3/LAN4
+AUX-
+A/B1
+ES1/ES2 CIT2 CON/CRAFT USB
+PSS-32
+EC - - - X X X -
+X
+(USB-A)
+32EC2 - - - X X X -
+X4
+(USB-A)
+32EC3 - - - X7 X X7 -
+X4
+(USB-A)
+USRPNL X X
+X
+(E1/E2
+only)
+- - -
+X
+(CRAFT: DB9
+or USB-B)
+-
+PSI-4L MFC X6,8 -
+X6,9
+(LAN3/
+LAN4 only)
+- X9 X6,9
+X10
+(CON: RJ-45)
+X4,8
+(USB-A)
+PSI-8L MFC X6,8 -
+X6,9
+(LAN3/
+LAN4 only)
+- X9 X6,9
+X10
+(CON: RJ-45)
+X4,8
+(USB-A)
+PSS-8x
+8XCEC2
+8XCEC2II
+X6,11 - - X6 X X -
+X4
+(USB-A)
+PSS-12x 12XCEC2 X6,11 -
+X6,12
+(E1A/E1B
+only)
+X6 X X -
+X4
+(USB-A)
+PSS-24x
+CEC2
+CEC2II
+X6,11 -
+X6,12
+(E1A/E1B
+only)
+X6 X X6 -
+X4
+(USB-A)
+Notes:
+1. There are two AUX ports: AUX-A on the first equipment controller and AUX-B on the second equipment
+controller (if installed). When both active and standby controllers are installed, both ports are up (even when
+an equipment controller is inactive/standby).
+2. When both active and standby controllers are installed, this port is up on the active controller; this port is
+down on the inactive/standby controller.
+3. The 1830 PSS-4 EC is also referred to as E4EC.
+4. The USB-A interface can be used to load software onto the NE.
+5. On the 8EC3 card, the CIT port cannot be configured for either port speed or duplex mode. The CIT port
+defaults to auto-negotiation with a maximum speed of 100 Mb/s.
+6. These LAN interfaces are 10/100/1000 Mb/s with auto negotiation. The port speed and duplex can be set to
+either AUTO or fixed mode. For 1000 Mb/s operation, use either speed (AUTO) and duplex (AUTO), or
+speed (1000M) and duplex (AUTO).
+7. These LAN interfaces are 10/100/1000 Mb/s with auto negotiation. For 1000 Mb/s operation, use speed
+Reference tables
+User service interfaces
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10969
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+(AUTO) and the set the other end of the Ethernet connection as auto-negotiate.
+8. This port is on the front of the 1830 PSI-4L and 1830 PSI-8L shelves.
+9. This port is on the rear of the 1830 PSI-4L and 1830 PSI-8L shelves.
+10. There are two CON ports available (front and rear of the shelf). The two CON ports cannot be used
+simultaneously.
+11. Only one OAMP port will be operational, and it can be on either the active or standby Equipment Controller.
+12. There are two E1 ports: E1A on the first equipment controller and E1B on the second equipment controller
+(if installed). When both active and standby controllers are installed, both ports are up (even when an
+equipment controller is inactive/standby).
+Reference tables
+User service interfaces
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10970 Issue 1
+A.12 Common value definitions
+A.12.1 Purpose
+This section provides detailed and extended definitions of common values used in the command
+details.
+A.12.2 NE Name/Target Identifier (TID) character definition
+The Target Identifier (TID) value is used to identify the target system for remotely issued
+commands.
+Valid values for TID are 1 to 20 characters from the three tables below. The string has a maximum
+of 20 characters.
+The following standard ASCII character are allowed for NE Name/TID.
+Character Description
+a-z lowercase alphabetical character a to z
+A-Z uppercase alphabetical character A to Z
+0-9 numerical character (integer) 0 to 9
+The following special ASCII characters are allowed for NE Name/TID.
+Character Description
+# number or pound sign
+_ underscore
+/ forward slash
+- hyphen
++ plus sign
+% percent sign
+. period
+In addition to the ASCII characters specified above, the following Unicode characters are allowed
+for NE Name/TID.
+Character Description
+(see Unicode standard)
+Printable Unicode character codes 128-255.
+Control characters are not supported.
+Note: UTF-8 encoding is used by the NE.
+Note that using non-ASCII characters will reduce the number of characters supported to be less
+than 20. The parameter is limited to 20 bytes in size. Unicode character codes 128-255 are 2 bytes
+each.
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10971
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+A.12.3 User password (USERPASSWD) character definition
+The user password is a string of case-sensitive alphanumeric characters, and the password must
+contain the following:
+• at least one lowercase alphabetic character
+• at least one uppercase alphabetic character
+• at least one numeric character
+• at least one special character
+The first character of the user password can be any alphabetic, numeric, or a special character
+excluding # (pound sign). The password cannot have three consecutive, identical characters. The
+password cannot be identical or reverse identical to the associated username
+The following standard ASCII characters are allowed for USERPASSWD.
+Character
+Description
+a-z lowercase alphabetical character a to z
+A-Z uppercase alphabetical character A to Z
+0-9 numerical character (integer) 0 to 9
+The following special ASCII characters are allowed for USERPASSWD.
+Character Description
+# number or pound sign
+_ underscore
++ plus sign
+% percent sign
+! exclamation mark
+@ at sign
+$ dollar sign
+“ quotation mark
+& ampersand
+' apostrophe
+( left parenthesis
+) right parenthesis
+* asterisk
+. period
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10972 Issue 1
+A.12.4 System password (SYSPASSWD) character definition
+The system password is a string of case-sensitive alphanumeric characters, and the password
+must contain at least three of the following:
+• at least one lowercase alphabetic character
+• at least one uppercase alphabetic character
+• at least one numeric character
+• at least one special character
+The first character of the system password can be any alphabetic, numeric, or a special character
+excluding # (pound sign). The system password cannot have three consecutive, identical
+characters.
+The following standard ASCII characters are allowed for SYSPASSWD.
+Character
+Description
+a-z lowercase alphabetical character a to z
+A-Z uppercase alphabetical character A to Z
+0-9 numerical character (integer) 0 to 9
+The following special ASCII characters are allowed for SYSPASSWD.
+Character Description
+# number or pound sign
+_ underscore
++ plus sign
+% percent sign
+! exclamation mark
+@ at sign
+$ dollar sign
+“ quotation mark
+& ampersand
+' apostrophe
+( left parenthesis
+) right parenthesis
+* asterisk
+. period
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10973
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+A.12.5 IPv4 address character (IPV4) definition
+An IPv4 address (or IP address) is a 32-bit number written as four numbers separated by periods:
+d.d.d.d where d=0..255
+An IP address can also have a mask, which defines the IP subnetwork of the address.
+There are two forms for subnet representation:
+• CIDR mask (RFC 4632 and RFC 1519), which is a slash “/” character and decimal.
+Example: /n where n=0..32
+The CIDR mask defines how many bits from the left form the routing prefix.
+• Dot-notation subnet mask, which has the same notation as an IP address.
+Example: s.s.s.s where s=0..255
+The subnet mask must be leading 1-bits (the routing prefix), followed by all 0-bits.
+Examples:
+• CIDR mask /24 is equivalent to dot-notation subnet mask 255.255.255.0
+• CIDR mask /30 is equivalent to dot-notation subnet mask 255.255.255.252
+Parts of the system (address definition, routes) use CIDR mask, subnet mask, or both.
+IP addresses are used in various places, from provisioning an interface to setting a remote server.
+Specifically, there are six different places IP addresses are used in provisioning:
+1. Interface addresses for LAN and loopback interfaces
+2. External addresses of servers and services
+3. Cluster addresses
+4. OCS addresses
+5. Routing addresses (such as static routes, OSPF area IP ranges, and OSPF Virtual links)
+6. Address in an Access Control List (ACL) pattern
+Default addresses
+On initial bootup, the system has two default IPv4 addresses set on the following interfaces:
+• Loopback 172.16.1.1/32
+• CIT 172.16.0.1/24
+For all other interfaces, the default IPv4 address is 0.0.0.0/0.
+Note: The two default addresses can be changed.
+The loopback address is set during initial system installation. The CIT address should be
+changed if it is set to redistribute (meaning it is advertised into OSPF) to avoid clashing with
+the CIT addresses of other NEs.
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10974 Issue 1
+Reserved addresses
+In all the places an IP address is used, except for ACLs (Item 6), addresses in the following subnets
+are not allowed:
+• 0.0.0.0/8 (except 0.0.0.0/0 which is “no address” or default route)
+• 255.255.255.255/32 (broadcast)
+• 127.0.0.0/8 (localhost)
+Exception: 127.0.0.1 is allowed for USB install (see config software server).
+• 224.0.0.0/3 (multicast, reserved, and broadcast)
+• 100.0.0.0/12 (100.0-15.x.x) (internal backplane between slots)
+• 100.100.0.0/16 (100.100.x.x) (internal backplane between slots)
+In addition, using the following IP address ranges is discouraged because other Nokia products use
+these ranges for internal purposes:
+• 101.0.0.0/8
+• 100.129.0.0/16
+• 100.254.0.0/16
+If there are OCS nodes in the DCN, do not use the last two address ranges (100.129.0.0/16 and
+100.254.0.0/16). However, provisioning these addresses is still allowed.
+Interface addresses
+The following rules apply when provisioning an IP address on any interface (for example, loopback
+or LAN interfaces).
+Loopback interfaces (loopback, loopback1, GMRENODE, and GMRENOTIFY)
+Note: The actual loopback interfaces that are available depend on the platform and release.
+• A loopback interface can have a mask /1 – /32; /32 is recommended, although other masks are
+allowed.
+Exception: The address 0.0.0.0/0 represents no address.
+• Other than an interface with the /32 or /31 mask (RFC-3021), the loopback address cannot be
+the network or broadcast address of the subnetwork.
+• Duplicate: A loopback address cannot be a duplicate of another loopback address and should
+not duplicate a LAN address or ETHIF address on the NE.
+• Overlap: A loopback and loopback1 address should not be in the same subnet.
+Example: A subnet overlap is loopback1=192.168.10.5/28; loopback=192.168.10.1/30, because
+the loopback1 address encompasses 192.168.10.0-15 in its subnet.
+• Overlap with LAN: A loopback address should not overlap a LAN interface address, except in the
+case of ProxyARP. If ProxyARP is enabled on a LAN (e.g., OAMP) interface, then the loopback
+should be in the IP subnetwork of the interface. OSPF should be disabled on the LAN interface.
+Example: OAMP=192.168.5.2/24 with ProxyARP and Loopback=192.168.5.3/32
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10975
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Additional interfaces
+Any interface other than loopback that is assigned an IP address is subject to the following rules:
+• The interfaces can have a mask /1 – /31; masks /0 and /32 are not allowed.
+Exception: The address 0.0.0.0/0 represents no address.
+• Other than an interface with /31 mask (RFC-3021), the interface address cannot be the network
+or broadcast address of the subnetwork.
+Example:
+− 134.222.2.0/24 Not allowed [Network]
+− 192.168.5.11/30 Not allowed [Broadcast]
+− 192.168.5.9/30 Allowed
+• Duplicate: An address cannot be a duplicate of another interface.
+• Overlap: An interface should not be in the same subnet as another interface.
+Example: A subnet overlap is OAMP=192.168.10.5/28; E1=192.168.10.1/30, because the OAMP
+address encompasses 192.168.10.0-15 in its subnet.
+Note: The Duplicate and Overlap rules apply even if one or both interfaces are down or
+disabled.
+Some rule violations will issue warnings, but the operations will still complete.
+External addresses
+Other address provisioning includes the setting of external servers (Item 2), such as NTP, Radius,
+syslog, back-up, license, SNMPTrap, etc., and addresses of other systems (Items 3 and 4) such as
+another node in the cluster or an OCS connection. These external addresses are restricted from
+using reserved addresses and should not reference an interface on the current system; it should be
+an external IP address or the IP address of another system.
+Routing addresses
+Routing addresses include IP addresses (and masks) used in setting static routes, OSPF area IP
+ranges, and OSPF Virtual links. The only restriction is that reserved addresses cannot be used for
+routes or next hop.
+Access Control List (ACL) addresses
+There are no restrictions on what can be used for an address or mask in the ACL.
+A.12.6 IPv6 address character (IPV6) definition
+An IPv6 address (or IP address) uses a 128-bit address, as opposed to the IPv4 32-bit address.
+Unlike IPv4 addresses, which use the dotted-decimal format, with each octet assigned a decimal
+value from 0 to 255, IPv6 addresses use the colon-hexadecimal format X:X:X:X:X:X:X:X, where
+each X is up to 4 hexadecimal digits which represent a 16-bit section of the 128-bit address.
+For example:
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10976 Issue 1
+2001:0db8:0000:0000:0000:0000:000A:0001
+This address can be shortened and modified:
+• Leading zeros may be omitted from each block in the address.
+• A series of zeros can be replaced with a double colon.
+• Capital letters can be made lowercase.
+For example:
+2001:db8::a:1
+Rules for displaying and shortening IPv6 address are defined in RFC 5952, A Recommendation for
+IPv6 Address Text Representation. Consult RFC 5952 for rules not provided here.
+IPv6 address display
+There are rules for text representation and standard shortcuts in displaying IPv6 addresses. For
+displaying IPv6 addresses, the system follows most of the rules in RFC 5952.
+• Letters: IPv6 addresses will be displayed with UPPERCASE letters for hex A-F (this differs from
+RFC5952).
+• Leading zeroes can be omitted for each 16-bit Field in the address.
+Example: 2001:0db8::0002:0001 can be shortened to 2001:db8::2:1
+• Use the double colon “::” to shorten several bytes of zeros as much as possible.
+Example: 2001:db8:0:0:0:0:2:1 can be shortened to 2001:db8::2:1
+In addition, the double colon “::”
+− Can only be used once in an address.
+− Cannot be used to shorten just one 16-bit 0 field.
+− When there is an alternative choice in the placement of a double colon, the longest run of
+consecutive 16-bit 0 fields must be shortened.
+− When the length of the consecutive 16-bit 0 fields are equal (example: 2001:db8:0:0:1:0:0:1),
+the first sequence of zero bits must be shortened. Example, 2001:db8::1:0:0:1 is the correct
+representation.
+Note: In some address classes, an embedded IPv4 address may be displayed. Refer to IPv6
+address with embedded IPv4 address in “IPv6 address input” (p. 10977).
+Example: ::13.1.68.3 or ::FFFF:129.144.52.38. Refer to RFC 4291 for the specific cases.
+IPv6 address input
+The system will accept (input) any legal IPv6 address, be it long form or shortened form per rules in
+RFC 5952. Upper and lowercase letters are also accepted. Two generic formats will be accepted for
+IPv6 Addresses:
+x:x:x:x:x:x:x:x [Standard IPv6 address]
+x:x:x:x:x:x:d.d.d.d [IPv6 address with embedded IPv4 address]
+x: [0 -- FFFF] Hex
+d: [0 -- 255] Decimal
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10977
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+The second address format is used for embedding IPv4 addresses and the end (last 32 bits) of and
+IPv6 address.
+For example, the following addresses are equivalent:
+• 2001:db8::FFE:6016:a05
+• 2001:db8::FFE:96.22.10.5
+Note: The embedded IPv4 address is usually not displayed as an IPv4 address by the
+system. Refer to RFC 4291 for specific cases.
+The system allows flexibility on input rules. The input will be accepted if the address is
+unambiguously unique, even if the address
+• Contains a mixture of UPPER and lowercase letters.
+• Contains leading zeros on the 16-bit field.
+• Does not follow the use of double colon correctly.
+IPv6 prefix length
+IPv6 addresses assigned to interfaces will have a prefix length, which is a “/” followed by a number
+(example “/64”). Similar to the CIDR mask in IPv4 addresses, the IPv6 addresses prefix length and
+has a format “/N”, where N=0-128. The prefix length (or subnet mask) is the only way to represent
+the subnet in IPv6.
+IPv4 subnet masks, like 255.255.255.0 are not allowed.
+The IPv6 prefix is the part of the IPv6 address that represents the network identifier. The network
+identifier appears at the beginning of the IPv6 address and the IPv6 prefix length, which begins with
+a forward slash (/), shows how many bits of the address make up the network identifier. For
+example, the address 1080:6809:8086:6502::1/64 means that the first 64 bits of the address
+represent the network identifier; the remaining 64 bits represent the node identifier.
+IPv6 interface address
+Only certain IPv6 addresses are supported by the system for provisioning interfaces.
+The system allows configuration of two IPv6 address types on supported interfaces:
+• Global Unicast Address [ 2000::/3 ]
+In IPv6, Global Unicast Addresses are the normal addresses that every node uses. These
+addresses are assigned 001 as the 3 left-most bits in the 128 bit address, or 2000::/3.
+• Unique Local Address (ULA) [ fc00::/7 though only fd00::/8 is currently used]
+An IPv6 ULA is analogous to an IPv4 private address (example: 10.0.0.0/8, 192.168.0.0/16). A
+ULA is globally unique but used locally within a site. It is intended for local communication and is
+routable only within a set of cooperating sites (example: a lab).
+Global Unicast Address format
+| 48 bits | 16 bits | 64 bits |
++-----------------------+-----------+--------------------------+
+| global routing prefix | subnet ID | Host Part: interface ID |
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10978 Issue 1
++-----------------------+-----------+--------------------------+
+The format of the Global Unicast Address is:
+• Global Routing Prefix: The left-most part (48 bits) is the prefix allocated by the provider to a site.
+• Subnet Identifier: The middle part (16 bits) contains the subnet numbers inside a site.
+• Interface ID: The right-most part (64 bits) is the host part, or interface identifier.
+Unique Local Address format
+| 8 bits | 40 bits | 16 bits | 64 bits |
++--------+-------------+------------+---------------------------+
+| fd | Unique ID | subnet ID | Host Part: interface ID |
++--------+-------------+------------+---------------------------+
+The format of the Unique Local Address is:
+• Must use fd for the first 8 bits
+• Unique ID: assigned by site
+• Subnet Identifier: subnet numbers within a site
+• Interface ID: the right-most part (64 bits) is the host part, or interface identifier
+Note: It is recommended that all addresses keep to this format and bit assignment; hence
+each interface will have a 64 bit interface ID and /64 mask.
+Prefix length on loopback and point-to-point addresses
+The IPv6 address for a loopback should use a /128 prefix length, although others are allowed. For
+point-to-point links, such as connections between ECs, the /127 or /126 prefix length can be used,
+although others are allowed.
+IPv6 link-local address
+Every LAN interface will have a link-local address which is derived automatically from the media
+access control (MAC) address using EUI-64 rules. Refer to RFC 4291 for details. This address is
+not routable, though a directly attached host (such as a PC attached to the CIT interface) can
+reference it.
+The link-local address group is:
+Link-Local Address [ FE80::/10 ]
+The last 64-bit (host part) will be an IEEE EUI-64 identifier, which is derived from 48-bit MAC
+address. EUI-64 will insert a hexadecimal “FF:FE” in the middle (after first 24 bits) of the MAC
+address, and flip the 7th bit of the MAC. For example, the following 48-bit MAC, CA00.0E74.0008
+will be the following EUI-64 identifier (insert FF:FE and flip the 7th bit): C800.0EFF.FE74.0008.
+The IPv6 Link-Local address (short form) will be FE80::C800:0EFF:FE74:0008.
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10979
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Disallowed IP addresses
+The Global Unicast Address [2000::/3] and Unique Local Address [fd::/8] are the address groups
+used for provisioning. No other ranges, such as anycast or multicast, are allowed. In addition, some
+of the addresses within the Global Unicast Address group are disallowed.
+The system will not allow the following addresses to be provisioned:
+Address block (CIDR) Range Scope Purpose
+::1/128 ::1 Host Loopback address to the local host.
+::ffff:0:0/96
+::ffff:0.0.0.0 -
+Software IPv4 mapped addresses
+::ffff:255.255.255.255
+2001::/32
+2001:: -
+Global Teredo tunneling
+2001::ffff:ffff:ffff:ffff:ffff:ffff
+2001:10::/28
+2001:10:: -
+Software Deprecated (previously ORCHID)
+2001:1f:ffff:ffff:ffff:ffff:ffff:ffff
+2001:20::/28
+2001:20:: -
+Software ORCHIDv2
+2001:2f:ffff:ffff:ffff:ffff:ffff:ffff
+2002::/16
+2002:: -
+Global Internet 6to4
+2002:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+IPv6 address checks
+The following rules apply when provisioning an IP address on any interface (for example, loopback
+or LAN interfaces).
+Loopback interfaces
+The loopback interfaces that are assigned an IP address are subject to the following rules:
+• Only the primary loopback interface can have an IPv6 address.
+• Duplicate: A loopback address cannot be a duplicate of a LAN interface.
+• Overlap: A loopback address should not overlap a LAN interface; a WARNING will be issued.
+Additional interfaces
+Any interface other than loopback that is assigned an IP address is subject to the following rules:
+• Duplicate: An address cannot be a duplicate of another interface.
+• Overlap: An interface should not be in the same subnet as another interface; a WARNING will be
+issued.
+Note: The Duplicate and Overlap rules apply even if one or both interfaces are down or
+disabled.
+Unlike IPv4 addresses, there are no exceptions for duplication for IPv6 addresses.
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10980 Issue 1
+A.12.7 Received output power values
+For view-only optical power values in the command outputs, the optical power values are reported
+as follows:
+• “” (blank) : power value is not available because card, port, or pluggable module is unequipped
+• N/A: not applicable
+• NIL: power is outside of detection range
+A.12.8 Transmitted output power values
+For view-only optical power values in the command outputs, the optical power values are reported
+as follows:
+• “” (blank) : power value is not available because card, port, or pluggable module is unequipped
+• N/A: not applicable
+• OFF: no optical power transmitted, laser off.
+A.12.9 MAC addresses on external equipment
+Customers should not assign the MAC addresses of 00:00:00:xx:xx:xx to external equipment (for
+example, the DCN router connected to the OAMP interface) that is connected to the 1830 shelf
+because 1830 systems use many of these addresses for internal Ethernet packets. Internal
+Ethernet switches will prevent almost all packets with a Destination MAC address in this range from
+being sent out on any external Ethernet interface.
+A.12.10 Autonomous System Number definition
+The system will use 4 Octet ASN (Autonomous System Number), as per RFC 6793, ranging from 0
+to 4294967295. An ASN of zero (0) for the local ASN is used to indicate no ASN, for example, BGP
+is disabled.
+Any ASN in the range is allowed, (for example, no number shall be blocked). However, it is
+expected that the user will follow IETF standards and will not use a reserved ASN, nor an ASN the
+belongs to another Enterprise. An ASN reserved for private use is recommended if the system will
+not be connected to the internet; otherwise a public ASN assigned to the customer should be used.
+Refer to the RFCs referenced in Table A-82, “Autonomous System Number definition” (p. 10981).
+Table A-82 Autonomous System Number definition
+Number Bits Description Reference
+0 16
+Reserved for RPKI unallocated space
+invalidation
+RFC6483, RFC7607
+1 - 23455 16 Public ASNs
+112 16
+Used by the AS112 project to sink
+misdirected DNS queries
+RFC7534
+23456 16 Reserved for AS Pool Transition RFC6793
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+Release 24.12
+December 2024
+Issue 1 10981
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Table A-82 Autonomous System Number definition (continued)
+Number Bits Description Reference
+23457 - 64495 16 Public ASNs
+64496 - 64511 16
+Reserved for use in documentation/
+sample code
+RFC5398
+64512 - 65534 16 Reserved for private use RFC1930, RFC6996
+65535 16 Reserved RFC7300
+65536 - 65551 32
+Reserved for use in documentation and
+sample code
+RFC4893, RFC5398
+65552 - 131071 32 Reserved
+131072 - 4199999999 32 Public 32-bit ASNs
+4200000000 - 4294967294 32 Reserved for private use RFC6996
+4294967295 32 Reserved RFC7300
+A.12.11 Software version definition
+A software version is a release identifier that consists of a product name along with a date-based
+release number.
+<product>-<release-info>
+<product> - Represents the product name
+<release-info> - Represents the release date of the product
+Allowed product names (<product>) are:
+• 1830PSSECX
+• 1830PSSECN
+• 1830PSS4
+Format of the release information (<release-info>) is yy.m-x:
+• yy – Represents the last two digits of the year.
+• m – Represents the month of the year (1 to 12 without leading zero).
+• x – Increment for Maintenance releases. For a main release, x will be set to 0. And for
+maintenance release, x will be increased.
+Example
+The release in December 2024: 1830PSSECX-24.12-0
+The 3rd maintenance release for 24.12: 1830PSSECX-24.12-3
+Reference tables
+Common value definitions
+Nokia 1830 PSS
+© 2024 Nokia. Nokia Confidential Information
+Use subject to agreed restrictions on disclosure and use.
+3KC-71311-RBAA-THZZA
+Release 24.12
+December 2024
+10982 Issue 1

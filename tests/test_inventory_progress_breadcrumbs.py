@@ -27,19 +27,27 @@ class TestLanInventoryHasPhaseAnnouncements(unittest.TestCase):
     def test_announces_lan_inventory_start(self):
         self.assertIn("Starting LAN inventory", self.src)
 
-    def test_announces_phase_1_ping(self):
-        # Phase 1 banner — operators see the scan move from "Pinging"
+    def test_announces_phase_1_probe(self):
+        # Phase 1 banner — operators see the scan move from "Probing"
         # to "Scanning" to "Building" so they know how far along we
-        # are at a glance.
+        # are at a glance. The banner says "Probing SSH/Telnet" rather
+        # than "Pinging" because that is what phase 1 actually tests.
         self.assertIn("Phase 1/3", self.src)
-        self.assertIn("Pinging", self.src)
+        self.assertIn("Probing", self.src)
 
-    def test_announces_ping_summary(self):
-        # After ping completes, summarize before moving to the scan
+    def test_announces_probe_summary(self):
+        # After the probe completes, summarize before moving to the scan
         # phase — "X reachable, Y unreachable" is the key signal.
-        self.assertIn("Ping complete", self.src)
+        self.assertIn("Probe complete", self.src)
         self.assertIn("reachable", self.src)
         self.assertIn("unreachable", self.src)
+
+    def test_calls_out_hosts_that_ping_but_serve_no_cli(self):
+        # A shelf answering ICMP with no SSH/Telnet listener is a
+        # device-config problem, not a bad address — say so, or the
+        # operator goes looking for a routing/IP-range fault.
+        self.assertIn("PROBE_NO_MGMT_PORT", self.src)
+        self.assertIn("answered ping but had no", self.src)
 
     def test_announces_phase_2_scan(self):
         self.assertIn("Phase 2/3", self.src)

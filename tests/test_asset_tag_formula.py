@@ -29,7 +29,18 @@ def _make_builder() -> WorkbookBuilder:
     )
 
 
-EXPECTED_FORMULA = '=XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)'
+# Excel stores post-2007 "future functions" under an ``_xlfn.`` prefix.
+# Bare, Excel 365 renders the cell as ``=@XLOOKUP(...)`` and evaluates it
+# to ``#NAME?``; prefixed, the formula bar shows the clean
+# ``=XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)`` and it computes.
+# The trailing ``&""`` keeps a listed-but-untagged device blank instead of
+# showing the empty Summary cell as ``0``.
+EXPECTED_FORMULA = '=_xlfn.XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)&""'
+# Earlier generations that must be self-healed rather than preserved: the
+# bare form leaves the column at #NAME?, the unprefixed-concat form leaves
+# every untagged tab reading "0".
+LEGACY_BARE_FORMULA = '=XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)'
+LEGACY_NO_CONCAT_FORMULA = '=_xlfn.XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)'
 
 
 class TestWriteAssetTagFormulaHelper(unittest.TestCase):
@@ -56,13 +67,83 @@ class TestWriteAssetTagFormulaHelper(unittest.TestCase):
         self.assertIn("Summary!$D:$D", formula)
         self.assertIn("Summary!$E:$E", formula)
 
+    def test_formula_carries_xlfn_prefix(self):
+        # The whole point of the prefix: without it Excel treats XLOOKUP as
+        # an unknown name, shows the legacy implicit-intersection "@" in the
+        # formula bar, and the cell reads #NAME?.
+        self.builder.write_asset_tag_formula_to_chassis_row(self.ws)
+        formula = self.ws["G15"].value
+        self.assertTrue(
+            formula.startswith("=_xlfn.XLOOKUP("),
+            f"Expected the _xlfn.-prefixed storage form, got {formula!r}",
+        )
+        self.assertNotIn("@", formula)
+
     def test_existing_formula_preserved_by_default(self):
-        # Idempotent: a prior build already planted the formula —
+        # Idempotent: a prior build already planted the current formula —
         # don't re-write it (avoids dirtying the workbook for no
         # reason on append-mode rebuilds).
-        self.ws["G15"] = '=XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)'
+        self.ws["G15"] = EXPECTED_FORMULA
         wrote = self.builder.write_asset_tag_formula_to_chassis_row(self.ws)
         self.assertFalse(wrote)
+
+    def test_blank_tag_shows_empty_not_zero(self):
+        # A device listed on Summary with no tag typed yet matches column D
+        # and returns the empty column-E cell, which Excel renders as 0.
+        # The trailing concat is what suppresses that.
+        self.builder.write_asset_tag_formula_to_chassis_row(self.ws)
+        self.assertTrue(
+            self.ws["G15"].value.endswith('&""'),
+            f'Expected a trailing &"" so untagged tabs read blank, '
+            f'got {self.ws["G15"].value!r}',
+        )
+
+    def test_prefixed_formula_without_concat_is_upgraded(self):
+        # The first pass at this fix resolved #NAME? but still displayed 0
+        # for every untagged device; a rebuild must repair those too.
+        self.ws["G15"] = LEGACY_NO_CONCAT_FORMULA
+        wrote = self.builder.write_asset_tag_formula_to_chassis_row(self.ws)
+        self.assertTrue(wrote)
+        self.assertEqual(self.ws["G15"].value, EXPECTED_FORMULA)
+
+    def test_legacy_bare_xlookup_is_upgraded_in_place(self):
+        # Workbooks built before the prefix fix carry the bare form, which
+        # Excel evaluates to #NAME?. A rebuild must repair it rather than
+        # treat it as "already has a formula, leave alone".
+        self.ws["G15"] = LEGACY_BARE_FORMULA
+        wrote = self.builder.write_asset_tag_formula_to_chassis_row(self.ws)
+        self.assertTrue(wrote)
+        self.assertEqual(self.ws["G15"].value, EXPECTED_FORMULA)
+
+    def test_unrelated_operator_formula_is_left_alone(self):
+        # Self-healing must not extend to formulas the operator wrote.
+        self.ws["G15"] = "=CONCAT(B15,\"-\",E15)"
+        wrote = self.builder.write_asset_tag_formula_to_chassis_row(self.ws)
+        self.assertFalse(wrote)
+        self.assertEqual(self.ws["G15"].value, "=CONCAT(B15,\"-\",E15)")
+
+    def test_key_cell_override_targets_packing_slip_layout(self):
+        # Default packing-slip tabs keep the device name at C7, not F6.
+        self.builder.write_asset_tag_formula_to_chassis_row(
+            self.ws, key_cell="C7",
+        )
+        self.assertEqual(
+            self.ws["G15"].value,
+            '=_xlfn.XLOOKUP(C7,Summary!$D:$D,Summary!$E:$E,"",0,1)&""',
+        )
+
+    def test_key_cell_autodetected_from_layout(self):
+        # F6 wins when populated (report layout); C7 is the fallback because
+        # report tabs use C7 for the Customer PO string.
+        self.ws["C7"] = "PO-123"
+        self.ws["F6"] = "host-a"
+        self.builder.write_asset_tag_formula_to_chassis_row(self.ws)
+        self.assertIn("XLOOKUP(F6,", self.ws["G15"].value)
+
+        ws2 = self.wb.create_sheet("pslip")
+        ws2["C7"] = "host-b"
+        self.builder.write_asset_tag_formula_to_chassis_row(ws2)
+        self.assertIn("XLOOKUP(C7,", ws2["G15"].value)
 
     def test_literal_value_overwritten_by_formula(self):
         # An older workbook may have a literal asset tag at G15
@@ -99,7 +180,7 @@ class TestPropagateLeavesFormulaCellAlone(unittest.TestCase):
         self.ws["C15"] = "Shelf"
 
     def test_skips_when_g15_is_formula(self):
-        self.ws["G15"] = '=XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)'
+        self.ws["G15"] = EXPECTED_FORMULA
         row = self.builder.write_asset_tag_to_chassis_row(self.ws, "NEW_TAG")
         self.assertEqual(row, 15)
         # Formula preserved.
@@ -194,6 +275,89 @@ class TestBuildReportWorkbookPlantsFormula(unittest.TestCase):
             # Hostname-keyed and pointing at Summary E.
             self.assertIn("F6", g15)
             self.assertIn("Summary", g15)
+            # Stored in the form Excel actually resolves.
+            self.assertEqual(g15, EXPECTED_FORMULA)
+
+
+class TestPlantAcrossDeviceTabs(unittest.TestCase):
+    """``plant_asset_tag_formula_on_device_tabs`` is the workbook-wide pass
+    that runs before every save, so tabs an append-mode run didn't rewrite
+    (and packing-slip tabs) are connected too."""
+
+    def setUp(self):
+        self.builder = _make_builder()
+        self.wb = openpyxl.Workbook()
+        self.wb.active.title = "Summary"
+        self.wb["Summary"]["D9"] = "Device Name"
+        self.wb["Summary"]["E9"] = "Asset Tag"
+
+    def _device_tab(self, title: str, **cells) -> object:
+        ws = self.wb.create_sheet(title)
+        ws["F14"] = "DESCRIPTION"
+        for addr, value in cells.items():
+            ws[addr] = value
+        return ws
+
+    def test_plants_on_both_layouts_in_one_pass(self):
+        report = self._device_tab("report-tab", C7="PO-9", F6="host-a")
+        pslip = self._device_tab("pslip-tab", C7="host-b")
+        planted = self.builder.plant_asset_tag_formula_on_device_tabs(self.wb)
+        self.assertEqual(planted, 2)
+        self.assertIn("XLOOKUP(F6,", report["G15"].value)
+        self.assertIn("XLOOKUP(C7,", pslip["G15"].value)
+
+    def test_skips_summary_and_aggregate_tabs(self):
+        # An aggregate tab can carry text at C7 without being a device tab.
+        for name in ("Inventory by Site", "BOM"):
+            ws = self.wb.create_sheet(name)
+            ws["F14"] = "DESCRIPTION"
+            ws["C7"] = "Equipment Description"
+        self.assertEqual(
+            self.builder.plant_asset_tag_formula_on_device_tabs(self.wb), 0,
+        )
+        self.assertIsNone(self.wb["BOM"]["G15"].value)
+        self.assertIsNone(self.wb["Summary"]["G15"].value)
+
+    def test_skips_sheets_with_no_device_name(self):
+        blank = self._device_tab("no-name-tab")
+        self.assertEqual(
+            self.builder.plant_asset_tag_formula_on_device_tabs(self.wb), 0,
+        )
+        self.assertIsNone(blank["G15"].value)
+
+    def test_no_summary_sheet_means_no_plant(self):
+        # The formula references Summary!$D:$D — without that sheet it could
+        # only ever resolve to #REF!, so plant nothing.
+        wb = openpyxl.Workbook()
+        wb.active.title = "device-a"
+        wb["device-a"]["F14"] = "DESCRIPTION"
+        wb["device-a"]["F6"] = "host-a"
+        self.assertEqual(
+            self.builder.plant_asset_tag_formula_on_device_tabs(wb), 0,
+        )
+        self.assertIsNone(wb["device-a"]["G15"].value)
+
+    def test_upgrades_legacy_formula_across_tabs(self):
+        stale = self._device_tab("stale-tab", F6="host-a")
+        stale["G15"] = LEGACY_BARE_FORMULA
+        self.assertEqual(
+            self.builder.plant_asset_tag_formula_on_device_tabs(self.wb), 1,
+        )
+        self.assertEqual(stale["G15"].value, EXPECTED_FORMULA)
+
+    def test_adds_missing_asset_tag_header(self):
+        # The Ciena RLS / Nokia PSI packing-slip templates ship without the
+        # G14 label; the pass fills it so the column isn't unlabeled.
+        tab = self._device_tab("rls-pslip", F6="host-a")
+        self.assertIsNone(tab["G14"].value)
+        self.builder.plant_asset_tag_formula_on_device_tabs(self.wb)
+        self.assertEqual(tab["G14"].value, "Asset Tag")
+
+    def test_existing_header_not_overwritten(self):
+        tab = self._device_tab("has-header", F6="host-a")
+        tab["G14"] = "Asset Tag"
+        self.builder.plant_asset_tag_formula_on_device_tabs(self.wb)
+        self.assertEqual(tab["G14"].value, "Asset Tag")
 
 
 if __name__ == "__main__":

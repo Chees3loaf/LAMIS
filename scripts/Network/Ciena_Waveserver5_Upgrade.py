@@ -45,7 +45,12 @@ from typing import Callable, Optional
 
 import paramiko
 
-from utils.helpers import ensure_host_key_known, get_known_hosts_path, safe_load_host_keys
+from utils.helpers import (
+    clear_known_host_entry,
+    ensure_host_key_known,
+    get_known_hosts_path,
+    safe_load_host_keys,
+)
 from utils.serial_helpers import (
     capture_until_prompt,
     open_serial_with_baud_probe,
@@ -62,6 +67,9 @@ logger = logging.getLogger(__name__)
 _SERIAL_BAUD = 115200
 _SERIAL_PROMPT_TIMEOUT = 10.0
 _SERIAL_CMD_TIMEOUT = 15.0
+_SERIAL_OPEN_ATTEMPTS = 3
+_SERIAL_RETRY_DELAY_S = 2.0
+_SERIAL_WAKE_SEQUENCES = (b"\r\n", b"\r", b"\n")
 # `configuration save` writes the running-config and flushes the change
 # pending marker (the trailing ``*`` on the prompt). Saves take a beat
 # longer than ordinary commands on Waveserver — give them headroom.
@@ -85,9 +93,9 @@ _DOWNLOAD_TIMEOUT_S = 45 * 60
 _ACTIVATE_POLL_INTERVAL_S = 5.0
 _ACTIVATE_TIMEOUT_S = 5 * 60
 
-# Waveserver SSH prompt: ``<hostname>#``. The Waveserver pads the prompt
-# with whitespace before each ``#`` in some firmware revs; accept both.
-_SSH_PROMPT_RE = re.compile(r"([A-Za-z0-9._\-]+)\*?#\s*$")
+# Waveserver SSH prompt: ``<hostname>#``. Some firmware revisions pad the
+# pending-change marker / ``#`` with spaces, so accept ``host *#`` too.
+_SSH_PROMPT_RE = re.compile(r"([A-Za-z0-9._\-]+)[ \t]*\*?#[ \t]*$")
 
 
 class Waveserver5UpgradeScript:
@@ -165,6 +173,8 @@ class Waveserver5UpgradeScript:
         self.output_callback = output_callback or (lambda _msg: None)
         self.stop_callback = stop_callback or (lambda: False)
         self._ssh_prompt: str = ""
+        self._last_ssh_output: str = ""
+        self.activation_complete: bool = False
 
     # ── Public entry point ──────────────────────────────────────────────────
 
@@ -187,13 +197,11 @@ class Waveserver5UpgradeScript:
 
     def _provision_via_serial(self) -> bool:
         self._log(f"Opening serial console on {self.serial_port} @ {_SERIAL_BAUD} baud…")
-        ser = open_serial_with_baud_probe(
-            self.serial_port, [_SERIAL_BAUD],
-            timeout=_SERIAL_PROMPT_TIMEOUT, should_stop=self.stop_callback,
-        )
+        ser = self._open_serial_with_retries()
         if ser is None:
             self._log(
-                f"No usable prompt on {self.serial_port}@{_SERIAL_BAUD}. "
+                f"No usable prompt on {self.serial_port}@{_SERIAL_BAUD} after "
+                f"{_SERIAL_OPEN_ATTEMPTS} attempts. "
                 "Check the serial cable and verify the device is powered."
             )
             return False
@@ -253,6 +261,15 @@ class Waveserver5UpgradeScript:
     def _install_software_via_ssh(self) -> bool:
         self._log(f"Phase 2: connecting to {self.device_ip} over SSH as {self.ssh_user!r}…")
         kh_path = str(get_known_hosts_path())
+        # Every shelf is provisioned onto the same temporary management IP.
+        # A consecutive run therefore represents a new physical host even
+        # though its address is unchanged. Remove only that endpoint's prior
+        # TOFU entry so the new shelf can establish and persist its own key.
+        if clear_known_host_entry(self.device_ip, kh_path):
+            self._log(
+                f"Cleared the previous session host key for {self.device_ip}; "
+                "verifying the newly connected Waveserver."
+            )
         if not ensure_host_key_known(self.device_ip, port=22):
             self._log(f"Host key verification failed for {self.device_ip}.")
             return False
@@ -299,6 +316,12 @@ class Waveserver5UpgradeScript:
                 label="download",
             ):
                 return False
+            if self.activation_complete:
+                self._log(
+                    "Phase 2 complete — activation was already complete; "
+                    "manual commit is required."
+                )
+                return True
 
             # ── Service hardening + diag user ───────────────────────────────
             for cmd in [
@@ -315,8 +338,8 @@ class Waveserver5UpgradeScript:
                     self._log("Stop requested before activate.")
                     return False
                 self._log(f"  ssh >> {cmd}")
-                if self._send(session, cmd, timeout=30) is None:
-                    self._log(f"Timed out after {cmd!r}.")
+                if self._send_with_prompt_recovery(session, cmd, timeout=30) is None:
+                    self._log(f"SSH session could not recover after {cmd!r}.")
                     return False
 
             # ── Activate ────────────────────────────────────────────────────
@@ -350,6 +373,41 @@ class Waveserver5UpgradeScript:
                 pass
 
     # ── Helpers ─────────────────────────────────────────────────────────────
+
+    def _open_serial_with_retries(self):
+        """Open the WS5 console, tolerating a delayed login prompt.
+
+        A previously configured shelf can return ``<hostname> login:`` only
+        after the first probe has timed out. Reopen and wake the console a
+        bounded number of times instead of making the operator restart the
+        entire upgrade manually.
+        """
+        for attempt, wake_sequence in enumerate(
+            _SERIAL_WAKE_SEQUENCES, start=1,
+        ):
+            if self.stop_callback():
+                return None
+            ser = open_serial_with_baud_probe(
+                self.serial_port, [_SERIAL_BAUD],
+                timeout=_SERIAL_PROMPT_TIMEOUT,
+                should_stop=self.stop_callback,
+                preserve_existing_prompt=True,
+                wake_sequence=wake_sequence,
+                assert_control_lines=True,
+            )
+            if ser is not None:
+                if attempt > 1:
+                    self._log(f"Serial console recovered on attempt {attempt}.")
+                return ser
+            if attempt < _SERIAL_OPEN_ATTEMPTS:
+                self._log(
+                    f"No serial prompt on attempt {attempt}/"
+                    f"{_SERIAL_OPEN_ATTEMPTS}; retrying in "
+                    f"{_SERIAL_RETRY_DELAY_S:.0f}s with an alternate "
+                    "Enter sequence…"
+                )
+                time.sleep(_SERIAL_RETRY_DELAY_S)
+        return None
 
     @staticmethod
     def _derive_version(filename: str) -> str:
@@ -387,6 +445,13 @@ class Waveserver5UpgradeScript:
             if state and state != last_state:
                 self._log(f"  {label} state: {state}")
                 last_state = state
+            if state.lower() == "activation complete":
+                self.activation_complete = True
+                self._log(
+                    "Activation Complete. Manual Commit Required. "
+                    "Safe to Disconnect."
+                )
+                return True
             if state.lower() == target_state.lower():
                 return True
             time.sleep(poll_interval)
@@ -418,6 +483,38 @@ class Waveserver5UpgradeScript:
             logger.debug("ssh send failed: %s", exc)
             return None
         return self._read_until_prompt(session, timeout=timeout)
+
+    def _send_with_prompt_recovery(
+        self, session, cmd: str, timeout: float = 30.0,
+    ) -> Optional[str]:
+        """Send an idempotent setup command and recover a delayed prompt.
+
+        Service toggles occasionally apply successfully without repainting
+        the CLI prompt.  Do not resend the command (its outcome is unknown);
+        instead, surface any partial reply and send one blank line to ask the
+        still-open CLI to repaint its prompt.
+        """
+        out = self._send(session, cmd, timeout=timeout)
+        if out is not None:
+            return out
+
+        partial = self._last_ssh_output.strip()
+        if partial:
+            self._log(f"  Device reply before prompt timeout: {partial}")
+        self._log(f"  No prompt after {cmd!r}; probing the existing SSH session…")
+        try:
+            if session.closed or session.exit_status_ready():
+                return None
+            session.send("\n")
+        except Exception as exc:
+            logger.debug("ssh prompt recovery failed: %s", exc)
+            return None
+
+        recovered = self._read_until_prompt(session, timeout=10.0)
+        if recovered is None:
+            return None
+        self._log(f"  SSH prompt recovered after {cmd!r}; continuing.")
+        return partial + recovered
 
     def _detect_prompt(self, session) -> bool:
         time.sleep(2.0)
@@ -469,13 +566,16 @@ class Waveserver5UpgradeScript:
         """
         deadline = time.time() + timeout
         buf = bytearray()
+        self._last_ssh_output = ""
         while time.time() < deadline:
             if self.stop_callback():
+                self._last_ssh_output = buf.decode("utf-8", errors="replace")
                 return None
             try:
                 if session.recv_ready():
                     chunk = session.recv(65535)
                     if not chunk:
+                        self._last_ssh_output = buf.decode("utf-8", errors="replace")
                         return None
                     buf.extend(chunk)
                 else:
@@ -483,14 +583,18 @@ class Waveserver5UpgradeScript:
                     if _SSH_PROMPT_RE.search(tail):
                         time.sleep(0.2)
                         if not session.recv_ready():
+                            self._last_ssh_output = tail
                             return tail
                         continue
                     if session.closed or session.exit_status_ready():
+                        self._last_ssh_output = tail
                         return None
                     time.sleep(0.1)
             except Exception as exc:
                 logger.debug("recv error: %s", exc)
+                self._last_ssh_output = buf.decode("utf-8", errors="replace")
                 return None
+        self._last_ssh_output = buf.decode("utf-8", errors="replace")
         return None
 
     # ── Output helpers ──────────────────────────────────────────────────────

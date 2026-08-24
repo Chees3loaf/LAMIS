@@ -1301,13 +1301,21 @@ class InventoryGUI:
                 "log",
                 f"Starting LAN inventory — {total_ips} device(s) to scan.",
             ))
+            # Phase 1 is a TCP probe of the management ports, not an ICMP
+            # ping -- a shelf that answers ping but serves no CLI cannot be
+            # inventoried. Labelling it "Pinging" made a PSI with remote
+            # access disabled on its OAMP interface look like a routing or
+            # IP-range fault, so the wording tracks what is actually tested.
             queue.put((
                 "log",
-                f"Phase 1/3 · Pinging {total_ips} device(s)…",
+                f"Phase 1/3 · Probing SSH/Telnet on {total_ips} device(s)…",
             ))
 
+            no_mgmt_port = []
+
             def _probe(ip):
-                return ip, script_interface.is_reachable(ip)
+                ok, reason = script_interface.probe_host(ip)
+                return ip, ok, reason
 
             with ThreadPoolExecutor(max_workers=min(20, total_ips or 1)) as ping_pool:
                 futures = {ping_pool.submit(_probe, ip): ip for ip in context["ip_list"]}
@@ -1316,20 +1324,30 @@ class InventoryGUI:
                         ping_pool.shutdown(wait=False, cancel_futures=True)
                         queue.put(("aborted", None))
                         return
-                    ip, alive = future.result()
+                    ip, alive, reason = future.result()
                     if alive:
                         with reachable_lock:
                             reachable_ips.append(ip)
                     else:
-                        self.failed_ips[ip] = "Unreachable"
-                    queue.put(("progress", (idx, total_ips, f"Pinging {idx}/{total_ips}")))
+                        self.failed_ips[ip] = reason
+                        if reason == script_interface.PROBE_NO_MGMT_PORT:
+                            no_mgmt_port.append(ip)
+                    queue.put(("progress", (idx, total_ips, f"Probing {idx}/{total_ips}")))
 
             unreachable_count = total_ips - len(reachable_ips)
             queue.put((
                 "log",
-                f"Ping complete — {len(reachable_ips)} reachable, "
+                f"Probe complete — {len(reachable_ips)} reachable, "
                 f"{unreachable_count} unreachable.",
             ))
+            if no_mgmt_port:
+                queue.put((
+                    "log",
+                    f"{len(no_mgmt_port)} device(s) answered ping but had no "
+                    f"SSH/Telnet listener ({', '.join(sorted(no_mgmt_port))}) — "
+                    f"the address is right; enable management access on that "
+                    f"interface (Nokia 1830 PSI: remote CIT on the OAMP port).",
+                ))
 
             if not reachable_ips:
                 queue.put(("log", "No reachable IPs found."))

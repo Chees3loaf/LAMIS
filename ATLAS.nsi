@@ -15,9 +15,9 @@
 ; ---- Version (single source of truth) -------------------------------------
 ; Keep ATLAS_VERSION in lockstep with config.APP_VERSION in the Python source.
 ; ATLAS_VERSION_4PART is the Windows MAJOR.MINOR.PATCH.BUILD form required by
-; VIProductVersion; build number stays at 0.
-!define ATLAS_VERSION "2.0.10.0"
-!define ATLAS_VERSION_4PART "2.0.10.0"
+; VIProductVersion; its fourth component carries the hotfix/build number.
+!define ATLAS_VERSION "2.1.0.2"
+!define ATLAS_VERSION_4PART "2.1.0.2"
 
 ; ---- Basic settings --------------------------------------------------------
 Name "ATLAS"

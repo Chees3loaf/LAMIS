@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import hashlib
 
 import pytest
 
@@ -142,6 +143,49 @@ def _deferred_colan() -> ManagementInterface:
 @pytest.fixture(scope="module")
 def generator() -> R40ExactConfigGenerator:
     return R40ExactConfigGenerator()
+
+
+def test_all_six_audited_provider_command_streams_match_reviewed_snapshots(
+    generator: R40ExactConfigGenerator,
+) -> None:
+    """Require an explicit audit update for any fixed CLI stream change."""
+
+    expected = {
+        R40_CDA_RLA12_C_2DEG_NO_SRA: (
+            149,
+            "c4710785a20f245322c0b2abaa67bf82259a012d905b42f8488524cc046b0330",
+        ),
+        R40_CDC_ROADM_RLA32_C_2DEG_CCMD8X24_NO_SRA: (
+            256,
+            "082d87a3406d4db84ecf0519ef91b6523f15224e192dd7c2446428adf477f544",
+        ),
+        R40_CL_ROADM_RLA12_LRU12_1DEG_NO_SRA: (
+            104,
+            "fcfd99ac61ce85fa673df88170dc87b504087fb249a6b4fff33d439aa3f0c624",
+        ),
+        R40_CL_ROADM_RLA12_LRU12_1DEG_SRA6: (
+            110,
+            "151369fc045603f74604f793daba1e44ce3288d39b41328d9aa93cb0847556e0",
+        ),
+        R40_R2_CL_DLE_S1_NO_SRA: (
+            98,
+            "e8fd66d8bbd0479599a24e61bd5fd7a3d38afb16a3962647490840adcf7ab194",
+        ),
+        R40_R2_CL_DLE_S1_SRA4: (
+            104,
+            "56c1cc50f10e26910ef64d475f315633f7f6a4b82e19d5734131a3eff72303a9",
+        ),
+    }
+
+    actual = {}
+    for provider_id in expected:
+        cli = generator.generate(_request(provider_id)).cli_text
+        actual[provider_id] = (
+            len(cli.splitlines()),
+            hashlib.sha256(cli.encode("utf-8")).hexdigest(),
+        )
+
+    assert actual == expected
 
 
 def _direct_provider_modules(
@@ -529,14 +573,23 @@ def test_each_exact_provider_generates_a_staged_candidate(
 
     assert not [issue for issue in artifact.issues if issue.severity == "error"]
     assert lines.count("batch") == lines.count("validate")
-    assert lines.count("batch") == lines.count("commit")
     assert lines.count("batch") == lines.count("quit")
+    assert lines.count("commit") == 0
     assert lines[0] == "batch"
     assert "set ztp admin-state disabled" in lines
     assert "commit —> quit" not in artifact.cli_text
     assert "SITE1977" not in artifact.cli_text
     assert artifact.manifest["release"] == "RLS R4.0"
     assert artifact.manifest["deployment_approved"] is False
+    assert artifact.manifest["deployment_approval_state"] == "not_approved"
+    assert artifact.manifest["deployable_cli"] is False
+    assert artifact.manifest["candidate_generation_ready"] is True
+    assert (
+        artifact.manifest["candidate_safety_mode"]
+        == "validate_without_commit"
+    )
+    assert artifact.manifest["commit_commands_emitted"] is False
+    assert artifact.manifest["commit_command_count"] == 0
     assert artifact.manifest["on_box_validate_required"] is True
     assert artifact.manifest["partial_or_legacy_template_output"] is False
     supports_raman = R40_PROVIDER_CATALOG[provider_id].supports_raman
@@ -550,12 +603,118 @@ def test_each_exact_provider_generates_a_staged_candidate(
     assert "openconfig-system:system ntp" not in artifact.cli_text
     assert artifact.manifest["ntp_managed_by_customer"] is True
     assert artifact.manifest["ntp_commands_emitted"] is False
+    assert "DEPLOYMENT RESULT: NOT APPROVED" in artifact.validation_report
+    assert (
+        "CANDIDATE SAFETY: VALIDATE WITHOUT COMMIT"
+        in artifact.validation_report
+    )
+    assert "contains validate transactions but no commit" in (
+        artifact.annotated_text
+    )
 
     # Runtime and licensed optical features are deliberately outside this
     # pre-calibration provider.
     assert "system features OTDR enabled true" not in artifact.cli_text
     assert 'system features "SPAN CALIBRATION" enabled true' not in artifact.cli_text
     assert "trace-on-fiber-degrade" not in artifact.cli_text
+
+
+def test_unknown_numeric_site_id_is_omitted_without_inventing_zero(
+    generator: R40ExactConfigGenerator,
+) -> None:
+    request = replace(
+        _request(R40_CL_ROADM_RLA12_LRU12_1DEG_NO_SRA),
+        site_id=None,
+    )
+
+    artifact = generator.generate(request)
+
+    assert "set ciena-6500r-system:system id site " not in artifact.cli_text
+    assert 'set shelf name "SITE-104-1"' in artifact.cli_text
+    assert (
+        'set ciena-6500r-system:system id member name "SITE-104-1"'
+        in artifact.cli_text
+    )
+    assert any(
+        issue.code == "SITE_ID_DEFERRED"
+        and issue.field == "site_id"
+        and issue.severity == "warning"
+        for issue in artifact.issues
+    )
+    assert artifact.manifest["numeric_site_id_state"] == "deferred"
+    assert (
+        artifact.manifest["numeric_site_identity_command_emitted"] is False
+    )
+    assert artifact.manifest["request"]["site_id"] is None
+    assert "Numeric site identity: deferred" in artifact.annotated_text
+    assert "site identity command omitted" in artifact.validation_report
+
+
+def test_known_numeric_site_id_retains_existing_identity_command(
+    generator: R40ExactConfigGenerator,
+) -> None:
+    request = _request(R40_CL_ROADM_RLA12_LRU12_1DEG_NO_SRA)
+
+    artifact = generator.generate(request)
+
+    assert (
+        'set ciena-6500r-system:system id site id 104 name "SITE-104" '
+        'description "El Paso" address "El Paso, TX"'
+        in artifact.cli_text
+    )
+    assert artifact.manifest["numeric_site_id_state"] == "configured"
+    assert (
+        artifact.manifest["numeric_site_identity_command_emitted"] is True
+    )
+
+
+def test_customer_fqdn_neighbor_is_accepted_under_strict_dns_grammar(
+    generator: R40ExactConfigGenerator,
+) -> None:
+    request = _request(R40_CL_ROADM_RLA12_LRU12_1DEG_NO_SRA)
+    fqdn = "usqtn1-l8i2.edge01.bb.net.apple.com"
+    request = replace(
+        request,
+        line_1=replace(request.line_1, neighbor_node=fqdn),
+    )
+
+    artifact = generator.generate(request)
+
+    assert fqdn in artifact.cli_text
+    assert not [
+        issue
+        for issue in artifact.issues
+        if issue.field == "line_1.neighbor_node"
+        and issue.severity == "error"
+    ]
+
+
+@pytest.mark.parametrize(
+    "neighbor",
+    (
+        "bad_label.bb.net.apple.com",
+        "node..bb.net.apple.com",
+        f"{'x' * 64}.bb.net.apple.com",
+    ),
+)
+def test_invalid_customer_fqdn_neighbor_remains_rejected(
+    generator: R40ExactConfigGenerator,
+    neighbor: str,
+) -> None:
+    request = _request(R40_CL_ROADM_RLA12_LRU12_1DEG_NO_SRA)
+    request = replace(
+        request,
+        line_1=replace(request.line_1, neighbor_node=neighbor),
+    )
+
+    with pytest.raises(ConfigValidationError) as exc:
+        generator.generate(request)
+
+    assert any(
+        issue.code == "INVALID_NEIGHBOR_NODE"
+        and issue.field == "line_1.neighbor_node"
+        for issue in exc.value.issues
+    )
 
 
 def test_leaf_is_preserved_with_vendor_enum_warning(
@@ -915,9 +1074,34 @@ def test_payload_round_trip_is_strict() -> None:
     encoded = encode_r40_exact_payload(request)
 
     assert encoded["schema_id"] == R40_PAYLOAD_SCHEMA_ID
-    assert encoded["schema_version"] == R40_PAYLOAD_SCHEMA_VERSION == "1.4"
+    assert encoded["schema_version"] == R40_PAYLOAD_SCHEMA_VERSION == "1.5"
     assert decode_r40_exact_payload(encoded) == request
     assert "ntp_servers" not in encoded["request"]
+
+    deferred_site = replace(request, site_id=None)
+    deferred_site_encoded = encode_r40_exact_payload(deferred_site)
+    assert deferred_site_encoded["request"]["site_id"] is None
+    assert decode_r40_exact_payload(deferred_site_encoded) == deferred_site
+
+    legacy_numeric_site = {
+        **encoded,
+        "schema_version": "1.4",
+    }
+    assert decode_r40_exact_payload(legacy_numeric_site) == request
+    with pytest.raises(ValueError, match="Legacy.*site_id"):
+        decode_r40_exact_payload(
+            {
+                **deferred_site_encoded,
+                "schema_version": "1.4",
+            }
+        )
+
+    bad_site_id = {
+        **encoded["request"],
+        "site_id": "0",
+    }
+    with pytest.raises(ValueError, match="site_id must be an integer or null"):
+        decode_r40_exact_payload({**encoded, "request": bad_site_id})
 
     with pytest.raises(ValueError, match="unknown fields"):
         decode_r40_exact_payload({**encoded, "unexpected": True})
@@ -1404,7 +1588,7 @@ def test_deferred_terminal_colan_payload_round_trip_stays_schema_1_4(
 
     encoded = encode_r40_exact_payload(request)
 
-    assert encoded["schema_version"] == R40_PAYLOAD_SCHEMA_VERSION == "1.4"
+    assert encoded["schema_version"] == R40_PAYLOAD_SCHEMA_VERSION == "1.5"
     assert "colan_review_state" not in encoded["request"]
     assert decode_r40_exact_payload(encoded) == request
 

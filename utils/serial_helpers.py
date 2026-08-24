@@ -73,6 +73,10 @@ _PROMPT_RE = re.compile(
 )
 
 _LOGIN_RE = re.compile(rb"(?:[Ll]ogin|[Uu]sername):\s*$")
+# Normal Waveserver 5 getty prompts before and after ATLAS provisions the
+# standard hostname. Keep these explicit even though _LOGIN_RE also matches
+# their suffix; doing so documents and tests both supported shelf states.
+_WS5_LOGIN_RE = re.compile(rb"(?:Waveserver-5|WS5_1)\s+[Ll]ogin:\s*$")
 # Getty "login:" vs the inner "Username:" must be answered differently for the
 # Nokia 1830 family (login: -> cli, Username: -> admin), so match them
 # separately. Both end-anchored so the banner's "Last Login:" line never matches.
@@ -178,6 +182,9 @@ def open_serial_with_baud_probe(
     *,
     timeout: float = 2.0,
     should_stop: Optional[Callable[[], bool]] = None,
+    preserve_existing_prompt: bool = False,
+    wake_sequence: bytes = b"\r\n",
+    assert_control_lines: bool = False,
 ):
     """Open *port* trying each baud in *baud_rates*, returning the first
     that produces a recognisable login/shell/password prompt within
@@ -213,6 +220,39 @@ def open_serial_with_baud_probe(
         except Exception as exc:
             logging.warning(f"[SERIAL] Could not open {port}@{baud}: {exc}")
             continue
+        if assert_control_lines:
+            # Match conventional terminal programs, which normally hold both
+            # modem-control lines active while the console is open. Some USB
+            # serial adapters otherwise open successfully but receive no data.
+            try:
+                ser.dtr = True
+                ser.rts = True
+                logging.info(f"[SERIAL] Asserted DTR/RTS on {port}")
+            except Exception as exc:
+                logging.info(
+                    f"[SERIAL] Could not explicitly assert DTR/RTS on "
+                    f"{port}: {exc}"
+                )
+        # A Waveserver may already have its normal ``Waveserver-5 login:``
+        # or ``WS5_1 login:`` prompt waiting when the port opens. Check those
+        # bytes before resetting the buffer; otherwise we erase the valid
+        # prompt and can wait forever for firmware that does not repaint it.
+        if preserve_existing_prompt:
+            try:
+                waiting = ser.in_waiting
+                existing = ser.read(waiting) if waiting else b""
+            except Exception:
+                existing = b""
+            if _WS5_LOGIN_RE.search(existing[-512:]):
+                # Hand the bytes to serial_login; it normally clears the
+                # input buffer and would otherwise discard the very prompt
+                # that made this probe succeed.
+                setattr(ser, "_atlas_initial_prompt", existing)
+                logging.info(
+                    f"[SERIAL] {port} locked onto {baud} baud from existing "
+                    "Waveserver login prompt"
+                )
+                return ser
         try:
             ser.reset_input_buffer()
         except Exception:
@@ -222,7 +262,7 @@ def open_serial_with_baud_probe(
             # when the operator hits Enter. Some Ciena RLS firmwares
             # treat a bare ``\r`` as "carriage return, no commit" and
             # only render the prompt when they see the LF.
-            ser.write(b"\r\n")
+            ser.write(wake_sequence)
         except Exception:
             try:
                 ser.close()
@@ -274,16 +314,27 @@ def serial_login(
       - if Login:/Username: appears, walk *defaults* trying each pair
         until a shell prompt appears or all pairs fail
     """
-    try:
-        ser.reset_input_buffer()
-    except Exception:
-        pass
-    # Send a full ENTER (CRLF) -- some Ciena CLI engines need the LF
-    # to commit; bare CR gets echoed but doesn't render the prompt.
-    # Matches the wake sequence used by ``open_serial_with_baud_probe``.
-    ser.write(b"\r\n")
-    logger.debug("[SERIAL][login] wake-up CRLF sent; waiting for prompt")
-    buf, matched = _read_until(ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop)
+    initial_prompt = getattr(ser, "_atlas_initial_prompt", b"")
+    if initial_prompt:
+        try:
+            delattr(ser, "_atlas_initial_prompt")
+        except Exception:
+            pass
+        buf, matched = bytes(initial_prompt), True
+        logger.debug("[SERIAL][login] using prompt captured when port opened")
+    else:
+        try:
+            ser.reset_input_buffer()
+        except Exception:
+            pass
+        # Send a full ENTER (CRLF) -- some Ciena CLI engines need the LF
+        # to commit; bare CR gets echoed but doesn't render the prompt.
+        # Matches the wake sequence used by ``open_serial_with_baud_probe``.
+        ser.write(b"\r\n")
+        logger.debug("[SERIAL][login] wake-up CRLF sent; waiting for prompt")
+        buf, matched = _read_until(
+            ser, _PROMPT_RE, timeout=timeout, should_stop=should_stop
+        )
     tail = buf[-512:]
 
     if _SHELL_RE.search(tail):

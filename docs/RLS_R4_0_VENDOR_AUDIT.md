@@ -11,9 +11,12 @@ The supplied RLS 4.0 manuals establish the active release boundary:
 - The removed workbook-derived generator could not be promoted by changing its
   release string. Every one of its five profiles had confirmed invalid or
   unsafe output.
-- ATLAS now implements four narrow exact RLS 4.0 providers. A generic role
+- ATLAS now implements six narrow exact RLS 4.0 providers. A generic role
   remains non-ready until an operator explicitly selects one compatible exact
   provider, reviews every input, and stores its versioned request.
+- Diagram transcription evidence uses schema 1.8. Reviewed exact-provider
+  requests use schema 1.5; neither schema turns extracted or defaulted values
+  into observed shelf telemetry.
 
 This is a fail-closed result. It does not mean other RLS 4.0 arrangements lack
 vendor support; it means each arrangement needs its own audited provider.
@@ -319,11 +322,11 @@ route-readiness and on-box validation gates.
 
 The paired pre-calibration candidates still require review of the recorded
 build/schema candidate, physical packout verification, reviewed optical paths,
-automatic SRA controls, and successful on-box `validate` before commit. Later
-SRA/RAMAN enablement and calibration require separately approved
-fiber-specific engineering, the vendor OTDR go/no-go result, and clearance of
-activation-inhibited alarms. ATLAS documents those requirements but neither
-performs nor attests to them.
+automatic SRA controls, and successful on-box `validate` before a separately
+approved deployment. Later SRA/RAMAN enablement and calibration require
+separately approved fiber-specific engineering, the vendor OTDR go/no-go
+result, and clearance of activation-inhibited alarms. ATLAS documents those
+requirements but neither performs nor attests to them.
 
 Provider confirmation is always explicit. The customer diagram can seed TID,
 site, loopback, route OSPF area, distinct A/Z adjacency, and separately visible
@@ -351,7 +354,19 @@ active optical path and checked against both endpoint reviews and every exact
 provider request. This route-wide scope removes repetitive entry without
 turning a customer shorthand into deployable CLI.
 
-Exact-payload schema 1.4 makes provider line cardinality explicit. A profile
+The project also persists one customer-neutral route policy. An optional DNS
+suffix prepopulates shelf hostnames and adjacent-neighbor identities as FQDNs
+while keeping the member/shelf identity as the bare TID. Blank suffix keeps
+those fields as bare TIDs. Independent A- and Z-facing input/output
+patch-panel defaults seed two-sided shelves from the supplied known-good
+field-config contract: 0.5/0.5 dB on the A-facing pair and 0.2/0.2 dB on the
+Z-facing pair. A route-facing terminal degree uses the audited 0.5/0.5-dB
+review default at either endpoint. The policy also stores the optional
+terminal-COLAN OSPF metric. These are editable review defaults, not vendor
+telemetry; changing the policy invalidates route-bound payloads for fresh
+validation.
+
+Exact-payload schema 1.5 makes provider line cardinality explicit. A profile
 contains one or two fixed line records. The one-degree C+L RLA12/LRU12
 provider requires `line_1` and requires `line_2` to be `null`; its single
 mux/demux pair carries both A→Z and Z→A traffic. The two-degree RLA terminal
@@ -411,7 +426,7 @@ compatible; that sibling still does not authorize any of those excluded
 hardware groups.
 ATLAS never invents a second physical degree for reverse traffic.
 
-Schema 1.4 also codifies the deployment-management boundary. Add/Drop and
+Schema 1.5 also codifies the deployment-management boundary. Add/Drop and
 ROADM exact providers support terminal COLAN as one optional, all-or-nothing
 block. In configured mode, one complete customer-approved `colan-x` or
 `colan-a` record is strictly validated and emitted. In deferred factory-staging
@@ -439,8 +454,10 @@ Schemas 1.2 and 1.3 are retired rather than migrated in place. Schema 1.2 DLE
 requests would otherwise render materially different neighbor CLI after the
 peer correction; schema 1.3 cannot express the one-degree request cardinality
 or the current provider-fixed link-name contract. ATLAS opens current schema
-1.4 review facts while retaining an old payload until the operator validates
-and applies the replacement.
+1.5 review facts while retaining an old payload until the operator validates
+and applies the replacement. Schema 1.4 remains readable only for its original
+numeric site identity; schema 1.5 adds an explicit `null` state so an unknown
+site ID omits the complete site-identity command instead of inventing zero.
 
 OSC pluggables are created in the complete initial-OAM batch immediately after
 the loopback `/32`. This follows the R4.0 OAM requirement to create an OSC
@@ -470,7 +487,7 @@ disabled. The separate runtime package may be customer- or Ciena-owned,
 including PlannerPlus when applicable; the audited generator does not assume
 LightRiver uses PlannerPlus.
 
-Schema 1.4 keeps the six former confirmation Booleans only for exact
+Schema 1.5 keeps the six former confirmation Booleans only for exact
 decode/encode compatibility. `false` does not block offline generation, and
 `true` does not establish physical verification. The manifest instead exposes
 provider-applicable `deployment_controls` records as
@@ -531,21 +548,22 @@ Relevant evidence includes:
 - Alarms/Module Replacement PDF pages 92, 100–101, 123, and 244: PEC, CV,
   unknown-fiber, and calibration-failure consequences.
 
-The safe execution baseline for every RLS 4.0 provider is:
+The exported pre-calibration candidate boundary for every RLS 4.0 provider is:
 
 ```text
 batch
 <one complete dependency-safe command group>
 validate
-commit
 quit
 ```
 
-An exported `validate` line is only an instruction. Deployment still requires
-the operator to capture a successful validation result from the target shelf
-running the matching RLS 4.0 build/schema and to stop before `commit` on any
-error. `save-config` may be used as a post-commit backup; it is not a
-substitute for candidate validation or commit.
+The candidate deliberately contains no `commit`. An exported `validate` line
+is only an instruction: the operator must capture a successful result from
+the target shelf running the matching reviewed RLS 4.0 build/schema. Any later
+commit belongs to a separate, explicitly approved deployment workflow and
+must not proceed after a validation error. `save-config` may be used as a
+post-commit backup in that separate workflow; it is not a substitute for
+candidate validation or deployment approval.
 
 ## ATLAS policy
 

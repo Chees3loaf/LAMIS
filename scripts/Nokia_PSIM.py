@@ -19,6 +19,7 @@ from typing import Callable, Dict, List, Optional
 import pandas as pd
 
 from scripts.Nokia_PSI import Script as PSIScript
+from scripts._nokia_1830_family import iface_column_offsets, split_iface_row
 
 
 class Script(PSIScript):
@@ -213,17 +214,24 @@ class Script(PSIScript):
         """
         iface_data = []
         try:
-            for raw in output.strip().splitlines():
-                line = raw.strip()
-                if not line or line.startswith('-') or line.lower().startswith('location'):
+            stripped = output.strip()
+            pn_col, sn_col = iface_column_offsets(stripped)
+            for raw in stripped.splitlines():
+                if raw.strip().startswith('-'):
                     continue
-                if not re.match(r'^\d+/\S+', line):
+                if not re.match(r'^\s*\d+/\S+', raw):
                     continue
-                tokens = line.split()
-                if len(tokens) < 4:
+                # ``len(tokens) < 4: continue`` used to live here, which threw
+                # away every third-party pluggable: Nokia prints no Part
+                # Number for them, so a copper LAN SFP is a three-token row.
+                fields = split_iface_row(raw, pn_col, sn_col)
+                if fields is None:
                     continue
-                location, module_type, part_number, serial_number = tokens[:4]
-                description = self.db_cache.lookup_part(part_number[:10])
+                location, module_type, part_number, serial_number = fields
+                description = (
+                    self.db_cache.lookup_part(part_number[:10])
+                    if part_number else ''
+                )
                 iface_data.append({
                     'System Name': '',
                     'System Type': '',

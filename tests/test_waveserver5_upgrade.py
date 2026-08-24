@@ -409,12 +409,27 @@ class TestPromptRegexAcceptsWaveserverAsterisk(unittest.TestCase):
         self.assertIsNotNone(_PROMPT_RE.search(b"WS5_1*#\n"[:-1]))
         self.assertIsNotNone(_PROMPT_RE.search(b"Waveserver-5*#"))
 
+    def test_configured_hostname_login_prompt_matches(self):
+        from utils.serial_helpers import _WS5_LOGIN_RE
+
+        for prompt in (b"Waveserver-5 login: ", b"WS5_1 login: "):
+            with self.subTest(prompt=prompt):
+                self.assertIsNotNone(_PROMPT_RE.search(prompt))
+                self.assertIsNotNone(_WS5_LOGIN_RE.search(prompt))
+
     def test_sros_a_prompt_still_matches(self):
         # Backwards-compat: the existing Nokia SROS prompt forms must
         # keep matching after the asterisk relaxation.
         self.assertIsNotNone(_SHELL_RE.search(b"A:lrt2#"))
         self.assertIsNotNone(_SHELL_RE.search(b"*A:lrt2#"))
         self.assertIsNotNone(_SHELL_RE.search(b"B:lrt2>"))
+
+    def test_ssh_prompt_accepts_firmware_padding(self):
+        from scripts.Network.Ciena_Waveserver5_Upgrade import _SSH_PROMPT_RE
+
+        for prompt in ("WS5_1#", "WS5_1*#", "WS5_1   #", "WS5_1   *#"):
+            with self.subTest(prompt=prompt):
+                self.assertIsNotNone(_SSH_PROMPT_RE.search(prompt))
 
 
 class TestWaveserver5VersionDerivation(unittest.TestCase):
@@ -483,6 +498,9 @@ class TestWaveserver5StatusTableParser(unittest.TestCase):
     _SAMPLE_ACTIVATING = _SAMPLE_DOWNLOADING.replace(
         "Download In Progress", "Activation In Progress"
     )
+    _SAMPLE_ACTIVATION_COMPLETE = _SAMPLE_DOWNLOADING.replace(
+        "Download In Progress", "Activation Complete"
+    )
 
     def test_download_in_progress(self):
         self.assertEqual(
@@ -499,8 +517,86 @@ class TestWaveserver5StatusTableParser(unittest.TestCase):
             self.parse(self._SAMPLE_ACTIVATING), "Activation In Progress"
         )
 
+    def test_activation_complete_is_terminal_success(self):
+        from unittest import mock
+        from scripts.Network.Ciena_Waveserver5_Upgrade import (
+            Waveserver5UpgradeScript,
+        )
+
+        runner = Waveserver5UpgradeScript.__new__(Waveserver5UpgradeScript)
+        runner.activation_complete = False
+        runner.stop_callback = mock.Mock(return_value=False)
+        runner._send = mock.Mock(return_value=self._SAMPLE_ACTIVATION_COMPLETE)
+        runner._log = mock.Mock()
+
+        self.assertTrue(runner._wait_for_state(
+            object(), target_state="Download Complete", timeout=1,
+            poll_interval=0, label="download",
+        ))
+        self.assertTrue(runner.activation_complete)
+        runner._log.assert_any_call(
+            "Activation Complete. Manual Commit Required. Safe to Disconnect."
+        )
+
     def test_returns_empty_when_table_missing(self):
         self.assertEqual(self.parse("garbage output"), "")
+
+
+class TestWaveserver5PromptRecovery(unittest.TestCase):
+    def test_timeout_probes_prompt_without_resending_command(self):
+        from unittest import mock
+        from scripts.Network.Ciena_Waveserver5_Upgrade import (
+            Waveserver5UpgradeScript,
+        )
+
+        runner = Waveserver5UpgradeScript.__new__(Waveserver5UpgradeScript)
+        runner._last_ssh_output = "command accepted\r\n"
+        runner._log = mock.Mock()
+        runner._send = mock.Mock(return_value=None)
+        runner._read_until_prompt = mock.Mock(return_value="WS5_1   *#")
+        session = mock.Mock(closed=False)
+        session.exit_status_ready.return_value = False
+
+        out = runner._send_with_prompt_recovery(session, "system server sftp disable")
+
+        runner._send.assert_called_once_with(
+            session, "system server sftp disable", timeout=30.0,
+        )
+        session.send.assert_called_once_with("\n")
+        self.assertIn("WS5_1", out)
+
+
+class TestWaveserver5SerialRetry(unittest.TestCase):
+    def test_retries_silent_console_and_accepts_late_login_prompt(self):
+        from unittest import mock
+        from scripts.Network import Ciena_Waveserver5_Upgrade as ws5
+
+        runner = ws5.Waveserver5UpgradeScript.__new__(
+            ws5.Waveserver5UpgradeScript
+        )
+        runner.serial_port = "COM9"
+        runner.stop_callback = mock.Mock(return_value=False)
+        runner._log = mock.Mock()
+        late_console = object()
+
+        with mock.patch.object(
+            ws5, "open_serial_with_baud_probe",
+            side_effect=[None, late_console],
+        ) as probe, mock.patch.object(ws5.time, "sleep") as sleep:
+            result = runner._open_serial_with_retries()
+
+        self.assertIs(result, late_console)
+        self.assertEqual(probe.call_count, 2)
+        self.assertTrue(
+            probe.call_args.kwargs["preserve_existing_prompt"]
+        )
+        self.assertTrue(probe.call_args.kwargs["assert_control_lines"])
+        self.assertEqual(
+            [call.kwargs["wake_sequence"] for call in probe.call_args_list],
+            [b"\r\n", b"\r"],
+        )
+        sleep.assert_called_once_with(ws5._SERIAL_RETRY_DELAY_S)
+        runner._log.assert_any_call("Serial console recovered on attempt 2.")
 
 
 class TestWaveserver5ScriptShape(unittest.TestCase):
@@ -579,6 +675,13 @@ class TestWaveserver5ScriptShape(unittest.TestCase):
                 f"Phase 2 SSH command {needle!r} is missing from the "
                 f"Waveserver5UpgradeScript class",
             )
+
+    def test_reused_management_ip_clears_stale_host_key_first(self):
+        src = inspect.getsource(self.cls._install_software_via_ssh)
+        clear_pos = src.find("clear_known_host_entry")
+        verify_pos = src.find("ensure_host_key_known")
+        self.assertGreater(clear_pos, 0)
+        self.assertGreater(verify_pos, clear_pos)
 
 
 class TestSoftwareUpgradeFrameRegistersWaveserver5(unittest.TestCase):

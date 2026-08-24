@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 import ipaddress
 import logging
+import math
 import os
 from pathlib import Path
 from queue import Empty, Queue
@@ -33,9 +34,14 @@ from utils.rls_config.common import (
 from utils.rls_config.route_project import (
     DeploymentReadiness,
     OpticalPath,
+    OpticalPathSegment,
+    PATH_SOURCE_DISCREPANCIES_KEY,
+    PATH_SOURCE_DISCREPANCY_PENDING,
+    PATH_SOURCE_DISCREPANCY_SUPERSEDED,
     PathEndpointReview,
     PROFILE_REGISTRY,
     R40_PENDING_SRA_PEER_REVIEW,
+    RouteCustomerPolicy,
     RouteLink,
     RouteProject,
     ShelfInstance,
@@ -62,6 +68,7 @@ try:
         MIN_FIELD_CONFIDENCE,
         RAMAN_CALLOUT_CONVENTION_DISABLED,
         RAMAN_CALLOUT_CONVENTION_SMALL_RED_SLOT_PORT,
+        SOURCE_EVIDENCE_DISCREPANCY_CODE,
         DiagramImportConventions,
         DiagramImportError,
         DiagramImportResult,
@@ -76,12 +83,13 @@ except ImportError as _diagram_import_error:  # pragma: no cover - packaging gua
     import_route_diagram = None  # type: ignore[assignment]
     load_diagram_source = None  # type: ignore[assignment]
     DIAGRAM_EVIDENCE_SCHEMA_ID = "atlas.ciena.rls.diagram-import-evidence"
-    DIAGRAM_EVIDENCE_SCHEMA_VERSION = "1.7"
+    DIAGRAM_EVIDENCE_SCHEMA_VERSION = "1.8"
     MIN_FIELD_CONFIDENCE = 0.85
     RAMAN_CALLOUT_CONVENTION_DISABLED = "disabled"
     RAMAN_CALLOUT_CONVENTION_SMALL_RED_SLOT_PORT = (
         "small-red-slot-port-v1"
     )
+    SOURCE_EVIDENCE_DISCREPANCY_CODE = "SOURCE_EVIDENCE_DISCREPANCY"
 
     def tid_site_code_review_suggestion(_tid: str | None) -> str:
         return ""
@@ -156,6 +164,7 @@ DIAGRAM_PRIVACY_NOTICE = (
 )
 
 R40_UI_RELEASE = SUPPORTED_SOFTWARE_RELEASE
+_AUDITED_TERMINAL_ROUTE_PATCH_LOSS_DB = 0.5
 R40_UI_PROFILE_IDS = (
     "add_drop_a",
     "add_drop_z",
@@ -1025,6 +1034,39 @@ def _diagram_source_record(result: DiagramImportResult) -> dict[str, Any]:
                 "fiber_start": getattr(span, "fiber_start", None),
                 "fiber_end": getattr(span, "fiber_end", None),
                 "fiber_type": getattr(span, "fiber_type", None),
+                "segment_count": len(
+                    tuple(getattr(span, "segments", ()) or ())
+                ),
+                "segments": [
+                    {
+                        "order": getattr(segment, "order", None),
+                        "from_tid": getattr(segment, "from_tid", None),
+                        "to_tid": getattr(segment, "to_tid", None),
+                        "expected_loss_db": getattr(
+                            segment, "expected_loss_db", None
+                        ),
+                        "distance_km": getattr(
+                            segment, "distance_km", None
+                        ),
+                        "circuit_id": getattr(
+                            segment, "circuit_id", None
+                        ),
+                        "fiber_start": getattr(
+                            segment, "fiber_start", None
+                        ),
+                        "fiber_end": getattr(segment, "fiber_end", None),
+                        "fiber_type": getattr(segment, "fiber_type", None),
+                        "evidence": [
+                            evidence.to_dict()
+                            for evidence in getattr(
+                                segment, "evidence", ()
+                            )
+                        ],
+                    }
+                    for segment in tuple(
+                        getattr(span, "segments", ()) or ()
+                    )
+                ],
                 "evidence": [
                     evidence.to_dict()
                     for evidence in getattr(span, "evidence", ())
@@ -1129,6 +1171,28 @@ def _diagram_route_links(
                 for evidence in getattr(span, "evidence", ())
             ],
         }
+        discrepancy_prefix = f"spans[{span.order}]."
+        source_discrepancies = [
+            {
+                "field": str(getattr(issue, "field", ""))[
+                    len(discrepancy_prefix) :
+                ],
+                "source_field": str(getattr(issue, "field", "")),
+                "issue_code": SOURCE_EVIDENCE_DISCREPANCY_CODE,
+                "status": PATH_SOURCE_DISCREPANCY_PENDING,
+                "deployable_cli": False,
+            }
+            for issue in tuple(getattr(result, "issues", ()) or ())
+            if str(getattr(issue, "code", "") or "")
+            == SOURCE_EVIDENCE_DISCREPANCY_CODE
+            and str(getattr(issue, "field", "") or "").startswith(
+                discrepancy_prefix
+            )
+        ]
+        if source_discrepancies:
+            source_evidence[PATH_SOURCE_DISCREPANCIES_KEY] = (
+                source_discrepancies
+            )
         if (
             fiber_scope is not None
             and span.order == fiber_scope.inherited_span_order
@@ -1163,6 +1227,60 @@ def _diagram_route_links(
                         fiber_end=getattr(span, "fiber_end", None),
                         review_state="pending",
                         source_evidence=source_evidence,
+                        segments=tuple(
+                            OpticalPathSegment(
+                                order=getattr(segment, "order", 0),
+                                from_tid=str(
+                                    getattr(segment, "from_tid", None) or ""
+                                ),
+                                to_tid=str(
+                                    getattr(segment, "to_tid", None) or ""
+                                ),
+                                expected_loss_db=getattr(
+                                    segment, "expected_loss_db", None
+                                ),
+                                distance_km=getattr(
+                                    segment, "distance_km", None
+                                ),
+                                fiber_type=str(
+                                    getattr(segment, "fiber_type", None) or ""
+                                ),
+                                circuit_id=str(
+                                    getattr(segment, "circuit_id", None) or ""
+                                ),
+                                fiber_start=getattr(
+                                    segment, "fiber_start", None
+                                ),
+                                fiber_end=getattr(
+                                    segment, "fiber_end", None
+                                ),
+                                source_evidence={
+                                    "schema_id": (
+                                        DIAGRAM_EVIDENCE_SCHEMA_ID
+                                    ),
+                                    "schema_version": (
+                                        DIAGRAM_EVIDENCE_SCHEMA_VERSION
+                                    ),
+                                    "source_sha256": str(
+                                        getattr(
+                                            getattr(result, "source", None),
+                                            "sha256",
+                                            "",
+                                        )
+                                        or ""
+                                    ),
+                                    "fields": [
+                                        evidence.to_dict()
+                                        for evidence in getattr(
+                                            segment, "evidence", ()
+                                        )
+                                    ],
+                                },
+                            )
+                            for segment in tuple(
+                                getattr(span, "segments", ()) or ()
+                            )
+                        ),
                     ),
                 ),
             )
@@ -1605,12 +1723,14 @@ def _r40_payload_version_state(
         != "ciena.rls.r4-0-exact-request"
     ):
         return "absent"
-    from utils.rls_config.r4_0_generator import R40_PAYLOAD_SCHEMA_VERSION
+    from utils.rls_config.r4_0_generator import (
+        R40_SUPPORTED_PAYLOAD_SCHEMA_VERSIONS,
+    )
 
     return (
         "current"
         if profile_payload.get("schema_version")
-        == R40_PAYLOAD_SCHEMA_VERSION
+        in R40_SUPPORTED_PAYLOAD_SCHEMA_VERSIONS
         else "retired"
     )
 
@@ -4226,6 +4346,34 @@ def _r4_0_editor_seed(
         raise ValueError("The selected shelf is no longer in the route.")
     site = project.site_by_key(shelf.site_key)
     facts = _r4_0_review_facts(project, shelf_id)
+    customer_policy = project.customer_policy
+    neighbor_suffix = customer_policy.normalized_neighbor_dns_suffix
+    shelf_profile = PROFILE_REGISTRY.get(shelf.profile_id)
+    terminal_route_role = bool(
+        shelf_profile is not None
+        and shelf_profile.family in {"add_drop", "roadm"}
+        and shelf_profile.side in {"A", "Z"}
+    )
+    # The audited legacy workflow uses 0.5/0.5 dB for a terminal's single
+    # route-facing degree on either end of the route. A/Z route-policy values
+    # apply to two-sided ILA/intermediate shelves instead. This is only a
+    # review seed: each exact-provider line field remains operator-editable.
+    terminal_patch_loss_db = _AUDITED_TERMINAL_ROUTE_PATCH_LOSS_DB
+
+    def node_identity(tid: object) -> str:
+        identity = str(tid or "").strip()
+        if (
+            identity
+            and neighbor_suffix
+            and re.fullmatch(
+                r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?",
+                identity,
+            )
+            is not None
+            and len(identity + neighbor_suffix) <= 253
+        ):
+            return identity + neighbor_suffix
+        return identity
 
     def line(side: str) -> dict[str, object]:
         raw_fiber = facts.get(f"{side}_span_fiber_type", "")
@@ -4235,11 +4383,30 @@ def _r4_0_editor_seed(
             else ""
         )
         loss = facts.get(f"{side}_span_loss_db")
+        neighbor_node = node_identity(
+            facts.get(f"{side}_neighbor_tid", "")
+        )
+        input_patch_loss = (
+            terminal_patch_loss_db
+            if terminal_route_role
+            else (
+                customer_policy.a_input_patch_loss_db
+                if side == "a"
+                else customer_policy.z_input_patch_loss_db
+            )
+        )
+        output_patch_loss = (
+            terminal_patch_loss_db
+            if terminal_route_role
+            else (
+                customer_policy.a_output_patch_loss_db
+                if side == "a"
+                else customer_policy.z_output_patch_loss_db
+            )
+        )
         return {
             "link_name": str(facts.get(f"{side}_span_link_name", "") or ""),
-            "neighbor_node": str(
-                facts.get(f"{side}_neighbor_tid", "") or ""
-            ),
+            "neighbor_node": neighbor_node,
             "fiber_type": fiber,
             "expected_loss_db": (
                 float(loss)
@@ -4281,6 +4448,8 @@ def _r4_0_editor_seed(
             "source_fiber_label": str(
                 facts.get(f"{side}_span_source_fiber_label", "") or ""
             ),
+            "input_patch_loss_db": input_patch_loss,
+            "output_patch_loss_db": output_patch_loss,
         }
 
     raw_site_id = site.network_site_id.strip() if site is not None else ""
@@ -4391,11 +4560,31 @@ def _r4_0_editor_seed(
             and side_seed.get("neighbor_pfg_source")
         )
     )
+    hostname = node_identity(shelf.tid)
     controlled_derivations = [
         "shelf_label_from_site_name",
         "member_name_from_tid",
-        "hostname_from_tid",
+        "colan_ospf_metric_from_route_customer_policy",
     ]
+    controlled_derivations.append(
+        (
+            "hostname_fqdn_from_tid_and_route_customer_policy"
+            if hostname != shelf.tid.strip()
+            else "hostname_from_tid"
+        )
+    )
+    if terminal_route_role:
+        controlled_derivations.append(
+            "terminal_route_degree_patch_losses_from_audited_workflow_default"
+        )
+    else:
+        controlled_derivations.append(
+            "directional_patch_losses_from_route_customer_policy"
+        )
+    if neighbor_suffix:
+        controlled_derivations.append(
+            "neighbor_fqdn_from_tid_and_route_customer_policy"
+        )
     controlled_derivations.extend(
         item.replace(":", "_neighbor_pfg_from_", 1)
         for item in peer_pfg_suggestions
@@ -4412,13 +4601,11 @@ def _r4_0_editor_seed(
         "target_build_schema_4.00.00_vendor_baseline_unverified",
         "bay_number_zero",
         "physical_shelf_zero",
-        "input_patch_loss_0.5_db",
-        "output_patch_loss_0.5_db",
         "repair_margin_2_db",
         "high_loss_threshold_3_db",
     ]
     if not raw_site_id.isdigit():
-        controlled_defaults.insert(0, "site_id_zero_when_absent")
+        controlled_defaults.insert(0, "site_id_deferred_when_absent")
     represented_side_count = sum(
         1
         for side_seed in lines_by_side.values()
@@ -4465,11 +4652,11 @@ def _r4_0_editor_seed(
         "shelf_name": shelf.tid,
         "shelf_label": site.name if site is not None else "",
         "site_name": site.name if site is not None else "",
-        "site_id": int(raw_site_id) if raw_site_id.isdigit() else 0,
+        "site_id": int(raw_site_id) if raw_site_id.isdigit() else None,
         "site_description": project.title,
         "site_address": site.address if site is not None else "",
         "member_name": shelf.tid,
-        "hostname": shelf.tid,
+        "hostname": hostname,
         # The supplied R4.0.0 upgrade procedures identify Rel. 4.00.00 as the
         # documented baseline. This is editable planning metadata, never an
         # assertion that ATLAS observed the running target shelf.
@@ -4482,6 +4669,7 @@ def _r4_0_editor_seed(
         "physical_shelf": 0,
         "loopback_ip": shelf.primary_oam_ip,
         "ospf_area": project.ospf_area,
+        "colan_ospf_metric": customer_policy.colan_ospf_metric,
         "diagram_optical_band": _route_header_optical_band(project),
         "reviewed_hardware": reviewed_hardware,
         "provider_resolution": provider_resolution,
@@ -4659,11 +4847,41 @@ def _apply_r40_reviewed_lines_to_links(
             link.from_shelf_id.casefold(),
             link.to_shelf_id.casefold(),
         }
+        reviewed_losses = {
+            review.shelf_id.casefold(): review.expected_loss_db
+            for review in endpoint_reviews
+            if review.shelf_id.casefold()
+            in {
+                link.from_shelf_id.casefold(),
+                link.to_shelf_id.casefold(),
+            }
+        }
+        common_reviewed_loss = prior.expected_loss_db
+        if (
+            all_endpoints_reviewed
+            and len(reviewed_losses) == 2
+            and math.isclose(
+                float(reviewed_losses[link.from_shelf_id.casefold()]),
+                float(reviewed_losses[link.to_shelf_id.casefold()]),
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            common_reviewed_loss = reviewed_losses[
+                link.from_shelf_id.casefold()
+            ]
+        reviewed_source_evidence, superseded_discrepancies = (
+            _supersede_reviewed_path_source_discrepancies(
+                prior.source_evidence,
+                all_endpoints_reviewed=all_endpoints_reviewed,
+            )
+        )
+        changed = changed or bool(superseded_discrepancies)
         reviewed_path = OpticalPath(
             path_id=prior.path_id,
             path_role=prior.path_role or "route",
             link_name=prior.link_name,
-            expected_loss_db=prior.expected_loss_db,
+            expected_loss_db=common_reviewed_loss,
             distance_km=prior.distance_km,
             fiber_type=prior.fiber_type,
             circuit_id=prior.circuit_id,
@@ -4676,11 +4894,57 @@ def _apply_r40_reviewed_lines_to_links(
                 if changed or prior.review_state == "corrected"
                 else "confirmed"
             ),
-            source_evidence=dict(prior.source_evidence),
+            source_evidence=reviewed_source_evidence,
             endpoint_reviews=endpoint_reviews,
+            segments=prior.segments,
         )
         link_list[link_index] = replace(link, paths=(reviewed_path,))
     return link_list
+
+
+def _supersede_reviewed_path_source_discrepancies(
+    source_evidence: Mapping[str, object],
+    *,
+    all_endpoints_reviewed: bool,
+) -> tuple[dict[str, object], int]:
+    """Mark a preserved import discrepancy superseded by paired review.
+
+    Source observations are never deleted or rewritten. Only a controlled
+    status marker advances, and only after both connected shelves have supplied
+    endpoint-local engineering. Other discrepancy fields remain pending until
+    a field-specific review workflow exists.
+    """
+
+    result = dict(source_evidence)
+    raw_markers = source_evidence.get(PATH_SOURCE_DISCREPANCIES_KEY, ())
+    if not all_endpoints_reviewed or not isinstance(
+        raw_markers,
+        (list, tuple),
+    ):
+        return result, 0
+
+    superseded = 0
+    markers: list[object] = []
+    for raw_marker in raw_markers:
+        if (
+            isinstance(raw_marker, Mapping)
+            and raw_marker.get("field") == "expected_loss_db"
+            and raw_marker.get("status") == PATH_SOURCE_DISCREPANCY_PENDING
+        ):
+            marker = dict(raw_marker)
+            marker["status"] = PATH_SOURCE_DISCREPANCY_SUPERSEDED
+            marker["deployable_cli"] = False
+            markers.append(marker)
+            superseded += 1
+        else:
+            markers.append(
+                dict(raw_marker)
+                if isinstance(raw_marker, Mapping)
+                else raw_marker
+            )
+    if superseded:
+        result[PATH_SOURCE_DISCREPANCIES_KEY] = markers
+    return result, superseded
 
 
 def build_route_project(
@@ -4692,6 +4956,7 @@ def build_route_project(
     project_id: str = "",
     notes: str = "",
     ospf_area: str = "",
+    customer_policy: RouteCustomerPolicy | None = None,
     links: Iterable[RouteLink] = (),
     diagram_source: Optional[Mapping[str, Any]] = None,
     require_valid: bool = True,
@@ -4781,6 +5046,7 @@ def build_route_project(
         route_code=route_code.strip(),
         title=title.strip(),
         ospf_area=ospf_area.strip(),
+        customer_policy=customer_policy or RouteCustomerPolicy(),
         revision=revision.strip(),
         sites=tuple(sites),
         shelves=tuple(shelves),
@@ -4878,6 +5144,12 @@ class RlsRouteFrame(ttk.Frame):
         self._title_var = tk.StringVar()
         self._revision_var = tk.StringVar(value="1")
         self._ospf_area_var = tk.StringVar()
+        self._neighbor_dns_suffix_var = tk.StringVar()
+        self._a_input_patch_loss_var = tk.StringVar(value="0.5")
+        self._a_output_patch_loss_var = tk.StringVar(value="0.5")
+        self._z_input_patch_loss_var = tk.StringVar(value="0.2")
+        self._z_output_patch_loss_var = tk.StringVar(value="0.2")
+        self._colan_ospf_metric_var = tk.StringVar(value="10")
         self._route_fiber_type_var = tk.StringVar()
         self._route_fiber_observation_var = tk.StringVar(
             value="Diagram fiber: not available."
@@ -4953,6 +5225,53 @@ class RlsRouteFrame(ttk.Frame):
             padx=(7, 8),
             pady=5,
         )
+        self._project_entry(
+            project_group,
+            row=3,
+            column=0,
+            label="Node/neighbor DNS suffix",
+            variable=self._neighbor_dns_suffix_var,
+        )
+        self._project_entry(
+            project_group,
+            row=3,
+            column=2,
+            label="A input patch loss (dB)",
+            variable=self._a_input_patch_loss_var,
+            width=9,
+        )
+        self._project_entry(
+            project_group,
+            row=3,
+            column=4,
+            label="A output patch loss (dB)",
+            variable=self._a_output_patch_loss_var,
+            width=9,
+        )
+        self._project_entry(
+            project_group,
+            row=4,
+            column=0,
+            label="Z input patch loss (dB)",
+            variable=self._z_input_patch_loss_var,
+            width=9,
+        )
+        self._project_entry(
+            project_group,
+            row=4,
+            column=2,
+            label="Z output patch loss (dB)",
+            variable=self._z_output_patch_loss_var,
+            width=9,
+        )
+        self._project_entry(
+            project_group,
+            row=4,
+            column=4,
+            label="COLAN OSPF metric",
+            variable=self._colan_ospf_metric_var,
+            width=9,
+        )
         for variable in (
             self._route_code_var,
             self._title_var,
@@ -4960,6 +5279,15 @@ class RlsRouteFrame(ttk.Frame):
         ):
             variable.trace_add("write", self._on_project_edited)
         self._ospf_area_var.trace_add("write", self._on_ospf_area_edited)
+        for variable in (
+            self._neighbor_dns_suffix_var,
+            self._a_input_patch_loss_var,
+            self._a_output_patch_loss_var,
+            self._z_input_patch_loss_var,
+            self._z_output_patch_loss_var,
+            self._colan_ospf_metric_var,
+        ):
+            variable.trace_add("write", self._on_customer_policy_edited)
 
         workspace = ttk.Panedwindow(self, orient=tk.VERTICAL)
         workspace.grid(row=2, column=0, sticky=tk.NSEW, padx=8, pady=4)
@@ -5251,6 +5579,62 @@ class RlsRouteFrame(ttk.Frame):
             self._refresh_status(
                 "OSPF area changed. Review every affected configuration again."
             )
+
+    def _on_customer_policy_edited(self, *_args: object) -> None:
+        if self._loading_project:
+            return
+        self._rows, cleared = _clear_provider_payloads(self._rows)
+        if cleared:
+            _log_route_event(
+                "Route customer policy changed; cleared "
+                f"{cleared} route-bound configuration payload(s).",
+                logging.WARNING,
+            )
+        self._on_project_edited()
+        if cleared:
+            self._refresh_tree()
+            self._refresh_status(
+                "Customer policy changed. Review every affected "
+                "configuration again."
+            )
+
+    def _customer_policy(self) -> RouteCustomerPolicy:
+        def number(variable: tk.StringVar, label: str) -> float:
+            raw = variable.get().strip()
+            try:
+                return float(raw)
+            except ValueError as exc:
+                raise ValueError(f"{label} must be a number.") from exc
+
+        raw_metric = self._colan_ospf_metric_var.get().strip()
+        try:
+            metric = int(raw_metric)
+        except ValueError as exc:
+            raise ValueError(
+                "COLAN OSPF metric must be an integer."
+            ) from exc
+        policy = RouteCustomerPolicy(
+            neighbor_dns_suffix=self._neighbor_dns_suffix_var.get().strip(),
+            a_input_patch_loss_db=number(
+                self._a_input_patch_loss_var,
+                "A-side input patch loss",
+            ),
+            a_output_patch_loss_db=number(
+                self._a_output_patch_loss_var,
+                "A-side output patch loss",
+            ),
+            z_input_patch_loss_db=number(
+                self._z_input_patch_loss_var,
+                "Z-side input patch loss",
+            ),
+            z_output_patch_loss_db=number(
+                self._z_output_patch_loss_var,
+                "Z-side output patch loss",
+            ),
+            colan_ospf_metric=metric,
+        )
+        policy.assert_valid()
+        return policy
 
     def _sync_route_fiber_controls(self) -> None:
         """Refresh the one route-wide native token and source-label summary."""
@@ -6779,6 +7163,7 @@ class RlsRouteFrame(ttk.Frame):
                 project_id=self._project_id,
                 notes=self._project_notes,
                 ospf_area=self._ospf_area_var.get(),
+                customer_policy=self._customer_policy(),
                 links=reviewed_links,
                 diagram_source=self._diagram_source,
                 require_valid=False,
@@ -7435,6 +7820,7 @@ class RlsRouteFrame(ttk.Frame):
             project_id=self._project_id,
             notes=self._project_notes,
             ospf_area=self._ospf_area_var.get(),
+            customer_policy=self._customer_policy(),
             links=self._links,
             diagram_source=self._diagram_source,
             require_valid=require_valid,
@@ -7486,6 +7872,12 @@ class RlsRouteFrame(ttk.Frame):
             self._title_var.set("")
             self._revision_var.set("1")
             self._ospf_area_var.set("")
+            self._neighbor_dns_suffix_var.set("")
+            self._a_input_patch_loss_var.set("0.5")
+            self._a_output_patch_loss_var.set("0.5")
+            self._z_input_patch_loss_var.set("0.2")
+            self._z_output_patch_loss_var.set("0.2")
+            self._colan_ospf_metric_var.set("10")
         finally:
             self._loading_project = False
         self._dirty = False
@@ -7651,6 +8043,25 @@ class RlsRouteFrame(ttk.Frame):
             self._title_var.set(project.title)
             self._revision_var.set(project.revision)
             self._ospf_area_var.set(project.ospf_area)
+            policy = project.customer_policy
+            self._neighbor_dns_suffix_var.set(
+                policy.neighbor_dns_suffix
+            )
+            self._a_input_patch_loss_var.set(
+                f"{policy.a_input_patch_loss_db:g}"
+            )
+            self._a_output_patch_loss_var.set(
+                f"{policy.a_output_patch_loss_db:g}"
+            )
+            self._z_input_patch_loss_var.set(
+                f"{policy.z_input_patch_loss_db:g}"
+            )
+            self._z_output_patch_loss_var.set(
+                f"{policy.z_output_patch_loss_db:g}"
+            )
+            self._colan_ospf_metric_var.set(
+                str(policy.colan_ospf_metric)
+            )
         finally:
             self._loading_project = False
         self._sync_route_fiber_controls()
@@ -7847,6 +8258,20 @@ class RlsRouteFrame(ttk.Frame):
                 parent=self,
             )
             return
+        prior_normalization = str(marker.get("normalization", "") or "")
+        current_marker = diagram.marker_dict(
+            required_in_mop=bool(marker.get("required_in_mop", True))
+        )
+        if prior_normalization != current_marker["normalization"]:
+            self._diagram_source = dict(self._diagram_source)
+            self._diagram_source[WORKBOOK_DIAGRAM_MARKER_KEY] = current_marker
+            self._dirty = True
+            self._invalidate_project_results()
+            _log_route_event(
+                "Upgraded reattached workbook-diagram provenance from "
+                f"{prior_normalization or 'unspecified'} to "
+                f"{current_marker['normalization']}."
+            )
         self._attached_workbook_diagram = diagram
         self._refresh_status(
             f"Reattached Diagram-tab source: {diagram.source_file_name}"

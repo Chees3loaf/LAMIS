@@ -193,29 +193,41 @@ class LoadingScreen:
     def __init__(self, root):
         self.root = root
         self.root.title("Loading ATLAS")
-        self.root.geometry("800x600")
         self.root.overrideredirect(True)  # Remove window decorations
 
-        # Center the window
-        x = (self.root.winfo_screenwidth() / 2) - 400
-        y = (self.root.winfo_screenheight() / 2) - 300
-        self.root.geometry(f'+{int(x)}+{int(y)}')
+        # Keep the splash inside the display.  The old fixed 1920x1080 image,
+        # plus label padding and status text, extended beyond a 1080p screen
+        # and hid the bottom of the artwork.
+        screen_width = self.root.winfo_screenwidth()
+        screen_height = self.root.winfo_screenheight()
+        window_width = min(1600, int(screen_width * 0.9))
+        window_height = min(950, int(screen_height * 0.9))
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        self.root.geometry(
+            f"{window_width}x{window_height}+{x}+{y}"
+        )
 
         try:
             logo_path = os.path.join(
                 getattr(sys, '_MEIPASS', os.path.dirname(__file__)),
                 "ATLAS Logo.png"
             )
-            logo = Image.open(logo_path).resize((800, 600), Image.LANCZOS)
+            logo = Image.open(logo_path)
+            # Reserve room for the loading status and fit the whole PNG in the
+            # remaining area without stretching or cropping it.
+            image_width = window_width
+            image_height = window_height - 44
+            logo.thumbnail((image_width, image_height), Image.LANCZOS)
             self.logo = ImageTk.PhotoImage(logo)
-            self.logo_label = Label(self.root, image=self.logo)
-            self.logo_label.pack(pady=20)
+            self.logo_label = Label(self.root, image=self.logo, borderwidth=0)
+            self.logo_label.pack(expand=True)
         except Exception as e:
             logging.error(f"Failed to load logo: {e}")
             Label(self.root, text="Automated Toolkit for Lightriver Asset & Systems (ATLAS)", font=("Arial", 16)).pack(pady=20)
 
         self.status_label = Label(self.root, text="Loading...", font=("Arial", 12))
-        self.status_label.pack(pady=10)
+        self.status_label.pack(fill="x", pady=(0, 10))
         self.root.update_idletasks()
 
     def update_status(self, message):

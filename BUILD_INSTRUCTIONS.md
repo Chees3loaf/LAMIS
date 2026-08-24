@@ -4,17 +4,19 @@ This document covers building ATLAS (formerly LAMIS) into a Windows installer.
 
 The pipeline is:
 
-1. **PyInstaller** packages the GUI (`ATLAS.exe`) and the TDS subprocess
-   (`TDS.exe`) into `dist\ATLAS\` from a single spec file (`ATLAS.spec`).
+1. **PyInstaller** packages one `ATLAS.exe` into `dist\ATLAS\` from
+   `ATLAS.spec`. The same executable handles the normal GUI and the TDS
+   subprocess role; `--tds-mode` dispatches to the bundled
+   `scripts\TDS\TDS_v6.2.py` source.
 2. **NSIS** wraps that folder into a per-user installer at
    `dist\ATLAS_Setup.exe`.
 3. **`build.bat`** drives both steps and (optionally) signs the artifacts.
 
 The spec file is the source of truth for hidden imports, bundled data files,
-and the two-executable layout. Do **not** rebuild by passing CLI flags to
-`pyinstaller`; that regenerates the spec from scratch and drops the
-hidden-import list, which breaks the keyring backend, dynamic device-script
-imports, and the TDS subprocess.
+and the single-executable/TDS-dispatch layout. Do **not** rebuild by passing
+CLI flags to `pyinstaller`; that regenerates the spec from scratch and drops
+the hidden-import list and bundled TDS source, which breaks the keyring
+backend, dynamic device-script imports, and the TDS subprocess.
 
 ---
 
@@ -75,9 +77,11 @@ build.bat
 Outputs:
 
 - `dist\ATLAS\ATLAS.exe`   — windowed GUI (smoke-test this before shipping)
-- `dist\ATLAS\TDS.exe`     — console TDS subprocess, spawned by the GUI
 - `dist\ATLAS\_internal\`  — shared dependencies (numpy, pandas, paramiko, …)
 - `dist\ATLAS_Setup.exe`   — final per-user installer
+
+There is intentionally no separate `TDS.exe`. A child `ATLAS.exe --tds-mode`
+process runs the bundled TDS source.
 
 ### Common options
 
@@ -136,9 +140,9 @@ Quick checklist:
 - [x] **Inventory** — can save credentials (proves `keyring` + `cryptography`
       backends bundled)
 - [x] **Inventory** — can identify a device (proves dynamic `scripts.*` imports work)
-- [x] **TDS** — clicking Run on a configured host actually launches
-      `TDS.exe` as a subprocess (check Task Manager). Before this fix, the
-      TDS tab silently re-launched ATLAS.exe.
+- [x] **TDS** — clicking Run on a configured host launches a child
+      `ATLAS.exe --tds-mode` process and runs the TDS workflow rather than
+      reopening the GUI.
 - [x] Packing Slip generation produces an `.xlsx` from the templates
 
 Logs are written to `%APPDATA%\ATLAS\logs\ATLAS_*.log` — check there for
@@ -215,10 +219,15 @@ pip install pyinstaller
 You're running the build from the wrong directory. `cd` into the project
 root (the folder that contains `main.py`, `ATLAS.spec`, and `build.bat`).
 
-**`dist\ATLAS\TDS.exe was not produced`**
+**Bundled TDS source was not produced**
 
 Almost certainly because `scripts\TDS\TDS_v6.2.py` was moved or renamed. The
-spec hardcodes that path. Restore the file or update `ATLAS.spec`.
+spec hardcodes that path. Restore the file or update `ATLAS.spec`, rebuild,
+and verify:
+
+```bat
+dir "dist\ATLAS\_internal\scripts\TDS\TDS_v6.2.py"
+```
 
 **NSIS `LAMIS.nsi has been retired`**
 
@@ -245,14 +254,16 @@ committed `ATLAS.spec`.
 
 #### TDS tab does nothing / re-launches the GUI
 
-The build dropped `TDS.exe`. Verify:
+ATLAS uses its own executable as the TDS subprocess. Verify the bundled source:
 
 ```bat
-dir "%LOCALAPPDATA%\Programs\ATLAS\TDS.exe"
+dir "%LOCALAPPDATA%\Programs\ATLAS\_internal\scripts\TDS\TDS_v6.2.py"
 ```
 
-If missing, rebuild via `build.bat` (which fails fast when `TDS.exe` is
-missing post-build).
+If it is missing, restore `scripts\TDS\TDS_v6.2.py` and rebuild from the
+committed `ATLAS.spec`. If it is present, inspect the ATLAS log for the
+`--tds-mode` child-process command and dispatch error; do not add a separate
+`TDS.exe`.
 
 #### Inventory scan fails with "Unsupported script selection"
 
@@ -279,8 +290,8 @@ HKCU. Re-install without elevating.
 ## Code signing (optional)
 
 Code signing prevents Defender SmartScreen warnings and satisfies IT
-policies that require signed binaries. Both `ATLAS.exe` and `TDS.exe`
-should be signed in addition to the installer.
+policies that require signed binaries. Sign both shipped executables:
+`ATLAS.exe` and the installer.
 
 ```bat
 :: All-in-one: clean build, sign every artifact (default), produce release installer
@@ -290,8 +301,8 @@ build.bat --clean --release
 Or sign after the fact:
 
 ```bat
-sign.bat "certs\LightRiver_codesign.pfx"                  :: all three
-sign.bat "certs\LightRiver_codesign.pfx" --exe-only       :: ATLAS.exe + TDS.exe
+sign.bat "certs\LightRiver_codesign.pfx"                  :: ATLAS.exe + Setup.exe
+sign.bat "certs\LightRiver_codesign.pfx" --exe-only       :: ATLAS.exe only
 sign.bat "certs\LightRiver_codesign.pfx" --installer-only :: just Setup.exe
 ```
 
@@ -320,17 +331,17 @@ LAMIS/                             ← (folder still named LAMIS, app is ATLAS)
 │   ├── ATLAS_Setup.exe            ← final deliverable
 │   └── ATLAS\                     ← (deleted by build.bat --release)
 │       ├── ATLAS.exe
-│       ├── TDS.exe
-│       ├── ATLAS Logo.png
-│       ├── icon.ico
-│       ├── data\
-│       │   ├── network_inventory.db
-│       │   ├── ATLAS_Packing_Slip.xlsx
-│       │   ├── ATLAS_Consolidated_Packing_Slip.xlsx
-│       │   ├── Device_Report_Template.xlsx
-│       │   ├── Ciena_RLS_*.xlsx
-│       │   └── Nokia_PSI_*.xlsx
-│       └── _internal\             ← all bundled dependencies
+│       └── _internal\             ← bundled data and dependencies
+│           ├── ATLAS Logo.png
+│           ├── icon.ico
+│           ├── data\
+│           │   ├── network_inventory.db
+│           │   ├── ATLAS_Packing_Slip.xlsx
+│           │   ├── ATLAS_Consolidated_Packing_Slip.xlsx
+│           │   ├── Device_Report_Template.xlsx
+│           │   ├── Ciena_RLS_*.xlsx
+│           │   └── Nokia_PSI_*.xlsx
+│           └── scripts\TDS\TDS_v6.2.py
 ├── ATLAS.spec                     ← source of truth for the build
 ├── ATLAS.nsi                      ← per-user installer
 ├── build.bat                      ← orchestrator

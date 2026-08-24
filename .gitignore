@@ -248,3 +248,9 @@ scripts/TDS/*_Debug.xlsx
 scripts/TDS/TDS_Debug.txt
 scripts/TDS/*_RLS_Network.xlsx
 scripts/TDS/*_RLS.xlsx
+
+# Standalone Nokia audit raw device captures (customer/lab equipment).
+captures/
+
+# Default output directory of the standalone Nokia audit CLI.
+audit-output/

@@ -67,6 +67,79 @@ except ImportError:  # pragma: no cover
     from pexpect import TIMEOUT  # type: ignore[import-not-found]
 
 
+# ----------------------------------------------------------------------
+# 'show interface inventory *' row splitting
+# ----------------------------------------------------------------------
+# The table is FIXED-WIDTH, and Nokia leaves Part Number empty for
+# third-party pluggables -- it only prints its own part numbers. A Finisar
+# copper SFP in a LAN port therefore reports a serial and nothing else::
+#
+#      Location   Module Type                    Part Number        Serial Number
+#     ------------------------------------------------------------------------
+#    1/3/OSCSFP1  SWE1GOL                        3AL82260AAAA       ALLU25--OF50000209
+#     1/10/LAN3   1000B-T                                           NDHAEXU
+#     1/10/LAN4   1000B-T                                           N8DEVPQ
+#
+# Splitting on whitespace and assigning tokens by position collapses that
+# blank column: the serial slides into the part-number slot, the catalog
+# lookup for a serial returns "Not Found", and a parser that insists on four
+# tokens drops the pluggable entirely. Both happened -- LAN3/LAN4 optics were
+# either missing from the report or listed with their serial as the part.
+#
+# Nokia part numbers are '<digit><2 letters><5 digits>...' (3AL82260AAAA,
+# 3KC90395AA, 1AF30787AA, 8DG63029ABNF02). No serial on these shelves takes
+# that shape, so a lone right-hand value can still be classified when the
+# header offsets are unavailable (wexpect flattens the table onto one line).
+_NOKIA_PN_SHAPE_RE = re.compile(r"^\d[A-Za-z]{2}\d{5}")
+
+
+def iface_column_offsets(output: str) -> Tuple[Optional[int], Optional[int]]:
+    """Return ``(part_number_col, serial_number_col)`` from the table header.
+
+    ``(None, None)`` when no standalone header line exists -- including the
+    flattened single-line case, where a header sharing its line with data rows
+    would yield offsets that mean nothing for those rows.
+    """
+    for raw in output.splitlines():
+        if re.search(r"\d+/\d+/", raw):
+            continue  # header and data share a line -> flattened, offsets useless
+        pn = re.search(r"Part\s+Number", raw, re.IGNORECASE)
+        sn = re.search(r"Serial\s+Number", raw, re.IGNORECASE)
+        if pn and sn and re.search(r"Location", raw, re.IGNORECASE):
+            return pn.start(), sn.start()
+    return None, None
+
+
+def split_iface_row(
+    line: str,
+    pn_col: Optional[int] = None,
+    sn_col: Optional[int] = None,
+) -> Optional[Tuple[str, str, str, str]]:
+    """Split one inventory row into ``(location, module_type, part, serial)``.
+
+    Returns ``None`` for anything that isn't a data row. A row carrying only
+    one of the two right-hand columns is resolved by where that value starts
+    (when *pn_col*/*sn_col* are known) and otherwise by the Nokia part-number
+    shape, so a blank Part Number never shifts the serial left.
+    """
+    tokens = [(m.group(), m.start()) for m in re.finditer(r"\S+", line)]
+    if len(tokens) < 3:
+        return None
+    location, module_type = tokens[0][0], tokens[1][0]
+    rest = tokens[2:]
+    if len(rest) >= 2:
+        return location, module_type, rest[0][0], rest[1][0]
+
+    value, col = rest[0]
+    if pn_col is not None and sn_col is not None:
+        if abs(col - pn_col) <= abs(col - sn_col):
+            return location, module_type, value, ""
+        return location, module_type, "", value
+    if _NOKIA_PN_SHAPE_RE.match(value):
+        return location, module_type, value, ""
+    return location, module_type, "", value
+
+
 class Nokia1830FamilyScript(BaseScript):
     """Shared SSH/Telnet engine for Nokia 1830 / PSI / PSS inventory.
 
@@ -801,22 +874,33 @@ class Nokia1830FamilyScript(BaseScript):
         ip: Optional[str] = None,
     ) -> pd.DataFrame:
         """Parse 'show interface inventory *' (module / transceiver rows):
-        location  module_type  part_number  serial_number"""
+        location  module_type  part_number  serial_number
+
+        Rows go through :func:`split_iface_row` rather than a fixed
+        four-token regex. Nokia leaves Part Number blank for third-party
+        pluggables, and demanding four tokens silently dropped those optics
+        (the LAN3/LAN4 copper SFPs on a ROADM shelf) from the report.
+        """
         module_data = []
         try:
             output = output.strip()
-            pattern = re.compile(
-                r"^\s*(\d+/\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$",
-                re.MULTILINE,
-            )
-            for match in pattern.finditer(output):
+            pn_col, sn_col = iface_column_offsets(output)
+            for raw_line in output.splitlines():
+                if not re.match(r"^\s*\d+/\S+", raw_line):
+                    continue
+                fields = split_iface_row(raw_line, pn_col, sn_col)
+                if fields is None:
+                    continue
                 try:
-                    location = match.group(1).strip()
-                    module_type = match.group(2).strip()
-                    part_number = match.group(3).strip()
-                    serial_number = match.group(4).strip()
+                    location, module_type, part_number, serial_number = fields
 
-                    description = self.db_cache.lookup_part(part_number[:10])
+                    # A blank part number is a fact about the device, not a
+                    # lookup miss: don't query the catalog for "" and don't
+                    # stamp the row "Not Found".
+                    description = (
+                        self.db_cache.lookup_part(part_number[:10])
+                        if part_number else ""
+                    )
                     module_data.append({
                         "System Name": "",
                         "System Type": "",
@@ -1222,22 +1306,29 @@ class Nokia1830FamilyScript(BaseScript):
         cache_callback: Optional[Callable[[pd.DataFrame, str], None]] = None,
         ip: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Legacy 1830 'show interface inventory *' parser (Port-keyed Name)."""
+        """Legacy 1830 'show interface inventory *' parser (Port-keyed Name).
+
+        Shares :func:`split_iface_row` with the PSI parser so a blank Part
+        Number column (third-party pluggables) neither drops the row nor
+        shifts the serial into the part slot.
+        """
         interface_data = []
         try:
             logging.debug(f"Raw output: {output}")
             output = output.strip()
-            interface_pattern = re.compile(
-                r"^\s*(\d+\/\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s*$", re.MULTILINE
-            )
-            for match in re.finditer(interface_pattern, output):
+            pn_col, sn_col = iface_column_offsets(output)
+            for raw_line in output.splitlines():
+                if not re.match(r"^\s*\d+/\S+", raw_line):
+                    continue
+                fields = split_iface_row(raw_line, pn_col, sn_col)
+                if fields is None:
+                    continue
                 try:
-                    location = match.group(1).strip()
-                    module_type = match.group(2).strip()
-                    part_number = match.group(3).strip()
-                    serial_number = match.group(4).strip()
+                    location, module_type, part_number, serial_number = fields
 
-                    description = self.db_cache.lookup_part(part_number)
+                    description = (
+                        self.db_cache.lookup_part(part_number) if part_number else ""
+                    )
                     interface_data.append({
                         "System Name": "",
                         "System Type": "",

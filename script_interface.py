@@ -2,7 +2,7 @@
 Device identification, script selection, and shared infrastructure for ATLAS.
 
 Provides:
-  - ``is_reachable`` — ICMP ping check
+  - ``probe_host`` / ``is_reachable`` — management-port (SSH/Telnet) probe
   - ``BaseScript`` — ABC that all device scripts must implement
   - ``CommandTracker`` — deduplication of per-device commands
   - ``DatabaseCache`` — write-through cache for part-number lookups
@@ -49,40 +49,101 @@ def get_inventory_db_path() -> str:
     """
     return str(get_database_path())
 
-def is_reachable(ip: str, port: int = 22, timeout: float = 2.0) -> bool:
-    """Return True if the host at *ip* accepts a TCP connection on *port*.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
-    Uses a direct socket connect rather than spawning a ping subprocess so
-    no CMD windows appear and the check completes in at most *timeout*
-    seconds per host (vs. the OS ping default of ~4 s per packet).
-    Falls back to port 23 (Telnet) if port 22 is refused immediately.
+# Reason strings stored in the GUI's failed_ips map and shown in the
+# "Some Devices Failed" dialog. NO_MGMT_PORT is deliberately distinct from
+# UNREACHABLE: a shelf that answers ICMP but serves neither SSH nor Telnet is
+# powered and routable, it just has not had management access turned on (on a
+# Nokia 1830 PSI, remote CIT on the OAMP interface). Collapsing that case into
+# "Unreachable" sends operators hunting for a routing or IP-range fault that
+# does not exist.
+PROBE_UNREACHABLE = "Unreachable"
+PROBE_NO_MGMT_PORT = "No SSH/Telnet listener (host answers ping)"
+
+
+def _icmp_responds(ip: str, timeout_ms: int = 1000) -> bool:
+    """Return True if *ip* answers a single ICMP echo.
+
+    Only used to explain a failed TCP probe, so it runs at most once per
+    unreachable host and never on the success path. Spawned with
+    CREATE_NO_WINDOW so no console flashes over the GUI.
+    """
+    try:
+        if os.name == "nt":
+            cmd = ["ping", "-n", "1", "-w", str(timeout_ms), ip]
+        else:
+            cmd = ["ping", "-c", "1", "-W", str(max(1, timeout_ms // 1000)), ip]
+        r = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=(timeout_ms / 1000.0) + 4.0, creationflags=_NO_WINDOW,
+        )
+        if os.name == "nt":
+            # Windows' ping exits 0 even for "Destination host unreachable",
+            # so match the reply line instead of the return code.
+            return "TTL=" in (r.stdout or "")
+        return r.returncode == 0
+    except Exception as exc:
+        logging.debug(f"[PROBE] ICMP check failed for {ip}: {exc}")
+        return False
+
+
+def probe_host(
+    ip: str, port: int = 22, timeout: float = 2.0
+) -> Tuple[bool, str]:
+    """Probe *ip* for a usable management port; return ``(ok, reason)``.
+
+    ``reason`` is "" when *ok*, else ``PROBE_NO_MGMT_PORT`` (device answers
+    ICMP but neither SSH nor Telnet is listening) or ``PROBE_UNREACHABLE``.
+
+    This is a TCP connect probe, NOT an ICMP ping: inventory needs a CLI, so
+    a host that only answers ping cannot be scanned. A direct socket connect
+    keeps the check to at most *timeout* seconds per port (vs. the OS ping
+    default of ~4 s per packet) and spawns no console window. Falls back to
+    port 23 (Telnet) when port 22 does not answer -- 1830-type shelves serve
+    the usable CLI only over Telnet.
     """
     try:
         if not acquire_ping_token(ip, timeout=5.0):
-            logging.warning(f"[PING] Rate limiter timeout for {ip}; treating as unreachable")
-            return False
-        logging.debug(f"[PING] TCP-probe {ip}:{port}")
+            logging.warning(f"[PROBE] Rate limiter timeout for {ip}; treating as unreachable")
+            return False, PROBE_UNREACHABLE
+        logging.debug(f"[PROBE] TCP-probe {ip}:{port}")
         with socket.create_connection((ip, port), timeout=timeout):
-            logging.debug(f"[PING] {ip} reachable on port {port}")
-            return True
+            logging.debug(f"[PROBE] {ip} reachable on port {port}")
+            return True, ""
     except ConnectionRefusedError:
         # Port actively refused means the host is up, just not SSH.
-        logging.debug(f"[PING] {ip} port {port} refused — host is up")
-        return True
+        logging.debug(f"[PROBE] {ip} port {port} refused — host is up")
+        return True, ""
     except (OSError, socket.timeout):
         # Try Telnet port as a secondary probe (for 1830-type devices).
         if port != 23:
             try:
                 with socket.create_connection((ip, 23), timeout=timeout):
-                    logging.debug(f"[PING] {ip} reachable on port 23")
-                    return True
+                    logging.debug(f"[PROBE] {ip} reachable on port 23")
+                    return True, ""
+            except ConnectionRefusedError:
+                logging.debug(f"[PROBE] {ip} port 23 refused — host is up")
+                return True, ""
             except (OSError, socket.timeout):
                 pass
-        logging.debug(f"[PING] {ip} unreachable")
-        return False
+        if _icmp_responds(ip):
+            logging.warning(
+                f"[PROBE] {ip} answers ICMP but no SSH (22) or Telnet (23) "
+                f"listener — management access is likely not enabled on this "
+                f"interface."
+            )
+            return False, PROBE_NO_MGMT_PORT
+        logging.debug(f"[PROBE] {ip} unreachable (no TCP, no ICMP)")
+        return False, PROBE_UNREACHABLE
     except Exception as e:
-        logging.warning(f"[PING] Probe failed for {ip}: {e}")
-        return False
+        logging.warning(f"[PROBE] Probe failed for {ip}: {e}")
+        return False, PROBE_UNREACHABLE
+
+
+def is_reachable(ip: str, port: int = 22, timeout: float = 2.0) -> bool:
+    """Boolean form of :func:`probe_host` for callers that ignore the reason."""
+    return probe_host(ip, port, timeout)[0]
 
 
 # Per-IP counter of how many default-credential entries have already been
@@ -417,6 +478,12 @@ class DeviceIdentifier:
         # Cleared by ``take_identified_credentials`` once consumed; reset
         # at the top of each ``identify_device`` call.
         self._identified_credentials: Optional[Tuple[str, str]] = None
+        # True once an SSH login succeeded but the shell answered no
+        # identification command at all ("SSH up, no usable CLI" — the Nokia
+        # 1830 family serves its real CLI only over the Telnet getty). Signals
+        # ``identify_device`` to stop rotating credentials, since the account
+        # authenticated fine and no other one will unmute the shell.
+        self._ssh_cli_unusable: bool = False
 
     def take_identified_client(self) -> Optional["paramiko.SSHClient"]:
         """Return and clear the SSH client preserved after successful identification.
@@ -1031,6 +1098,7 @@ class DeviceIdentifier:
                     return dt_fp, dn_fp
 
             # No banner fingerprint match — probe with vendor ident commands.
+            any_shell_output = False
             for command in self._IDENT_COMMANDS:
                 if should_stop():
                     queue.put(f"[ABORT] SSH identification cancelled for {ip}.\n")
@@ -1041,6 +1109,8 @@ class DeviceIdentifier:
                     queue.put(f"[ABORT] SSH identification cancelled for {ip}.\n")
                     return None, None
                 output = self._drain_shell(session, idle_seconds=1.0, max_wait=6.0)
+                if output.strip():
+                    any_shell_output = True
                 logging.debug(f"[IDENTIFY] SSH output from {ip}:\n{output}")
                 queue.put(f"SSH response from {ip}:\n{output}\n")
 
@@ -1074,6 +1144,27 @@ class DeviceIdentifier:
                 # would otherwise be missed).
                 if re.search(r"1830", output):
                     return "1830", "Nokia 1830"
+
+            # Authenticated fine, opened a shell, and every ident command came
+            # back with nothing at all. That is the 1830-family signature: the
+            # SSH server accepts the login but drops you at the alarm banner
+            # with no usable CLI (the real CLI is behind the Telnet getty).
+            # Rotating credentials cannot fix a mute shell -- the account
+            # already worked -- so flag it and let the caller skip straight to
+            # the Telnet probe instead of burning every default credential,
+            # its lockout backoff, and an operator prompt first.
+            if not any_shell_output:
+                self._ssh_cli_unusable = True
+                logging.warning(
+                    f"[IDENTIFY] {ip}: SSH login as {username!r} succeeded but the "
+                    f"shell returned no output for any identification command — "
+                    f"treating as 'SSH up, no usable CLI' and skipping the "
+                    f"remaining credential rotation."
+                )
+                queue.put(
+                    f"[IDENTIFY] {ip}: SSH accepted {username} but the CLI is not "
+                    f"served over SSH — going straight to the Telnet probe.\n"
+                )
             return None, None
         finally:
             # Close the identification shell channel regardless.
@@ -1091,6 +1182,50 @@ class DeviceIdentifier:
                     ssh_client.close()
                 except (OSError, paramiko.SSHException):
                     pass
+
+    @staticmethod
+    def _refine_1830_shelf_type(tn, ip: str, queue: Queue,
+                                sleep_with_abort: Callable[[float], bool]) -> str:
+        """Return "psi"/"psim"/"1830" by reading the shelf type over *tn*.
+
+        Called only when 'show general detail' left the device on the generic
+        1830 path. Runs 'show general system-identification' on the already-open
+        Telnet session and keys off ``Shelf type``. Any failure keeps the
+        generic "1830" answer -- refinement is an optimisation, never a reason
+        to fail identification.
+        """
+        try:
+            tn.write(b"show general system-identification\n")
+            if sleep_with_abort(1.5):
+                return "1830"
+            out = tn.read_until(b"#", timeout=8).decode("ascii", errors="ignore")
+            out += tn.read_very_eager().decode("ascii", errors="ignore")
+        except Exception as exc:
+            logging.debug(f"[1830-TELNET] Shelf-type refinement failed for {ip}: {exc}")
+            return "1830"
+
+        shelf_m = re.search(r"^\s*Shelf\s+type\s*:\s*(\S+)", out,
+                            re.IGNORECASE | re.MULTILINE)
+        shelf_type = shelf_m.group(1).strip() if shelf_m else ""
+        if not shelf_type:
+            logging.info(
+                f"[1830-TELNET] {ip}: no shelf type in "
+                f"'show general system-identification' — staying on generic 1830"
+            )
+            return "1830"
+
+        if re.match(r"PSI-M$", shelf_type, re.IGNORECASE):
+            refined = "psim"
+        elif re.match(r"PSI-(4L|8L)$", shelf_type, re.IGNORECASE):
+            refined = "psi"
+        else:
+            refined = "1830"
+
+        logging.info(
+            f"[1830-TELNET] {ip}: shelf type {shelf_type!r} -> type={refined}"
+        )
+        queue.put(f"[1830-TELNET] {ip} shelf type {shelf_type} ({refined})\n")
+        return refined
 
     def _identify_via_telnet_1830(self, ip: str, queue: Queue,
                                   should_stop: Callable[[], bool],
@@ -1174,10 +1309,6 @@ class DeviceIdentifier:
                 ident_out = tn.read_until(b"#", timeout=8).decode("ascii", errors="ignore")
                 # Drain any trailing data
                 ident_out += tn.read_very_eager().decode("ascii", errors="ignore")
-                try:
-                    tn.write(b"exit\n")
-                except Exception:
-                    pass
 
                 logging.debug(f"[1830-TELNET] Response from {ip}:\n{ident_out}")
                 queue.put(f"[1830-TELNET] Response from {ip}:\n{ident_out}\n")
@@ -1191,6 +1322,10 @@ class DeviceIdentifier:
                         f"[1830-TELNET] {ip} login worked but no 1830 fingerprint in "
                         f"response — falling through to SSH identification"
                     )
+                    try:
+                        tn.write(b"exit\n")
+                    except Exception:
+                        pass
                     return None, None
 
                 hostname = name_m.group(1) if name_m else "Nokia 1830"
@@ -1205,6 +1340,25 @@ class DeviceIdentifier:
                     refined_type = "psi"
                 else:
                     refined_type = "1830"
+
+                # 'show general detail' reports the platform family but not the
+                # shelf type, and a PSI answers "Nokia 1830 OLS <ver> SONET ADM"
+                # -- no "PSI" anywhere in the string. Going on the description
+                # alone therefore routed real PSI shelves to the generic 1830
+                # script, which collects a fraction of the PSI command set and
+                # writes the default workbook instead of the PSI report. The
+                # authoritative marker is "Shelf type : PSI-4L/PSI-8L" from
+                # 'show general system-identification'; only worth the extra
+                # round trip when the description left us on the generic path.
+                if refined_type == "1830":
+                    refined_type = self._refine_1830_shelf_type(
+                        tn, ip, queue, sleep_with_abort,
+                    )
+
+                try:
+                    tn.write(b"exit\n")
+                except Exception:
+                    pass
 
                 logging.info(
                     f"[1830-TELNET] Identified {ip}: name={hostname!r} "
@@ -1274,6 +1428,9 @@ class DeviceIdentifier:
         # Clear any client / credentials kept from a previous call.
         self._identified_client = None
         self._identified_credentials = None
+        # Set by _ssh_identify_attempt when SSH authenticates but the shell is
+        # mute; short-circuits the default-credential rotation below.
+        self._ssh_cli_unusable = False
 
         if explicit_credentials and explicit_credentials[0]:
             username, password = explicit_credentials
@@ -1430,6 +1587,15 @@ class DeviceIdentifier:
                     # Nokia 1830) may use a completely different SSH code path that
                     # DOES return identification data, even when a standard admin
                     # account connected but produced no output.
+                    #
+                    # Exception: a *totally* mute shell (not one command echoed
+                    # anything) means the CLI is not served over SSH at all, so
+                    # no other account can do better. Stop rotating and let the
+                    # Telnet fallback below handle it -- on a Nokia PSI this
+                    # turned a 4-second identification into a 3-minute crawl
+                    # through every default credential plus an operator prompt.
+                    if self._ssh_cli_unusable:
+                        break
                 except AuthenticationException as ae:
                     AuthLockout.register_failure(ip)
                     ssh_failures_logged += 1

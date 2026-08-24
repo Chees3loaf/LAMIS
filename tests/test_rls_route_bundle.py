@@ -156,7 +156,7 @@ def test_complete_route_bundle_contains_every_hashed_r40_candidate_artifact(
 
     manifest = json.loads(files["manifest"].read_text(encoding="utf-8"))
     assert manifest["schema"] == "atlas.ciena.rls.route-deliverable-bundle"
-    assert manifest["schema_version"] == "2.1"
+    assert manifest["schema_version"] == "2.2"
     assert manifest["route_code"] == "R40"
     assert manifest["shelf_count"] == 2
     assert manifest["configuration_candidates_complete"] is True
@@ -164,7 +164,17 @@ def test_complete_route_bundle_contains_every_hashed_r40_candidate_artifact(
     assert manifest["cli_candidate_files_included"] is True
     assert manifest["deployable_cli_included"] is False
     assert manifest["secret_material_included"] is False
-    assert manifest["deployment_readiness"]["route_cli_ready"] is True
+    readiness = manifest["deployment_readiness"]
+    assert readiness["assessment_scope"] == (
+        "pre_calibration_candidate_generation"
+    )
+    assert readiness["candidate_generation_ready"] is True
+    assert readiness["route_cli_ready"] is False
+    assert readiness["deployable_cli_ready"] is False
+    assert readiness["deployment_approved"] is False
+    assert manifest["deployment_approval_state"] == "not_approved"
+    assert manifest["deployment_approved"] is False
+    assert manifest["candidate_cli_commit_commands_emitted"] is False
     assert manifest["route_native_fiber_review"] == {
         "status": "confirmed",
         "token": "NDSF",
@@ -174,6 +184,19 @@ def test_complete_route_bundle_contains_every_hashed_r40_candidate_artifact(
     assert manifest["source_diagram_content_assessed"] is True
     assert manifest["source_diagram_file_included"] is False
     assert manifest["source_diagram_content_embedded_in_mop"] is False
+    assert manifest["rack_layout"] == {
+        "status": "planning_only",
+        "rack_count": 1,
+        "max_shelves_per_rack": 8,
+        "ordered_route_shelves": True,
+        "frame_locations_field_verified": False,
+        "ru_locations_field_verified": False,
+        "construction_placement_authorized": False,
+        "note": (
+            "Rack diagrams preserve route order and the established planning "
+            "offset; they do not assert on-site frame or RU locations."
+        ),
+    }
     assert manifest["diagram_embedding"] == {
         "embedded": False,
         "sheet": "Diagram",
@@ -195,6 +218,11 @@ def test_complete_route_bundle_contains_every_hashed_r40_candidate_artifact(
     assert [record["order"] for record in candidates] == [1, 2]
     assert [record["tid"] for record in candidates] == ["RLS-A", "RLS-Z"]
     for record in candidates:
+        assert record["artifact_kind"] == "pre_calibration_candidate"
+        assert record["candidate_safety_mode"] == "validate_without_commit"
+        assert record["deployment_approved"] is False
+        assert record["commit_commands_emitted"] is False
+        assert record["commit_command_count"] == 0
         assert len(record["deployment_controls"]) == 3
         assert all(
             control["mode"] == "automatic_background_advisory"
@@ -214,18 +242,50 @@ def test_complete_route_bundle_contains_every_hashed_r40_candidate_artifact(
             artifact_path = candidate_dir / artifact_record["filename"]
             assert artifact_path.is_file()
             assert artifact_record["sha256"] == _sha256(artifact_path)
+        candidate_cli = (
+            candidate_dir / record["files"]["cli"]["filename"]
+        ).read_text(encoding="utf-8")
+        assert record["files"]["cli"]["filename"].endswith("_candidate.cli")
+        assert "\ncommit\n" not in f"\n{candidate_cli}"
 
     validation = files["validation"].read_text(encoding="utf-8")
     assert "DOCUMENT RESULT: VALID" in validation
     assert "PRE-CALIBRATION CLI CANDIDATES: COMPLETE" in validation
+    assert "DEPLOYMENT RESULT: NOT APPROVED" in validation
+    assert "CANDIDATE SAFETY: VALIDATE WITHOUT COMMIT" in validation
     assert "Route native CLI fiber type: NDSF" in validation
     assert "Route native fiber review: confirmed" in validation
     assert "Diagram fiber label: LEAF" in validation
+    assert (
+        "Rack placement: PLANNING ONLY; frame and RU locations are not field "
+        "verified"
+    ) in validation
     assert "Diagram route optical band: C+L (context only)" in validation
     assert "deployment controls are included automatically" in validation
     assert "not facts observed or verified by ATLAS" in validation
     assert "not an on-box deployment approval" in validation
     assert "COLAN candidate states" in validation
+    assert "Route-project validation warnings:" in validation
+    assert "Shelf candidate validation warnings:" in validation
+    assert "Shelf deployment-control advisories:" in validation
+    assert "Candidate commit commands emitted: 0" in validation
+    assert "deployment approval is NOT granted" in validation
+    summary = manifest["configuration_candidate_validation"]
+    assert summary["candidate_generation_ready"] is True
+    assert summary["deployment_approved"] is False
+    assert summary["candidate_safety_mode"] == "validate_without_commit"
+    assert summary["commit_command_count"] == 0
+    assert summary["validation_warning_count"] == sum(
+        record["validation_warning_count"] for record in candidates
+    )
+    assert summary["deployment_control_advisory_count"] == sum(
+        record["deployment_control_advisory_count"]
+        for record in candidates
+    )
+    assert summary["warning_and_advisory_count"] == (
+        summary["validation_warning_count"]
+        + summary["deployment_control_advisory_count"]
+    )
 
 
 def test_complete_bundle_includes_deferred_terminal_colan_candidates(
@@ -272,7 +332,10 @@ def test_complete_bundle_includes_deferred_terminal_colan_candidates(
     validation = files["validation"].read_text(encoding="utf-8")
     assert manifest["configuration_candidates_complete"] is True
     assert manifest["configuration_candidate_count"] == len(project.shelves)
-    assert manifest["deployment_readiness"]["route_cli_ready"] is True
+    assert (
+        manifest["deployment_readiness"]["candidate_generation_ready"] is True
+    )
+    assert manifest["deployment_readiness"]["route_cli_ready"] is False
     assert "COLAN candidate states" in validation
     assert validation.count("deferred; COLAN commands emitted: no") == len(
         project.shelves
@@ -406,6 +469,53 @@ def test_non_r40_artifact_is_rejected_before_candidate_files_are_written(
     assert not list((tmp_path / "configs").glob("*"))
 
 
+def test_commit_capable_candidate_is_rejected_before_shelf_files_are_written(
+    tmp_path: Path,
+) -> None:
+    artifact = SimpleNamespace(
+        cli_text="batch\nvalidate\ncommit\nquit\n",
+        annotated_text="candidate\n",
+        validation_report="valid\n",
+        manifest={
+            "release": "RLS R4.0",
+            "generator": "R40ExactConfigGenerator",
+            "provider_id": next(iter(bundle_module.R40_PROVIDER_CATALOG)),
+            "artifact_kind": "pre_calibration_candidate",
+            "candidate_safety_mode": "validate_without_commit",
+            "deployment_approval_state": "not_approved",
+            "deployment_approved": False,
+            "deployable_cli": False,
+            "commit_commands_emitted": False,
+            "commit_command_count": 0,
+            "on_box_validate_required": True,
+        },
+    )
+    build = RouteConfigBuild(
+        project_fingerprint="a" * 64,
+        ready=True,
+        readiness=DeploymentReadiness(ready=True, shelf_statuses=()),
+        shelf_builds=(
+            ShelfConfigBuild(
+                order=1,
+                shelf_id="shelf-a",
+                profile_id="roadm_a",
+                tid="RLS-A",
+                artifact=artifact,
+            ),
+        ),
+    )
+    configs_root = tmp_path / "configs"
+
+    with pytest.raises(
+        RouteBundleError,
+        match="validate-without-commit candidate",
+    ):
+        _write_config_candidates(build, configs_root)
+
+    assert configs_root.is_dir()
+    assert list(configs_root.iterdir()) == []
+
+
 def test_blocked_route_publishes_no_destination_or_partial_configs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -467,7 +577,10 @@ def test_reciprocally_validated_sra_pair_publishes_complete_bundle(
     files = export_route_bundle(project, tmp_path)
 
     manifest = json.loads(files["manifest"].read_text(encoding="utf-8"))
-    assert manifest["deployment_readiness"]["route_cli_ready"] is True
+    assert (
+        manifest["deployment_readiness"]["candidate_generation_ready"] is True
+    )
+    assert manifest["deployment_readiness"]["route_cli_ready"] is False
     assert manifest["configuration_candidates_complete"] is True
     assert manifest["configuration_candidate_count"] == 2
     assert [

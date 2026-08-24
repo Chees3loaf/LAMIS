@@ -513,7 +513,14 @@ def test_editor_requires_explicit_fixed_direction_route_side() -> None:
         module.RlsR40ConfigFrame._build_request(subject)
 
 
-def test_request_keeps_automatic_control_observations_false() -> None:
+@pytest.mark.parametrize(
+    ("site_id_text", "expected_site_id"),
+    (("", None), ("1", 1)),
+)
+def test_request_keeps_automatic_control_observations_false(
+    site_id_text: str,
+    expected_site_id: int | None,
+) -> None:
     provider = next(
         profile
         for profile in provider_profiles_for_role("roadm_a")
@@ -535,7 +542,7 @@ def test_request_keeps_automatic_control_observations_false() -> None:
         _shelf_name_var=_Variable("USELP1-L8R2"),
         _shelf_label_var=_Variable("El Paso, TX"),
         _site_name_var=_Variable("El Paso, TX"),
-        _site_id_var=_Variable("1"),
+        _site_id_var=_Variable(site_id_text),
         _site_description_var=_Variable("ELP1-SAT4"),
         _site_address_var=_Variable(""),
         _member_name_var=_Variable("USELP1-L8R2"),
@@ -548,12 +555,14 @@ def test_request_keeps_automatic_control_observations_false() -> None:
         _line_1=object(),
         _line_2=object(),
         _required_int=lambda raw, _label: int(raw),
+        _optional_int=module.RlsR40ConfigFrame._optional_int,
         _management_value=lambda _profile: module.ManagementInterface(),
         _line_value=lambda _widgets, _number: line,
     )
 
     request = module.RlsR40ConfigFrame._build_request(subject)
 
+    assert request.site_id == expected_site_id
     assert request.installed_inventory_confirmed is False
     assert request.planner_runtime_mop_confirmed is False
     assert request.target_build_confirmed is False
@@ -699,6 +708,7 @@ def test_stored_request_with_legacy_confirmations_and_colan_state_loads(
     assert subject._colan_state_var.get() == expected_colan_state
     assert subject._management_name_var.get() == management.name
     assert subject._management_ip_var.get() == management.ip_address
+    assert subject._site_id_var.get() == ""
     assert not hasattr(subject, "_inventory_confirmed_var")
 
 
@@ -794,11 +804,15 @@ def test_line_seed_hydrates_peer_pfg_suggestion() -> None:
             "neighbor_line_demux_pfg": "PFG-1-to-2",
             "fiber_type": "LEAF",
             "expected_loss_db": 14.55,
+            "input_patch_loss_db": 0.2,
+            "output_patch_loss_db": 0.3,
         },
     )
 
     assert widgets.neighbor_mux_pfg.get() == "PFG-2-to-1"
     assert widgets.neighbor_demux_pfg.get() == "PFG-1-to-2"
+    assert widgets.input_patch_loss.get() == "0.2"
+    assert widgets.output_patch_loss.get() == "0.3"
 
 
 def test_passive_span_context_is_display_only_and_complete() -> None:
@@ -1249,7 +1263,7 @@ def test_slotless_terminal_endpoint_shows_route_side_seed_before_direction_mappi
         "shelf_name": "USELP1-L8R2",
         "shelf_label": "El Paso",
         "site_name": "El Paso",
-        "site_id": 0,
+        "site_id": None,
         "site_description": "ELP1-SAT4",
         "site_address": "",
         "member_name": "USELP1-L8R2",
@@ -1349,6 +1363,7 @@ def test_slotless_terminal_endpoint_shows_route_side_seed_before_direction_mappi
     module.RlsR40ConfigFrame._refresh_direction_mapping(subject)
 
     assert subject._target_build_var.get() == DEFAULT_R40_TARGET_BUILD_SCHEMA
+    assert subject._site_id_var.get() == ""
     assert subject._line_1_route_side_var.get() == ""
     assert subject._seed_direction_side == "Z"
     assert first.link_name.get() == "BDJW7353"
@@ -1454,6 +1469,7 @@ def test_resolved_route_direction_hydrates_both_lines_on_open() -> None:
             "physical_shelf": 0,
             "loopback_ip": "10.6.22.129",
             "ospf_area": "10.6.8.0",
+            "colan_ospf_metric": 25,
             "diagram_optical_band": "c+l",
             "line_1_route_side": "Z",
             "direction_resolution": {"status": "controlled_fallback"},
@@ -1469,6 +1485,8 @@ def test_resolved_route_direction_hydrates_both_lines_on_open() -> None:
                 "neighbor_node": "USQTN1-L8I2",
                 "fiber_type": "LEAF",
                 "expected_loss_db": 14.55,
+                "input_patch_loss_db": 0.2,
+                "output_patch_loss_db": 0.3,
             },
         },
         _line_1=first,
@@ -1488,6 +1506,7 @@ def test_resolved_route_direction_hydrates_both_lines_on_open() -> None:
         _physical_shelf_var=_Variable(),
         _loopback_var=_Variable(),
         _ospf_area_var=_Variable(),
+        _ospf_metric_var=_Variable(),
         _diagram_band_display=_Variable(),
         _line_1_route_side_var=_Variable(),
     )
@@ -1500,6 +1519,7 @@ def test_resolved_route_direction_hydrates_both_lines_on_open() -> None:
     module.RlsR40ConfigFrame._load_route_seed(subject)
 
     assert subject._target_build_var.get() == DEFAULT_R40_TARGET_BUILD_SCHEMA
+    assert subject._ospf_metric_var.get() == "25"
     assert subject._line_1_route_side_var.get() == (
         module._ROUTE_SIDE_LABELS["Z"]
     )
@@ -1508,6 +1528,8 @@ def test_resolved_route_direction_hydrates_both_lines_on_open() -> None:
     assert first.link_name.get() == "BDJW7353"
     assert first.fiber_type.get() == "LEAF"
     assert first.expected_loss.get() == "14.55"
+    assert first.input_patch_loss.get() == "0.2"
+    assert first.output_patch_loss.get() == "0.3"
     assert second.neighbor_node.get() == ""
     assert second.expected_loss.get() == ""
 
@@ -1596,6 +1618,35 @@ def test_required_integer_parser(raw: str, expected: int) -> None:
 def test_required_integer_parser_fails_closed(raw: str) -> None:
     with pytest.raises(ValueError, match="must be a whole number"):
         module.RlsR40ConfigFrame._required_int(raw, "Field")
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("", None),
+        ("   ", None),
+        ("0", 0),
+        (" 42 ", 42),
+    ],
+)
+def test_optional_integer_parser(
+    raw: str,
+    expected: int | None,
+) -> None:
+    assert module.RlsR40ConfigFrame._optional_int(raw, "Field") == expected
+
+
+@pytest.mark.parametrize("raw", ["3.5", "three"])
+def test_optional_integer_parser_rejects_non_integer_text(raw: str) -> None:
+    with pytest.raises(ValueError, match="must be a whole number"):
+        module.RlsR40ConfigFrame._optional_int(raw, "Field")
+
+
+def test_identity_tab_marks_numeric_site_id_optional_and_explains_omission() -> None:
+    source = inspect.getsource(module.RlsR40ConfigFrame._build_identity)
+
+    assert "Numeric site ID (optional)" in source
+    assert "omits the site-identity command instead of inventing ID 0" in source
 
 
 @pytest.mark.parametrize(

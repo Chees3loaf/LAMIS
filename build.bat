@@ -2,7 +2,7 @@
 REM ATLAS Build Script
 REM
 REM Drives PyInstaller using ATLAS.spec (the source of truth for hidden
-REM imports, data files, and the second TDS.exe target) and then NSIS.
+REM imports, data files, and the integrated TDS mode) and then NSIS.
 REM
 REM Signing is ALWAYS ON by default using certs\LightRiver_codesign.pfx.
 REM Drop the .pfx at that path once (gitignored) and every build will
@@ -100,6 +100,20 @@ if errorlevel 1 (
         exit /b 1
     )
 )
+
+REM PyInstaller's tkinter hook must initialize Tcl to discover and bundle
+REM the Tcl/Tk runtime. Some restricted execution environments allow Python
+REM file reads but block this native initialization, which otherwise fails
+REM much later with an opaque hook-_tkinter traceback.
+echo [*] Checking Tcl/Tk runtime...
+%PYTHON% -c "import tkinter as tk; t = tk.Tcl(); t.eval('info patchlevel')" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Tcl/Tk could not initialize in this execution environment.
+    echo     Run the build from a native Windows shell. If it also fails there,
+    echo     repair Python and include the optional Tcl/Tk component.
+    exit /b 1
+)
+echo [OK] Tcl/Tk runtime available.
 
 REM ---- Verify bundled data files exist ---------------------------------
 echo [*] Verifying bundled assets...

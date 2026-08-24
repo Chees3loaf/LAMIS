@@ -1,0 +1,158 @@
+cli
+23:36:07.301537:SYSLOG src/PlatBackplane.cc:151 PlatGetBackplaneId() Backplane ID from ENV is 0x58 (88 decimal)
+
+Username: admin
+Password:
+Last Login: Sat Jan 29 23:29:42 2000 from telnet_10.9.103.200
+
+
+Alarm Status:  Critical-1   Major-1   Minor-4 Warning-0
+
+MOPN001_1830# paging status disabled
+MOPN001_1830# show general name
+
+System Name: MOPN001_1830
+
+MOPN001_1830# show general system-identification
+
+Vendor                   : Nokia
+Product                  : 1830
+Shelf type               : PSS-8
+EC type                  : 8EC2
+Serial number            : RT254507385
+Current OAMP MAC address : 0c:4b:48:cb:5b:bf
+
+MOPN001_1830# show software dynamic
+Release            : 1830PSSECX-25.12-3
+Total RPMS in load : 911
+RPMS Loaded        : 292
+
+
+MOPN001_1830# show shelf inventory *
+
+Shelf  Type      Part Number       Serial Number       CLEI
+--------------------------------------------------------------------------------
+    1  PSS-8     3KC48901AA        RT254606875         WOMPU00CRB
+
+
+MOPN001_1830# show slot *
+
+       Programmed   Present      Power          Admin  Oper   State
+  Slot Type         Type         Admin State    State  State  Qualifier
+-------------------------------------------------------------------------------
+   1/1 PF           PF           N/A            Up     Up
+   1/2 ASGLP        ASGLP        power-enabled  Up     Up
+   1/3 ASG          ASG          power-enabled  Up     Up
+   1/4 WTOCM-F      WTOCM-F      power-enabled  Up     Up
+   1/5 OTDR         OTDR         power-enabled  Up     Up
+   1/6 8EC2         8EC2         N/A            Up     Up
+   1/7 PF           PF           N/A            Up     Down   FLT
+   1/8 see slot 2   see slot 2
+  1/10 SFDC8B       SFDC8B       N/A            Up     Up
+  1/12 8EC2         8EC2         N/A            Up     Up
+  1/13 SHFPNL       SHFPNL       N/A            Up     Up
+  1/14 FAN          FAN          N/A            Up     Up
+
+
+MOPN001_1830# show card inventory *
+
+Location  Card Type    Mnemonic       Part Number        Serial Number      CLEI        Pmax (W)       Imax (A)
+---------------------------------------------------------------------------------------------------------------
+     1/1  PF           8DC30          3KC48870ABAB03     RT253713147        WOPUAFNMAC  18.00          0.46
+     1/2  ASGLP        ASGLP          3KC70693ABAC02     EZ2336T0096        WOGUA63UTB  60.00          1.53
+     1/3  ASG          ASG            3KC70693AAAD02     EZ2346T0418        WOGUA62UTB  65.00          1.66
+     1/7  PF           8DC30          3KC48870ABAB03     RT254413846        WOPUAFNMAC  18.00          0.46
+    1/10  SFDC8B       SFDC8B         3KC49230ABAB01     RT250703764        WOFFAE7BAA  1.00           0.02
+    1/14  FAN          8FAN           3KC48850AAAB03     RT254604868        WOCUA6SUAC  105.00         2.69
+
+
+MOPN001_1830# show card sfdc8b *
+
+                                          Admin   Oper    State
+Location Programmed Type                  State   State   Qualifier
+-------------------------------------------------------------------------------
+   1/10  SFDC8B                           Up      Up
+
+
+MOPN001_1830# show interface sfdc8b *
+
+
+           Port                                       Admin Oper  State
+  Location Function     Description               Dir State State Qualifier
+-------------------------------------------------------------------------------
+  1/10/OMD OMD          OMD                       Bi  Up    Up
+  1/10/EXP EXP          EXP                       Bi  Down  Down
+ 1/10/9290 Channel      ITU#29                    Bi  Down  Down
+ 1/10/9300 Channel      ITU#30                    Bi  Down  Down
+ 1/10/9310 Channel      ITU#31                    Bi  Down  Down
+ 1/10/9320 Channel      ITU#32                    Bi  Down  Down
+ 1/10/9330 Channel      ITU#33                    Bi  Down  Down
+ 1/10/9340 Channel      ITU#34                    Bi  Down  Down
+ 1/10/9350 Channel      ITU#35                    Bi  Down  Down
+ 1/10/9360 Channel      ITU#36                    Bi  Down  Down
+
+
+MOPN001_1830# show interface inventory *
+
+     Location   Module Type                             Part Number        Serial Number
+--------------------------------------------------------------------------------------------------
+    1/2/OSCSFP  SEUL1.2O                                3AL82081AAAA       ALLU25-LTC49000915
+
+
+MOPN001_1830# show interface topology *
+
+         Interface Type Connected To                         Type Connected From
+---------------------------------------------------------------------------------------------
+        1/2/LINEIN    -                                       Ext  10.9.102.132 1/3/4
+       1/2/LINEOUT  Int  1/10/OMD                              -
+        1/3/LINEIN    -                                       Int  1/10/OMD
+       1/3/LINEOUT  Ext  10.9.102.132 1/2/1                    -
+          1/10/OMD  Int  1/3/LINEIN                           Int  1/2/LINEOUT
+         1/10/9310  Ext  10.9.102.132                         Ext  10.9.102.132
+         1/10/9320  Ext  10.9.102.132                         Ext  10.9.102.132
+
+
+MOPN001_1830# show condition
+
+MJ NSA   00/01/08 00:51:30 COM      NE-CERTVALIDITY-EXP SYSTEM
+   NE Certificate Expired
+
+MN NSA   00/01/08 00:51:26 PLK      NET                 1/6/ES1 In
+   Link down                                                  PSS8 Equipment Controller 2
+
+MN NSA   00/01/08 00:51:26 PLK      NET                 1/12/ES1 In
+   Link down                                                  PSS8 Equipment Controller 2
+
+NR NSA   00/01/08 00:51:26 COM      MAINT-ALLOWED-LOCAL SYSTEM
+   Maintenance user allowed locally
+
+NR NSA   00/01/08 03:27:24 OTS      PWRADJFAIL          1/2/LINEOUT Out
+   Power Adjustment Failure                                               ASGLP
+
+[1;31m CR SA    00/01/27 07:18:41 EQPT     PWR                 1/7                                                [0m
+[1;31m   Battery off or power filter off                                 Power Filter[0m
+
+NR NSA   00/01/28 06:45:23 OCH      OPR-OUT             1/3/LINEOUT Out 9320.000
+   Outgoing Channel optical power out of range                              ASG
+
+NR NSA   00/01/28 06:45:26 OCH      OPR-OUT             1/2/LINEOUT Out 9310.000
+   Outgoing Channel optical power out of range                            ASGLP
+
+NR NSA   00/01/28 06:45:26 OCH      OPR-OUT             1/2/LINEOUT Out 9320.000
+   Outgoing Channel optical power out of range                            ASGLP
+
+
+
+MOPN001_1830# show alarmleds
+
+Alarm LEDs
+-------------------------------------------
+Critical Alarm LED: Solid Red
+Major Alarm LED   : Solid Red
+Minor Alarm LED   : Solid Amber
+Warning Alarm LED : Solid Off
+Alarm Cut Off LED :
+
+
+
+MOPN001_1830#

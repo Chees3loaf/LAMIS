@@ -1990,15 +1990,27 @@ class SoftwareUpgradeFrame(ttk.Frame):
                 )
                 ok_run = script.run()
                 if ok_run:
-                    self._set_ws5_status("Activating ✔", "green")
-                    self._log("✔ Waveserver 5 reached 'Activation In Progress'.")
-                    # Final popup matches the operator's verbatim text from
-                    # the spec — it's what they expect at end-of-run.
-                    self.after(0, lambda: messagebox.showinfo(
-                        "Waveserver 5 — Complete",
-                        "Software Activation in Progress. Manual Commit "
-                        "Required. Safe to Disconnect.",
-                    ))
+                    if script.activation_complete:
+                        self._set_ws5_status("Activation Complete ✔", "green")
+                        self._log(
+                            "✔ Activation Complete. Manual Commit Required. "
+                            "Safe to Disconnect."
+                        )
+                        self.after(0, lambda: messagebox.showinfo(
+                            "Waveserver 5 — Complete",
+                            "Activation Complete. Manual Commit Required. "
+                            "Safe to Disconnect.",
+                        ))
+                    else:
+                        self._set_ws5_status("Activating ✔", "green")
+                        self._log("✔ Waveserver 5 reached 'Activation In Progress'.")
+                        # Final popup matches the operator's verbatim text from
+                        # the spec — it's what they expect at end-of-run.
+                        self.after(0, lambda: messagebox.showinfo(
+                            "Waveserver 5 — Complete",
+                            "Software Activation in Progress. Manual Commit "
+                            "Required. Safe to Disconnect.",
+                        ))
                 else:
                     self._set_ws5_status("Failed ✘", "red")
                     self._log("✘ Waveserver 5 upgrade did not complete — see log.")

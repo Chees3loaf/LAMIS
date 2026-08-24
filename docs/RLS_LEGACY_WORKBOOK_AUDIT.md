@@ -101,8 +101,10 @@ Audited workflow defaults represented by the replacement include:
 - loopback prefix `/32`;
 - loopback/OSC OSPF in every exact candidate, with optional configured
   terminal COLAN using either the audited OSPF-GNE or static-routing model;
-- 0.5-dB input and output patch-panel loss where the exact provider supports
-  those fields;
+- route-policy patch loss seeded from the audited field workflow: ordinary
+  two-sided ILAs default to 0.5/0.5 dB on the A-facing path and 0.2/0.2 dB on
+  the Z-facing path, while a terminal's single represented route degree
+  defaults to 0.5/0.5 dB; every value remains visible and editable;
 - 2-dB repair margin and 3-dB high-loss minor threshold;
 - no ILA COLAN; and
 - no NTP fields or commands because NTP is customer-managed.
@@ -121,6 +123,28 @@ also operator-entered unless the source explicitly supplies that physical
 fact; ATLAS never substitutes a site code or TID for legacy
 `B4 <rack location>`. A successful on-box `validate` remains mandatory for
 either terminal COLAN state.
+
+## ELP1–SAT4 known-good field workbook comparison
+
+The later field workbook
+`A13 Ciena RLS Field Configs ELP1-SAT4 v1.xlsx` was also inspected read-only.
+It is valuable as the route-specific command intent, but it is not copied as
+an executable source. ATLAS deliberately resolves these visible differences
+against the uploaded route diagram and reviewed route model:
+
+| Field workbook location | Stored value | Reviewed handling |
+|---|---|---|
+| `USVTE1-L8I2!B2:B3` | Repeats `-L8I2` in the local node identity. | Use the diagram TID `USVTE1-L8I2`; append the optional project DNS suffix only to hostname/neighbor FQDNs. |
+| `USUVA1-L8I2!B17` | Names `USKP21-L8K2`. | Use the adjacent diagram shelf `USKP21-L8I2`; the workbook token does not override route continuity. |
+| `USALE11-L8I2!B20` versus `USALE21-L8I2!B11` | The two ends disagree (`67.81` versus `67.54` km). | Preserve the direct diagram span value `67.54` km and require both endpoint reviews; a conflicting source cannot silently authorize CLI. |
+| ILA patch-loss rows | A-facing input/output are `0.5/0.5`; Z-facing input/output are `0.2/0.2`. | Seed the persisted route customer policy with those directional defaults. |
+| Terminal route-degree patch-loss rows | Both ends use `0.5/0.5`. | Apply the audited terminal override regardless of which route side the single represented degree faces. |
+| Terminal COLAN placeholders | Customer addresses are absent. | Keep COLAN explicitly deferred or require one complete customer-provided design; never copy the diagram OAM address. |
+| Frame/rack rows | Route-specific `RR ...` values are present. | Do not generalize them. A new project leaves frame/rack identity blank until the actual site supplies it. |
+
+The field workbook also confirms full node/neighbor DNS names under a customer
+domain. ATLAS models that as one optional project-level suffix rather than
+hard-coding a customer name. A blank suffix preserves bare TIDs.
 
 ## A/Z and provider suggestions
 
@@ -222,7 +246,8 @@ adds:
 - Explicit routing modes and complete initial IPv4 OAM transactions
 - Planned-loss and endpoint-local topology validation
 - CLI-safe identity, endpoint, link-name, and native fiber-type validation
-- Explicit `batch` / `commit` / `quit` boundaries
+- Explicit candidate `batch` / `validate` / `quit` boundaries, with no raw
+  `commit`; deployment commit remains a separate approved action
 - Paste-safe CLI separated from annotations and validation
 - Secret-free, checksummed export manifests
 - Automatically included pre-calibration and approved runtime-engineering

@@ -4,7 +4,7 @@ Keeps the version in lockstep across the two places it lives:
 
 * ``config.py`` -> ``APP_VERSION``
 * ``ATLAS.nsi`` -> ``!define ATLAS_VERSION`` AND ``!define ATLAS_VERSION_4PART``
-  (NSIS wants the Windows MAJOR.MINOR.PATCH.BUILD form, build always 0)
+  (NSIS wants the Windows MAJOR.MINOR.PATCH.BUILD form)
 
 Usage::
 

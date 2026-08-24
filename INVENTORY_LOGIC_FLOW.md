@@ -94,12 +94,16 @@ run_inventory_worker(context)
   │
   ├─ CommandTracker.reset()   ← per-run reset; clears all prior command dedup state
   │
-  ├─ PHASE 1: PING ALL IPs
+  ├─ PHASE 1: PROBE MANAGEMENT PORT ON ALL IPs
   │   └─ ThreadPoolExecutor(max_workers=min(20, n))
-  │       ├─ is_reachable(ip) → ICMP ping (Windows "ping -n 1")
+  │       ├─ probe_host(ip) → TCP connect 22, then 23 (NOT ICMP —
+  │       │                   inventory needs a CLI, so ping-only is useless)
   │       ├─ alive  → reachable_ips[]
-  │       ├─ dead   → failed_ips[ip] = "Unreachable"
-  │       └─ Progress: "Pinging X/Y"
+  │       ├─ dead   → one ICMP echo classifies the failure:
+  │       │           answers ping → failed_ips[ip] = PROBE_NO_MGMT_PORT
+  │       │                          (device up, remote access not enabled)
+  │       │           silent       → failed_ips[ip] = PROBE_UNREACHABLE
+  │       └─ Progress: "Probing X/Y"
   │
   └─ PHASE 2: CONCURRENT SCAN (identify + execute, 5 at a time)
       └─ ThreadPoolExecutor(max_workers=min(5, reachable), thread_name="atlas-scan")
@@ -492,7 +496,7 @@ Credentials are encrypted at rest in `credentials_config.json` using Fernet symm
 ### External Dependencies
 - **script_interface.DeviceIdentifier**: Probes devices via SSH banner → SSH login → Telnet fallback
 - **script_interface.ScriptSelector**: Dynamically imports and instantiates device-specific scripts
-- **script_interface.is_reachable()**: ICMP ping check (Windows `ping -n 1`)
+- **script_interface.probe_host()**: TCP connect probe of SSH (22) then Telnet (23), returning `(ok, reason)`; falls back to one ICMP echo only to tell "host down" apart from "host up, no CLI listener". `is_reachable()` is the boolean wrapper.
 - **openpyxl**: Excel workbook manipulation
 - **pandas**: DataFrame operations for inventory data
 - **sqlite3**: Part description lookups (`data/network_inventory.db`)

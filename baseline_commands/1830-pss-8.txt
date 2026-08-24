@@ -1,0 +1,14 @@
+# Nokia 1830 PSS-8 read-only baseline
+paging status disabled
+show general name
+show general system-identification
+show software dynamic
+show shelf inventory *
+show slot *
+show card inventory *
+show card sfdc8b *
+show interface sfdc8b *
+show interface inventory *
+show interface topology *
+show condition
+show alarmleds

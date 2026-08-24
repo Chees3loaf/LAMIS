@@ -145,6 +145,38 @@ def _clean_nan(v: Any) -> str:
     return "" if s.lower() == "nan" else s
 
 
+def fill_missing_hardware_serials(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with ``N/A`` for hardware parts lacking a serial.
+
+    A populated part/model number identifies an inventory item even when the
+    vendor does not serialize it (fillers and blank panels are common RLS
+    examples). Placeholder parse-failure rows are deliberately excluded.
+    """
+    if df is None or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    result = df.copy()
+    if "Part Number" not in result.columns and "Model Number" not in result.columns:
+        return result
+    if "Serial Number" not in result.columns:
+        result["Serial Number"] = ""
+
+    part = result.get("Part Number", pd.Series("", index=result.index))
+    model = result.get("Model Number", pd.Series("", index=result.index))
+    part_text = part.fillna("").astype(str).str.strip()
+    model_text = model.fillna("").astype(str).str.strip()
+    serial_text = result["Serial Number"].fillna("").astype(str).str.strip()
+
+    has_part = (
+        (part_text.ne("") & part_text.str.lower().ne("nan"))
+        | (model_text.ne("") & model_text.str.lower().ne("nan"))
+    )
+    is_placeholder = part_text.str.lower().isin({"unparsed", "unknown"})
+    missing_serial = serial_text.eq("") | serial_text.str.lower().eq("nan")
+    result.loc[has_part & ~is_placeholder & missing_serial, "Serial Number"] = "N/A"
+    return result
+
+
 def device_name_with_serial_fallback(
     primary_name: Any,
     chassis_serial: str,
@@ -772,6 +804,91 @@ class WorkbookBuilder:
     # Kept off to the right of the BOM data columns (B-F) so it doesn't
     # collide with serial / part / description writes.
     _ASSET_TAG_COL_ON_DEVICE_TAB = 7  # G
+    # Row 14 carries the equipment-table column headers on every device tab.
+    _ASSET_TAG_HEADER_ROW = 14
+
+    # The one live Asset Tag lookup, shared by every template. ``{key}`` is
+    # the cell on the device tab holding that device's name.
+    #
+    # The ``_xlfn.`` prefix is REQUIRED, not decoration. Excel stores
+    # functions introduced after 2007 ("future functions") under it. Written
+    # bare, Excel 365 does not resolve XLOOKUP as a built-in: it loads the
+    # call as a legacy user-defined name, renders it in the formula bar as
+    # ``=@XLOOKUP(...)`` — the old implicit-intersection operator — and
+    # evaluates the cell to ``#NAME?``. With the prefix Excel shows the
+    # clean ``=XLOOKUP(...)`` and computes normally. Verified against
+    # Excel 16.0: bare -> '=@XLOOKUP(...)' / #NAME?, prefixed -> the
+    # expected value. The prefix is a storage detail operators never see.
+    #
+    # The trailing ``&""`` is what keeps an untagged device blank. The
+    # ``if_not_found`` argument only fires for a device that isn't ON
+    # Summary at all; a device that IS listed but has no tag typed yet
+    # matches column D and returns the EMPTY column-E cell, which Excel
+    # renders as ``0``. Without the concat every device tab reads "0"
+    # from the moment the workbook is built. Appending an empty string
+    # coerces the blank to text, so the cell shows nothing until the
+    # operator types a tag.
+    _ASSET_TAG_LOOKUP_FMT = (
+        '=_xlfn.XLOOKUP({key},Summary!$D:$D,Summary!$E:$E,"",0,1)&""'
+    )
+
+    # Where each device-tab layout keeps the device name the lookup keys on.
+    # Report-layout tabs (Device / Ciena RLS / Nokia PSI report templates,
+    # and the report-layout packing slips) put the hostname at F6; the
+    # default packing-slip layout puts it at C7.
+    ASSET_TAG_KEY_CELL_REPORT = "F6"
+    ASSET_TAG_KEY_CELL_PACKING_SLIP = "C7"
+
+    # Sheets that are never device tabs, so never carry the lookup.
+    _ASSET_TAG_SKIP_SHEETS = (
+        "Summary", INVENTORY_TAB_NAME, _LEGACY_INVENTORY_TAB_NAME,
+    )
+
+    @classmethod
+    def asset_tag_lookup_formula(
+        cls, key_cell: str = ASSET_TAG_KEY_CELL_REPORT,
+    ) -> str:
+        """The live Asset Tag lookup for a device tab, keyed on *key_cell*.
+
+        Looks the device's own name up in Summary column D and returns the
+        operator-typed tag from Summary column E, so editing Summary once
+        updates every device tab. ``if_not_found=""`` keeps a device that
+        isn't on Summary blank instead of ``#N/A``.
+        """
+        return cls._ASSET_TAG_LOOKUP_FMT.format(key=key_cell)
+
+    @classmethod
+    def _is_asset_tag_lookup(cls, value: Any) -> bool:
+        """True when *value* is any generation of the Asset Tag lookup.
+
+        Recognizes the current ``_xlfn.``-prefixed form and the earlier
+        bare-``XLOOKUP`` form that Excel renders as ``=@XLOOKUP(...)`` and
+        evaluates to ``#NAME?``. Callers use this to tell "our formula,
+        possibly stale" apart from "a formula the operator wrote", so the
+        former can be refreshed in place and the latter left alone.
+        """
+        if not isinstance(value, str) or not value.startswith("="):
+            return False
+        squashed = value.replace(" ", "").upper()
+        return "XLOOKUP(" in squashed and "SUMMARY!$D:$D" in squashed
+
+    @classmethod
+    def _detect_asset_tag_key_cell(cls, ws: Any) -> Optional[str]:
+        """Pick the cell holding *ws*'s device name, or None if neither has one.
+
+        F6 is checked before C7 because report-layout tabs use C7 for the
+        Customer PO / SO string — only the default packing-slip layout puts
+        the device name there. Returning None means the sheet doesn't look
+        like a device tab, so the caller should not plant a lookup that
+        would key off an empty cell.
+        """
+        for addr in (
+            cls.ASSET_TAG_KEY_CELL_REPORT, cls.ASSET_TAG_KEY_CELL_PACKING_SLIP,
+        ):
+            value = ws[addr].value
+            if isinstance(value, str) and value.strip() and not value.startswith("="):
+                return addr
+        return None
 
     def read_asset_tags_from_summary(self, summary_sheet: Any) -> Dict[str, str]:
         """Read the operator-typed Asset Tag column off a Summary sheet.
@@ -848,35 +965,130 @@ class WorkbookBuilder:
         ws: Any,
         chassis_row: int = 15,
         force: bool = False,
+        key_cell: Optional[str] = None,
     ) -> bool:
         """Plant the live Asset Tag lookup on a device tab's chassis row.
 
-        Sets ``G<chassis_row>`` to
-        ``=XLOOKUP(F6, Summary!$D:$D, Summary!$E:$E, "", 0, 1)`` so the
+        Sets ``G<chassis_row>`` to the shared
+        ``=XLOOKUP(<key>, Summary!$D:$D, Summary!$E:$E, "", 0, 1)`` so the
         device tab's Asset Tag cell auto-reflects whatever the operator
-        types into Summary's E column. The lookup keys on the device's
-        hostname (F6) against Summary's Device Name column (D); when
-        the operator hasn't typed a tag yet the formula returns blank
-        instead of ``#N/A``.
+        types into Summary's E column. When the operator hasn't typed a
+        tag yet the formula returns blank instead of ``#N/A``.
 
-        Idempotent by default — if the cell already carries a formula
-        (any string starting with ``=``) we leave it alone. Pass
-        ``force=True`` to overwrite. A pre-existing LITERAL value
-        (e.g., from a manual edit on the device tab before this method
-        existed) IS overwritten by the formula on a fresh build —
-        operators are expected to type into Summary, not the device
-        tab directly.
+        ``key_cell`` names the cell holding this device's name. Left as
+        None it is detected from the sheet layout (see
+        ``_detect_asset_tag_key_cell``), falling back to the report
+        layout's F6 so existing callers keep their behavior.
+
+        Idempotent — a cell already holding this exact formula is left
+        untouched so append-mode rebuilds don't dirty the workbook. A
+        formula the OPERATOR wrote is also preserved, but an earlier
+        generation of *this* lookup is refreshed in place: workbooks
+        built before the ``_xlfn.`` fix carry a bare ``XLOOKUP`` that
+        Excel evaluates to ``#NAME?``, and silently keeping it would
+        leave the column broken forever. Pass ``force=True`` to
+        overwrite regardless.
+
+        A pre-existing LITERAL value (e.g., a manual edit on the device
+        tab) IS replaced by the formula — operators are expected to type
+        into Summary, not the device tab directly.
 
         Returns True when the cell was written.
         """
+        if key_cell is None:
+            key_cell = (
+                self._detect_asset_tag_key_cell(ws)
+                or self.ASSET_TAG_KEY_CELL_REPORT
+            )
+        formula = self.asset_tag_lookup_formula(key_cell)
+
         cell = ws.cell(
             row=chassis_row, column=self._ASSET_TAG_COL_ON_DEVICE_TAB,
         )
         existing = cell.value
-        if not force and isinstance(existing, str) and existing.startswith("="):
-            return False
-        cell.value = '=XLOOKUP(F6,Summary!$D:$D,Summary!$E:$E,"",0,1)'
+        if not force:
+            if existing == formula:
+                return False
+            if (
+                isinstance(existing, str)
+                and existing.startswith("=")
+                and not self._is_asset_tag_lookup(existing)
+            ):
+                return False
+        cell.value = formula
         return True
+
+    def ensure_asset_tag_header(self, ws: Any) -> bool:
+        """Label the Asset Tag column at G14 when the template omits it.
+
+        Five of the seven shipped device layouts carry ``G14 = "Asset
+        Tag"``; the two per-family packing-slip templates
+        (``Ciena_RLS_Packing_Slip`` / ``Nokia_PSI_Packing_Slip``) never
+        got it, so their G column held tags under a blank header. Written
+        here rather than into the binary templates so existing installs
+        heal too. Styling is copied from the neighboring Description
+        header (F14) to match the rest of the row.
+
+        Returns True when the header was added.
+        """
+        row = self._ASSET_TAG_HEADER_ROW
+        cell = ws.cell(row=row, column=self._ASSET_TAG_COL_ON_DEVICE_TAB)
+        if cell.value not in (None, ""):
+            return False
+        neighbor = ws.cell(row=row, column=self._ASSET_TAG_COL_ON_DEVICE_TAB - 1)
+        if neighbor.value in (None, ""):
+            # No header row here at all — this isn't the equipment table.
+            return False
+        cell.value = "Asset Tag"
+        try:
+            cell.font = copy(neighbor.font)
+            cell.fill = copy(neighbor.fill)
+            cell.border = copy(neighbor.border)
+            cell.alignment = copy(neighbor.alignment)
+        except Exception as exc:
+            logging.debug(f"[ASSET-TAG] header styling skipped: {exc}")
+        return True
+
+    def plant_asset_tag_formula_on_device_tabs(
+        self, wb: Any, chassis_row: int = 15,
+    ) -> int:
+        """Plant the live Asset Tag lookup across every device tab in *wb*.
+
+        The per-tab call sites inside the report builders cover sheets
+        written during that run. This workbook-wide pass runs just before
+        save so it also covers tabs an append-mode run didn't touch,
+        packing-slip tabs, and tabs merged in from a family workbook —
+        and, because ``write_asset_tag_formula_to_chassis_row`` refreshes
+        a stale lookup in place, it upgrades workbooks built before the
+        ``_xlfn.`` fix.
+
+        Each tab's key cell is detected from its own layout, so report
+        tabs key on F6 and default packing-slip tabs on C7 in the same
+        pass. Sheets with neither are skipped.
+
+        Returns the number of tabs written.
+        """
+        if "Summary" not in wb.sheetnames:
+            return 0
+        planted = 0
+        for name in wb.sheetnames:
+            if name in self._ASSET_TAG_SKIP_SHEETS:
+                continue
+            ws = wb[name]
+            try:
+                key_cell = self._detect_asset_tag_key_cell(ws)
+                if key_cell is None:
+                    continue
+                self.ensure_asset_tag_header(ws)
+                if self.write_asset_tag_formula_to_chassis_row(
+                    ws, chassis_row=chassis_row, key_cell=key_cell,
+                ):
+                    planted += 1
+            except Exception:
+                logging.exception(
+                    f"[ASSET-TAG] Failed to plant lookup on tab '{name}'"
+                )
+        return planted
 
     def propagate_asset_tags_to_tabs(
         self,
@@ -2027,6 +2239,8 @@ class WorkbookBuilder:
                     else:
                         write_df = combined_df.iloc[0:0].copy()
 
+                    write_df = fill_missing_hardware_serials(write_df)
+
                     start_row = 15
                     for i, row in write_df.reset_index(drop=True).iterrows():
                         row_num = start_row + i
@@ -2149,6 +2363,11 @@ class WorkbookBuilder:
             save_dir = os.path.dirname(output_file)
             os.makedirs(save_dir, exist_ok=True)
             self.autosize_workbook_columns(wb)
+            # Plant the live lookup workbook-wide, so append-mode tabs this
+            # run didn't rewrite are covered too and any pre-_xlfn formula
+            # gets refreshed. Must precede propagation: propagate only
+            # stamps literals into cells that aren't already formulas.
+            self.plant_asset_tag_formula_on_device_tabs(wb)
             # Pick up any operator-entered Asset Tag values from Summary E10+
             # and stamp them onto each device tab's Chassis/Shelf row. Useful
             # in append_mode against a workbook the operator has already
@@ -2529,7 +2748,10 @@ class WorkbookBuilder:
                         inv_parts.append(df)
 
                 if inv_parts:
-                    _write_inventory(ns, pd.concat(inv_parts, ignore_index=True))
+                    inventory_df = fill_missing_hardware_serials(
+                        pd.concat(inv_parts, ignore_index=True)
+                    )
+                    _write_inventory(ns, inventory_df)
 
                 _write_software(ns, _df(data_dict.get("software_info")))
                 _write_slot(ns, _df(data_dict.get("slot_info")))
@@ -2592,6 +2814,7 @@ class WorkbookBuilder:
         if save_dir:
             os.makedirs(save_dir, exist_ok=True)
         self.autosize_workbook_columns(wb)
+        self.plant_asset_tag_formula_on_device_tabs(wb)
         try:
             self.propagate_asset_tags_to_tabs(wb)
         except Exception:
@@ -2828,6 +3051,9 @@ class WorkbookBuilder:
             if save_dir:
                 os.makedirs(save_dir, exist_ok=True)
             self.autosize_workbook_columns(wb)
+            # Device tabs arrive here merged in from the per-family
+            # workbooks, so re-run the plant against the unified Summary.
+            self.plant_asset_tag_formula_on_device_tabs(wb)
             try:
                 self.propagate_asset_tags_to_tabs(wb)
             except Exception:
@@ -3683,6 +3909,9 @@ class WorkbookBuilder:
                 del wb_final[template_sheet.title]
 
             self.autosize_workbook_columns(wb_final)
+            # Packing-slip device tabs keep the device name at C7 (default
+            # layout) or F6 (report layout); the plant detects which per tab.
+            self.plant_asset_tag_formula_on_device_tabs(wb_final)
             # First-run packing slips have an empty Asset Tag column (no-op);
             # re-runs against a workbook the operator has filled in get
             # their tags stamped onto each device sheet's chassis row.

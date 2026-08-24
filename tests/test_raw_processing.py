@@ -4,6 +4,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pandas as pd
+
 from gui.raw_frame import (
     AUTO_DETECT_NOKIA,
     _detect_nokia_raw_script,
@@ -13,7 +15,7 @@ from gui.raw_frame import (
     _resolve_script_module,
     _split_raw_output_by_commands,
 )
-from gui.workbook_builder import WorkbookBuilder
+from gui.workbook_builder import WorkbookBuilder, fill_missing_hardware_serials
 from scripts.Nokia_IXR_Raw import Script as NokiaIXRRawScript
 from scripts.Nokia_SAR_Raw import Script as NokiaSARRawScript
 
@@ -340,6 +342,20 @@ class TestRawProcessMultiFamilyDispatch(unittest.TestCase):
 
 
 class TestNokiaRawProcessing(unittest.TestCase):
+
+    def test_inventory_part_without_serial_is_marked_na(self):
+        df = pd.DataFrame(
+            [
+                {"Part Number": "NTK809XA", "Serial Number": "", "Type": "filler"},
+                {"Part Number": "NTK810FA", "Serial Number": "SER123", "Type": "CTM"},
+                {"Part Number": "UNPARSED", "Serial Number": "", "Type": "error"},
+            ]
+        )
+
+        result = fill_missing_hardware_serials(df)
+
+        self.assertEqual(result["Serial Number"].tolist(), ["N/A", "SER123", ""])
+        self.assertEqual(df.iloc[0]["Serial Number"], "")
 
     def test_ixr_raw_parser_extracts_expected_sections(self):
         parser = NokiaIXRRawScript(connection_type="ssh", ip_address="ALSN001_7250")

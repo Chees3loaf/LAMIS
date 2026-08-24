@@ -1,0 +1,149 @@
+A:MOPN002_7705# show system information
+System Name            : MOPN002_7705
+System Type            : 7705 SAR-8 v2
+Microwave S/W Package  : invalid
+Tel/Tel6/SSH/FTP Admin : Disabled/Disabled/Enabled/Disabled
+
+A:MOPN002_7705# show chassis detail
+===============================================================================
+System Information
+===============================================================================
+  Name                              : MOPN002_7705
+  Type                              : 7705 SAR-8 v2
+  Critical LED state                : Off
+  Major LED state                   : Off
+  Minor LED state                   : Off
+  Over Temperature state            : OK
+  Base MAC address                  : 24:f6:8d:8d:2c:00
+===============================================================================
+A:MOPN002_7705# show system lldp neighbor
+Link Layer Discovery Protocol (LLDP) System Information
+
+===============================================================================
+NB = nearest-bridge   NTPMR = nearest-non-tpmr   NC = nearest-customer
+===============================================================================
+Lcl Port      Scope Remote Chassis ID  Index  Remote Port     Remote Sys Name
+-------------------------------------------------------------------------------
+1/2/6         NB    24:F6:8D:3C:90:00  1      1/2/2, 1-Gig/1* MOPN001_7250
+1/1/6         NB    24:F6:8D:3C:90:00  2      1/1/2, 1-Gig/1* MOPN001_7250
+1/1/5         NB    24:F6:8D:32:10:00  3      1/1/1, 1-Gig/1* MOPN002_7250
+1/2/5         NB    24:F6:8D:32:10:00  4      1/2/1, 1-Gig/1* MOPN002_7250
+===============================================================================
+* indicates that the corresponding row element may have been truncated.
+Number of neighbors : 4
+A:MOPN002_7705# show router isis adjacency
+MINOR: CLI ISIS instance 0 is not configured.
+A:MOPN002_7705# show router isis adjacency detail
+MINOR: CLI ISIS instance 0 is not configured.
+A:MOPN002_7705# show router isis capabilities
+MINOR: CLI ISIS instance 0 is not configured.
+A:MOPN002_7705# show system sync-if-timing
+
+===============================================================================
+System Interface Timing Operational Info
+===============================================================================
+System Status CPM A                : Master Locked
+    Reference Input Mode           : Revertive
+    Quality Level Selection        : Enabled
+    Reference Selected             : ref1
+    System Quality Level           : eec2
+
+Reference Order                    : ref1 ref2 external ref3
+
+Reference Input 1   
+    Admin Status                   : up
+    Rx Quality Level               : eec2
+    Quality Level Override         : none
+    Qualified For Use              : Yes
+    Selected For Use               : Yes
+    Source Port                    : 1/1/5
+    Source PTP Clock               : None
+
+Reference Input 2   
+    Admin Status                   : up
+    Rx Quality Level               : eec2
+    Quality Level Override         : none
+    Qualified For Use              : Yes
+    Selected For Use               : No
+        Not Selected Due To        :     on standby
+    Source Port                    : 1/2/6
+    Source PTP Clock               : None
+
+Reference Input 3   
+    Admin Status                   : down
+    Rx Quality Level               : unknown
+    Quality Level Override         : none
+    Qualified For Use              : No
+        Not Qualified Due To       :     disabled
+    Selected For Use               : No
+        Not Selected Due To        :     disabled
+    Source Port                    : None
+    Source PTP Clock               : None
+
+External Reference Input   
+    Admin Status                   : down
+    Configured Quality Level       : stu
+    Qualified For Use              : No
+        Not Qualified Due To       :     disabled
+    Selected For Use               : No
+        Not Selected Due To        :     disabled
+    Type                           : 2048Khz-G703
+    Impedance                      : 50-Ohm
+
+External Reference Output   
+    Type                           : 2048Khz-G703
+===============================================================================
+A:MOPN002_7705
+
+A:MOPN002_7705# show redundancy synchronization 
+
+===============================================================================
+Synchronization Information
+===============================================================================
+Standby Status               : standby ready
+Last Standby Failure         : N/A
+Standby Up Time              : 2026/07/18 16:50:05
+Standby Version              : TiMOS-B-25.10.R1 both/hops Nokia 7705 SAR
+                               Copyright (c) 2000-2025 Nokia.
+                               All rights reserved. All use subject to
+                               applicable license agreements.
+                               Built on Tue Oct 28 08:24:41 PDT 2025 by
+                               builder in /builds/F2510B/R1/panos/main
+Failover Time                : N/A
+Failover Reason              : N/A
+Boot/Config Sync Mode        : Configuration
+Boot/Config Sync Status      : Config only synchronized
+Last Config File Sync Time   : 07/20/2026 06:39:17
+Last Boot Env Sync Time      : Never
+Rollback Sync Mode           : None
+Rollback Sync Status         : No Rollback synchronization
+Last Rollback Sync Time      : Never
+Certificate Sync             : Enabled
+Cert Sync Status             : unknown
+Last Cert Sync Time          : Never
+===============================================================================
+A:MOPN002_7705
+
+A:MOPN002_7705# show system cpu 
+
+===============================================================================
+CPU Utilization (Sample period: 1 second)
+===============================================================================
+Name                                   CPU Time       CPU Usage        Capacity
+                                         (uSec)                           Usage
+-------------------------------------------------------------------------------
+BFD                                         250          ~0.00%           0.02%
+BGP                                       1,161           0.01%           0.05%
+BGP PE-CE                                     0           0.00%           0.00%
+CFLOWD                                       47          ~0.00%          ~0.00%
+Cards & Ports                            17,600           0.29%           0.95%
+DHCP Server                                  20          ~0.00%          ~0.00%
+ETH-CFM                                     521          ~0.00%           0.05%
+ICC                                      39,260           0.65%           2.03%
+IGMP/MLD                                    642           0.01%           0.06%
+IMSI Db Appl                                 35          ~0.00%          ~0.00%
+IOM                                     388,488           6.51%          15.76%
+IP Stack                                  5,725           0.09%           0.11%
+IS-IS                                     3,359           0.05%           0.08%
+===============================================================================
+A:MOPN002_7705#

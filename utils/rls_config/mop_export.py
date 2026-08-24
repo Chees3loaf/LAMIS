@@ -48,6 +48,7 @@ FBN_PART = "xl/worksheets/sheet1.xml"
 IRM_PART = "xl/worksheets/sheet6.xml"
 WORKBOOK_PART = "xl/workbook.xml"
 CALC_CHAIN_PART = "xl/calcChain.xml"
+DIAGRAM_SHEET_PART = "xl/worksheets/sheet4.xml"
 DIAGRAM_DRAWING_PART = "xl/drawings/drawing1.xml"
 DIAGRAM_DRAWING_RELS_PART = "xl/drawings/_rels/drawing1.xml.rels"
 
@@ -64,6 +65,20 @@ A_Q = lambda local: f"{{{DRAWING_MAIN_NS}}}{local}"
 PACKAGE_REL_Q = lambda local: f"{{{PACKAGE_REL_NS}}}{local}"
 
 _CELL_REF_RE = re.compile(r"^([A-Z]+)([1-9][0-9]*)$")
+_FORMULA_CELL_REF_RE = re.compile(
+    r"(?<![A-Z0-9_])(\$?)([A-Z]{1,3})(\$?)([1-9][0-9]*)(?![A-Z0-9_])"
+)
+_FORMULA_TOKEN_RE = re.compile(
+    r"""
+    (?P<SPACE>\s+)
+    |(?P<STRING>"(?:[^"]|"")*")
+    |(?P<CELL>\$?[A-Z]{1,3}\$?[1-9][0-9]*)
+    |(?P<NUMBER>(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))
+    |(?P<IDENT>[A-Z][A-Z0-9_.]*)
+    |(?P<OP>[+\-*/(),&])
+    """,
+    re.VERBOSE,
+)
 _INVALID_XML_RE = re.compile(
     "[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]"
 )
@@ -210,6 +225,7 @@ def export_mop(
                 IRM_PART,
                 WORKBOOK_PART,
                 CALC_CHAIN_PART,
+                DIAGRAM_SHEET_PART,
                 DIAGRAM_DRAWING_PART,
             }
             missing = required.difference(source_zip.namelist())
@@ -241,6 +257,9 @@ def export_mop(
                 preview=purpose == "preview",
             )
             irm_xml = _render_irm(source_zip.read(IRM_PART), snapshot, counts)
+            diagram_sheet_xml = _render_diagram_sheet(
+                source_zip.read(DIAGRAM_SHEET_PART)
+            )
             print_area = _fbn_print_area(snapshot)
             workbook_xml = _render_workbook(
                 source_zip.read(WORKBOOK_PART), print_area
@@ -280,6 +299,7 @@ def export_mop(
                 IRM_PART: irm_xml,
                 WORKBOOK_PART: workbook_xml,
                 CALC_CHAIN_PART: calc_chain_xml,
+                DIAGRAM_SHEET_PART: diagram_sheet_xml,
             }
             if diagram_drawing_xml is not None:
                 replacements[DIAGRAM_DRAWING_PART] = diagram_drawing_xml
@@ -760,7 +780,16 @@ def _render_fbn(
             _put_number(cells, row, rack_start + 4, rack_unit, _source_style(source_cells, row, 8, 288))
             _put_inline(cells, row, center_col, "Empty", 269)
         _put_inline(cells, 5, center_col, "DC PDU", 278)
-        _put_inline(cells, 50, rack_start, f"RACK {rack_index + 1}", 508)
+        _put_inline(
+            cells,
+            50,
+            rack_start,
+            (
+                f"RACK {rack_index + 1} — PLANNING LAYOUT\n"
+                "RU LOCATIONS NOT FIELD VERIFIED"
+            ),
+            508,
+        )
 
         cursor = 10
         rack_shelves = snapshot.shelves[rack_index * 8 : (rack_index + 1) * 8]
@@ -828,51 +857,39 @@ def _render_fbn(
         f"{counts.total_sites} sites\n{max(counts.total_sites - 1, 0)} Spans",
         557,
     )
-    add_release, add_variant = _family_release_variant(
-        snapshot.shelves,
-        (
-            _ADD_DROP_A_PROFILES
-            | _ADD_DROP_Z_PROFILES
-            | _ADD_DROP_UNASSIGNED_PROFILES
-        ),
-        default_release="UNSPECIFIED",
-        default_variant="UNSPECIFIED",
-    )
-    roadm_release, roadm_variant = _family_release_variant(
-        snapshot.shelves,
-        _ROADM_PROFILES,
-        default_release="UNSPECIFIED",
-        default_variant="UNSPECIFIED",
-    )
-    ila_release, ila_variant = _family_release_variant(
-        snapshot.shelves,
-        _ILA_PROFILES,
-        default_release="UNSPECIFIED",
-        default_variant="UNSPECIFIED",
-    )
-    _put_inline(cells, 8, table_start, f"{add_release} ADD/DROP", 536)
-    _put_inline(cells, 8, table_start + 2, f"{roadm_release} ROADM", 538)
-    _put_inline(cells, 8, table_start + 4, f"{ila_release} ILAs", 540)
+    # These are controlled FBN package-family labels from the authoritative
+    # deliverable, not per-route free text.  Only their quantities are
+    # dynamic.  Keeping the fixed PECs prevents an absent family from being
+    # rendered as the misleading and over-wide "UNSPECIFIED" label.
+    _put_inline(cells, 8, table_start, "R4 ADD/DROP", 536)
+    _put_inline(cells, 8, table_start + 2, "R4 ROADM", 538)
+    _put_inline(cells, 8, table_start + 4, "R2 ILAs", 540)
     _put_inline(
         cells,
         9,
         table_start,
-        f"({counts.add_drop}) {add_variant} Shelves",
+        f"({counts.add_drop}) K74-C948-900 Shelves",
         524,
     )
     _put_inline(
         cells,
         9,
         table_start + 2,
-        f"({counts.roadm}) {roadm_variant} Shelves",
+        f"({counts.roadm}) K74-C890-900 Shelves",
         526,
     )
     _put_inline(
         cells,
         9,
         table_start + 4,
-        f"({counts.ila}) {ila_variant} Shelves",
+        f"({counts.ila}) K74-C894-900 Shelves",
         528,
+    )
+    _put_inline(
+        cells,
+        10,
+        table_start,
+        "Includes (1) RLA 64x1 each",
     )
     if preview:
         route_note = (
@@ -1110,15 +1127,11 @@ def _render_irm(
         cell = _required_cell(root, reference, "IRM")
         _set_cell_number(cell, value)
 
-    # Cached results refer to the source route.  Removing only cached <v>
-    # values avoids displaying incorrect material quantities before Excel's
-    # forced full recalculation, while all formula nodes remain byte-logically
-    # identical (same text and attributes).
-    for formula in root.findall(f".//{Q('f')}"):
-        cell = formula.getparent()
-        cached = cell.find(Q("v"))
-        if cached is not None:
-            cell.remove(cached)
+    # Keep the authoritative formulas live and byte-logically identical while
+    # refreshing their OOXML cached values.  Excel will still recalculate on
+    # load, but viewers without a calculation engine now display the same IRM
+    # quantities instead of blanks or the template route's stale results.
+    _refresh_irm_formula_caches(root)
 
     sheet_view = root.find(f"{Q('sheetViews')}/{Q('sheetView')}")
     if sheet_view is not None:
@@ -1126,6 +1139,340 @@ def _render_irm(
         sheet_view.set("tabSelected", "0")
         sheet_view.set("topLeftCell", "A1")
 
+    return _xml_bytes(root)
+
+
+def _refresh_irm_formula_caches(root: etree._Element) -> None:
+    """Evaluate the controlled IRM formula subset and replace cached values.
+
+    The immutable template contains 186 formulas.  They use only direct cell
+    references, arithmetic, ``ROUNDUP``, and text concatenation.  Evaluating
+    that deliberately small grammar locally avoids running Excel during an
+    export while retaining every original ``<f>`` node and shared-formula
+    attribute exactly as supplied by the authoritative workbook.
+    """
+
+    cells = {
+        cell.get("r", ""): cell
+        for cell in root.findall(f".//{Q('c')}")
+        if cell.get("r")
+    }
+    formula_cells = [
+        cell for cell in cells.values() if cell.find(Q("f")) is not None
+    ]
+    if len(formula_cells) != 186:
+        raise MopExportError(
+            "The validated IRM template did not retain exactly 186 formulas."
+        )
+
+    shared_masters: dict[str, tuple[str, str]] = {}
+    for cell in formula_cells:
+        formula = cell.find(Q("f"))
+        assert formula is not None
+        if formula.get("t") == "shared" and formula.text:
+            shared_id = formula.get("si")
+            if shared_id is None or shared_id in shared_masters:
+                raise MopExportError(
+                    "The IRM template has an invalid shared-formula master."
+                )
+            shared_masters[shared_id] = (cell.get("r", ""), formula.text)
+
+    expressions: dict[str, str] = {}
+    for cell in formula_cells:
+        reference = cell.get("r", "")
+        formula = cell.find(Q("f"))
+        assert formula is not None
+        if formula.text:
+            expressions[reference] = formula.text
+            continue
+        shared_id = formula.get("si")
+        master = shared_masters.get(shared_id or "")
+        if formula.get("t") != "shared" or master is None:
+            raise MopExportError(
+                f"IRM formula {reference} has no evaluable expression."
+            )
+        expressions[reference] = _translate_shared_formula(
+            master_expression=master[1],
+            master_reference=master[0],
+            target_reference=reference,
+        )
+
+    calculated: dict[str, int | float | str] = {}
+    evaluating: set[str] = set()
+
+    def value_for(reference: str) -> int | float | str:
+        normalized_reference = reference.replace("$", "").upper()
+        if normalized_reference in calculated:
+            return calculated[normalized_reference]
+        if normalized_reference in evaluating:
+            raise MopExportError(
+                f"IRM formula cycle detected at {normalized_reference}."
+            )
+        if normalized_reference in expressions:
+            evaluating.add(normalized_reference)
+            try:
+                result = _IrmFormulaParser(
+                    expressions[normalized_reference],
+                    value_for,
+                ).parse()
+            finally:
+                evaluating.remove(normalized_reference)
+            calculated[normalized_reference] = result
+            return result
+
+        cell = cells.get(normalized_reference)
+        if cell is None:
+            # Excel treats an absent cell as blank, which is zero when used by
+            # every arithmetic expression in this controlled template.
+            return 0
+        inline = cell.find(Q("is"))
+        if inline is not None:
+            return "".join(inline.itertext())
+        cached = cell.find(Q("v"))
+        if cached is None or cached.text in {None, ""}:
+            return 0
+        if cell.get("t") in {"str", "inlineStr"}:
+            return cached.text
+        if cell.get("t") == "s":
+            raise MopExportError(
+                "An IRM formula unexpectedly references a shared-string cell "
+                f"at {normalized_reference}."
+            )
+        return _parse_formula_number(cached.text, normalized_reference)
+
+    for cell in formula_cells:
+        reference = cell.get("r", "")
+        result = value_for(reference)
+        formula = cell.find(Q("f"))
+        assert formula is not None
+        old_cache = cell.find(Q("v"))
+        if old_cache is not None:
+            cell.remove(old_cache)
+        cache = etree.Element(Q("v"))
+        if isinstance(result, str):
+            cell.set("t", "str")
+            cache.text = result
+        else:
+            cell.attrib.pop("t", None)
+            cache.text = _formula_number_text(result)
+        formula.addnext(cache)
+
+
+def _translate_shared_formula(
+    *,
+    master_expression: str,
+    master_reference: str,
+    target_reference: str,
+) -> str:
+    master_col, master_row = _split_cell_ref(master_reference)
+    target_col, target_row = _split_cell_ref(target_reference)
+    col_offset = target_col - master_col
+    row_offset = target_row - master_row
+
+    def replace(match: re.Match[str]) -> str:
+        absolute_col, column_name, absolute_row, row_text = match.groups()
+        column = _column_index(column_name)
+        row = int(row_text)
+        if not absolute_col:
+            column += col_offset
+        if not absolute_row:
+            row += row_offset
+        if column < 1 or row < 1:
+            raise MopExportError(
+                "An IRM shared formula translated outside the worksheet."
+            )
+        return (
+            f"{absolute_col}{_column_name(column)}"
+            f"{absolute_row}{row}"
+        )
+
+    return _FORMULA_CELL_REF_RE.sub(replace, master_expression)
+
+
+def _parse_formula_number(value: str, reference: str) -> int | float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise MopExportError(
+            f"IRM cell {reference} has a non-numeric cached value."
+        ) from exc
+    if not math.isfinite(number):
+        raise MopExportError(
+            f"IRM cell {reference} has a non-finite cached value."
+        )
+    return int(number) if number.is_integer() else number
+
+
+def _formula_number_text(value: int | float) -> str:
+    number = float(value)
+    if not math.isfinite(number):
+        raise MopExportError("IRM formula produced a non-finite value.")
+    if number == 0:
+        return "0"
+    if number.is_integer():
+        return str(int(number))
+    return format(number, ".15g")
+
+
+def _formula_number(value: int | float | str) -> int | float:
+    if isinstance(value, bool) or isinstance(value, str):
+        raise MopExportError("IRM formula attempted arithmetic on text.")
+    return value
+
+
+def _formula_text(value: int | float | str) -> str:
+    if isinstance(value, str):
+        return value
+    return _formula_number_text(value)
+
+
+class _IrmFormulaParser:
+    """Small, non-executing parser for the audited IRM formula grammar."""
+
+    def __init__(
+        self,
+        expression: str,
+        value_for: Any,
+    ) -> None:
+        self._expression = expression
+        self._value_for = value_for
+        self._tokens: list[tuple[str, str]] = []
+        position = 0
+        while position < len(expression):
+            match = _FORMULA_TOKEN_RE.match(expression, position)
+            if match is None:
+                raise MopExportError(
+                    "IRM formula contains unsupported syntax near "
+                    f"{expression[position:position + 20]!r}."
+                )
+            position = match.end()
+            kind = match.lastgroup or ""
+            if kind != "SPACE":
+                self._tokens.append((kind, match.group(kind)))
+        self._position = 0
+
+    def parse(self) -> int | float | str:
+        value = self._parse_concat()
+        if self._position != len(self._tokens):
+            raise MopExportError(
+                f"IRM formula contains trailing syntax: {self._expression!r}."
+            )
+        return value
+
+    def _parse_concat(self) -> int | float | str:
+        value = self._parse_additive()
+        while self._accept("OP", "&"):
+            value = _formula_text(value) + _formula_text(
+                self._parse_additive()
+            )
+        return value
+
+    def _parse_additive(self) -> int | float | str:
+        value = self._parse_multiplicative()
+        while True:
+            if self._accept("OP", "+"):
+                value = _formula_number(value) + _formula_number(
+                    self._parse_multiplicative()
+                )
+            elif self._accept("OP", "-"):
+                value = _formula_number(value) - _formula_number(
+                    self._parse_multiplicative()
+                )
+            else:
+                return value
+
+    def _parse_multiplicative(self) -> int | float | str:
+        value = self._parse_unary()
+        while True:
+            if self._accept("OP", "*"):
+                value = _formula_number(value) * _formula_number(
+                    self._parse_unary()
+                )
+            elif self._accept("OP", "/"):
+                divisor = _formula_number(self._parse_unary())
+                if divisor == 0:
+                    raise MopExportError("IRM formula divided by zero.")
+                value = _formula_number(value) / divisor
+            else:
+                return value
+
+    def _parse_unary(self) -> int | float | str:
+        if self._accept("OP", "+"):
+            return _formula_number(self._parse_unary())
+        if self._accept("OP", "-"):
+            return -_formula_number(self._parse_unary())
+        return self._parse_primary()
+
+    def _parse_primary(self) -> int | float | str:
+        token = self._peek()
+        if token is None:
+            raise MopExportError("IRM formula ended unexpectedly.")
+        kind, value = token
+        if kind == "NUMBER":
+            self._position += 1
+            return _parse_formula_number(value, "formula literal")
+        if kind == "STRING":
+            self._position += 1
+            return value[1:-1].replace('""', '"')
+        if kind == "CELL":
+            self._position += 1
+            return self._value_for(value)
+        if kind == "IDENT":
+            self._position += 1
+            if value != "ROUNDUP":
+                raise MopExportError(
+                    f"IRM formula uses unsupported function {value}."
+                )
+            self._require("OP", "(")
+            number = _formula_number(self._parse_concat())
+            self._require("OP", ",")
+            digits_value = _formula_number(self._parse_concat())
+            self._require("OP", ")")
+            digits = int(digits_value)
+            if digits != digits_value:
+                raise MopExportError(
+                    "IRM ROUNDUP precision must be an integer."
+                )
+            factor = 10.0**digits
+            scaled = number * factor
+            rounded = math.ceil(scaled) if scaled >= 0 else math.floor(scaled)
+            result = rounded / factor
+            return int(result) if result.is_integer() else result
+        if self._accept("OP", "("):
+            result = self._parse_concat()
+            self._require("OP", ")")
+            return result
+        raise MopExportError(
+            f"IRM formula contains unsupported token {value!r}."
+        )
+
+    def _peek(self) -> tuple[str, str] | None:
+        if self._position >= len(self._tokens):
+            return None
+        return self._tokens[self._position]
+
+    def _accept(self, kind: str, value: str) -> bool:
+        if self._peek() == (kind, value):
+            self._position += 1
+            return True
+        return False
+
+    def _require(self, kind: str, value: str) -> None:
+        if not self._accept(kind, value):
+            raise MopExportError(
+                f"IRM formula expected {value!r}: {self._expression!r}."
+            )
+
+
+def _render_diagram_sheet(source_xml: bytes) -> bytes:
+    """Clear the template's stale Diagram selection/grouping state."""
+
+    parser = etree.XMLParser(remove_blank_text=False, resolve_entities=False)
+    root = etree.fromstring(source_xml, parser)
+    sheet_view = root.find(f"{Q('sheetViews')}/{Q('sheetView')}")
+    if sheet_view is None:
+        raise MopExportError("Diagram worksheet has no sheet view.")
+    sheet_view.set("tabSelected", "0")
     return _xml_bytes(root)
 
 
@@ -1366,30 +1713,6 @@ def _rack_profile_label(profile_id: str) -> str:
     return profile_id.upper().replace("_", " ")
 
 
-def _family_release_variant(
-    shelves: Sequence[_ShelfSnapshot],
-    profiles: frozenset[str],
-    *,
-    default_release: str,
-    default_variant: str,
-) -> tuple[str, str]:
-    """Return honest, concise summary labels for one shelf family.
-
-    Explicit ``UNSPECIFIED`` labels are used when the route has no shelf in
-    the family. A heterogeneous route is labeled ``MIXED`` rather than being
-    silently described as one release or part number.
-    """
-
-    family_shelves = [shelf for shelf in shelves if shelf.profile_id in profiles]
-    if not family_shelves:
-        return default_release, default_variant
-    releases = {shelf.software_release for shelf in family_shelves}
-    variants = {shelf.shelf_variant for shelf in family_shelves}
-    release = next(iter(releases)) if len(releases) == 1 else "MIXED"
-    variant = next(iter(variants)) if len(variants) == 1 else "MIXED"
-    return release, variant
-
-
 def _put_inline(
     cells: dict[tuple[int, int], etree._Element],
     row: int,
@@ -1552,6 +1875,7 @@ def _sha256_file(path: Path) -> str:
 __all__ = [
     "DIAGRAM_DRAWING_PART",
     "DIAGRAM_DRAWING_RELS_PART",
+    "DIAGRAM_SHEET_PART",
     "DEFAULT_TEMPLATE_PATH",
     "MopExportError",
     "MopExportWarning",

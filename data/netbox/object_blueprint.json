@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "netbox_target": "4.6",
+  "manufacturer": {
+    "name": "Nokia",
+    "slug": "nokia"
+  },
+  "custom_fields": [
+    {
+      "name": "atlas_managed",
+      "label": "ATLAS managed",
+      "type": "boolean",
+      "default": false,
+      "object_types": ["dcim.device", "dcim.module"]
+    },
+    {
+      "name": "atlas_source",
+      "label": "ATLAS source",
+      "type": "text",
+      "object_types": ["dcim.device", "dcim.module"]
+    },
+    {
+      "name": "atlas_last_seen",
+      "label": "ATLAS last seen",
+      "type": "datetime",
+      "object_types": ["dcim.device", "dcim.module"]
+    },
+    {
+      "name": "atlas_part_type",
+      "label": "ATLAS part type",
+      "type": "text",
+      "object_types": ["dcim.module"]
+    },
+    {
+      "name": "atlas_description",
+      "label": "ATLAS description",
+      "type": "longtext",
+      "object_types": ["dcim.device", "dcim.module"]
+    }
+  ],
+  "device_identity": ["name"],
+  "module_type_identity": ["manufacturer", "model"],
+  "module_identity": ["device", "module_bay"],
+  "defaults_requiring_deployment_configuration": {
+    "site": null,
+    "device_role": null,
+    "platform": null,
+    "vrf": null
+  },
+  "policies": {
+    "delete_missing_objects": false,
+    "netbox_failure_blocks_excel": false,
+    "create_unknown_module_types": true,
+    "assign_management_ip_as_primary": true
+  }
+}

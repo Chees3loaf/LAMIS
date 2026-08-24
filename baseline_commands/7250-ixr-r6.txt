@@ -1,0 +1,27 @@
+# Nokia 7250 IXR-R6/R6d/R6dl read-only baseline
+environment no more
+show system information
+show chassis detail
+show card state
+show card detail
+show mda
+show mda detail
+show port
+show port detail
+show lag
+show lag detail
+show router interface
+show router interface detail
+show router ospf neighbor
+show router isis adjacency
+show router isis adjacency detail
+show router isis capabilities
+show router bgp neighbor
+show router ldp session
+show service service-using
+show aps
+show system lldp neighbor
+show external-alarms input
+show system sync-if-timing
+show redundancy synchronization
+show system cpu

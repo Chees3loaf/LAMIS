@@ -11,22 +11,26 @@ being converted to R4.0.
 
 Every output is a documented pre-calibration candidate. It is not deployment
 approval and must pass `validate` on the matching blank R4.0 shelf before the
-operator proceeds.
+operator proceeds. Raw candidate files deliberately contain no `commit`
+command. Committing changes requires a separate, explicitly approved
+deployment workflow.
 
 Because the route diagram normally does not identify the running build/schema,
 ATLAS prepopulates **`4.00.00`** from the supplied R4.0.0 vendor upgrade
 procedures. This value is editable planning metadata, not an observation of the
 target shelf. A customer shelf may instead run a later R4.0 build such as
 `4.00.01`; the operator must compare the target when possible and always require
-a successful on-box `validate` before commit.
+a successful on-box `validate` before a separately approved deployment.
 
-The current exact-request payload schema is **1.4** and generator version is
-**1.6.0**. Schemas 1.2 and 1.3 are retired: correcting the DLE
+The current exact-request payload schema is **1.5** and generator version is
+**1.7.0**. Schemas 1.2 and 1.3 are retired: correcting the DLE
 upstream/downstream peer mapping materially changed generated CLI, and the
 one-degree provider requires an explicit variable-cardinality request plus
 provider-fixed local link names. ATLAS keeps an old payload untouched until the
 operator opens the current review, validates it, and deliberately applies a
-replacement.
+replacement. Schema 1.4 remains readable when its site identity is numeric.
+Schema 1.5 adds `null` for an unknown site identity; that state omits the whole
+site-identity command instead of substituting zero.
 
 ## Exact providers
 
@@ -393,6 +397,17 @@ Confirming the side maps those stored A/Z facts into the fixed line records.
 Distance, source fiber range, and the raw diagram label remain read-only
 context because they are not fields in the exact provider request.
 
+An optional project-level node/neighbor DNS suffix prepopulates both the shelf
+hostname and adjacent-neighbor identities as FQDNs while preserving the bare
+TID for member/shelf identity. Blank suffix keeps all three values as bare
+TIDs. Project A/Z patch-loss defaults apply to two-sided ILA/intermediate
+shelves and initialize from the supplied known-good field-config contract at
+0.5/0.5 dB A-facing and 0.2/0.2 dB Z-facing. They remain editable for another
+customer standard. Endpoint Add/Drop and ROADM route-facing degrees use the audited
+legacy-workbook review default of 0.5-dB input and 0.5-dB output regardless of
+which route side they face. All seeded hostname, neighbor, and patch-loss
+fields remain editable and require exact validation.
+
 Local CLI link object names come from the exact provider, not from the route
 circuit label: the RLA layouts use `LM1-LINEOUT` and, when present,
 `LM2-LINEOUT`; the DLE uses `PFG-1-2-LINEOUT` and `PFG-2-1-LINEOUT`. A route
@@ -458,7 +473,10 @@ The following are fixed by the provider:
 
 The operator reviews customer/engineering facts:
 
-- TID, hostname, and site identity; ATLAS never invents a missing site or TID;
+- TID, hostname, and site identity; ATLAS never invents a missing site or TID.
+  The numeric site ID is nullable in the exact request: a known integer retains
+  the documented site-identity command, while `null` omits that entire command
+  instead of emitting an invented ID `0`;
 - loopback and OSPF area;
 - optional, customer-provided COLAN addressing/routing for Add/Drop and ROADM
   terminals only; the operator may instead omit the complete COLAN block for
@@ -467,7 +485,9 @@ The operator reviews customer/engineering facts:
   substituted for it, and a blank value omits the entire shelf-location CLI;
 - the editable target build/schema candidate, initially prepopulated as the
   unverified vendor baseline `4.00.00`;
-- neighbor TID and facing PFG identities;
+- neighbor node and facing PFG identities. A neighbor may be a 1–32 character
+  CLI-safe TID or a strict DNS FQDN of at most 253 characters; longer customer
+  FQDNs are not truncated to fit the TID grammar;
 - native fiber type and directional expected loss;
 - patch-panel loss, repair margin, and high-loss threshold.
 
@@ -508,7 +528,7 @@ calibration procedure.
 For exact-payload schema compatibility, legacy confirmation fields are not
 treated as observations or deployment authorization. Stored values from the
 former checkbox workflow cannot suppress the automatic controls or make an
-artifact deployable. Schema 1.4 retains all six Boolean fields for strict
+artifact deployable. Schema 1.5 retains all six Boolean fields for strict
 decode/encode round trips: `false` no longer blocks offline candidate
 generation, while `true` is never interpreted as physical proof.
 
@@ -580,15 +600,18 @@ them or be packaged as a deliverable.
 
 ## Commissioning sequence
 
-The R4.0 provider emits dependency-sized transactions:
+The R4.0 provider emits dependency-sized validation transactions:
 
 ```text
 batch
 <complete dependent command set>
 validate
-commit
 quit
 ```
+
+The missing `commit` is intentional. Candidate generation readiness means
+that ATLAS produced a complete validate-only set for all reviewed shelves; it
+does not mean deployment is approved.
 
 Parent equipment is created first. In the initial OAM transaction, ATLAS
 creates the loopback `/32`, then the OSC pluggables. RLS automatically creates
@@ -624,6 +647,9 @@ ATLAS blocks generation or export when any of the following is true:
 - either A→Z or Z→A egress review is missing, or the physical span remains
   pending/manual;
 - a provider or bundle artifact claims another release/generator.
+- a candidate manifest does not explicitly declare
+  `validate_without_commit`, claims deployment approval, or its CLI contains
+  an executable `commit` line.
 
 Bundle export is atomic. It publishes nothing unless every shelf passes the
 same R4.0-only route contract. Route Builder runs this preflight before it asks
@@ -640,11 +666,13 @@ defense in depth. A successful bundle contains:
 For each shelf, the validation and manifest records distinguish `configured`,
 `deferred`, and ILA-`prohibited` COLAN states and whether COLAN commands were
 emitted. The route validation report also lists each ordered shelf's COLAN
-state and whether its candidate contains COLAN commands. A successful bundle
-can therefore contain a complete set of reviewed
-factory-staging candidates while some terminals intentionally omit optional
-COLAN; all other route, provider, topology, and on-box validation gates remain
-unchanged.
+state and whether its candidate contains COLAN commands. It separately totals
+route-project warnings, per-shelf candidate warnings, and deployment-control
+advisories so a zero route-project warning count cannot hide shelf-level
+review items. A successful bundle can therefore contain a complete set of
+reviewed factory-staging candidates while some terminals intentionally omit
+optional COLAN; all other route, provider, topology, and on-box validation
+gates remain unchanged.
 
 When the project originated from a route diagram, the MOP also contains the
 normalized source content on the `Diagram` tab. Project JSON stores only
@@ -658,7 +686,15 @@ Provider manifests always record:
 
 ```text
 deployment_approved: false
+deployment_approval_state: not_approved
+deployable_cli: false
+candidate_generation_ready: true
+candidate_safety_mode: validate_without_commit
+commit_commands_emitted: false
+commit_command_count: 0
 on_box_validate_required: true
+numeric_site_id_state: <configured or deferred>
+numeric_site_identity_command_emitted: <true or false>
 release: RLS R4.0
 generator: R40ExactConfigGenerator
 supports_raman: <true or false from the exact provider>

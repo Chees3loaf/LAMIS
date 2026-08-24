@@ -196,6 +196,12 @@ def test_editor_exposes_full_master_detail_route_workflow() -> None:
         "Primary OAM IP",
         "Software release",
         "Native CLI fiber type",
+        "Node/neighbor DNS suffix",
+        "A input patch loss",
+        "A output patch loss",
+        "Z input patch loss",
+        "Z output patch loss",
+        "COLAN OSPF metric",
         "Apply to all spans",
         "Shelf variant / PEC",
         "RAMAN display",
@@ -336,6 +342,22 @@ def test_retired_exact_payload_requires_deliberate_re_review() -> None:
             },
         )
         == "Exact review outdated — re-review required"
+    )
+
+
+def test_numeric_site_id_schema_1_4_payload_remains_supported() -> None:
+    module = _route_module()
+
+    assert (
+        module.profile_readiness_label(
+            "ila",
+            review_state="confirmed",
+            profile_payload={
+                "schema_id": "ciena.rls.r4-0-exact-request",
+                "schema_version": "1.4",
+            },
+        )
+        == "Exact R4.0 provider — validation pending"
     )
 
 
@@ -664,6 +686,163 @@ def test_contextual_review_accounting_reclassifies_route_86_to_defaults() -> Non
     assert marker["deployable_cli"] is False
     assert all(row.review_state == "pending" for row in rows)
     assert all(row.profile_payload == {} for row in rows)
+
+
+def test_diagram_route_link_preserves_pending_span_loss_discrepancy() -> None:
+    module = _route_module()
+    left = _row(
+        module,
+        shelf_id="left",
+        tid="LEFT-RLS",
+        site_code="LEFT",
+    )
+    right = _row(
+        module,
+        shelf_id="right",
+        site_key="site-right",
+        tid="RIGHT-RLS",
+        site_code="RIGHT",
+    )
+    raw_evidence = {
+        "field": "expected_loss_db",
+        "raw_text": "14.68 dB",
+        "normalized_value": "14.88",
+        "confidence": 0.99,
+        "image_index": 0,
+        "source_label": "route.png",
+        "bbox": [0.1, 0.1, 0.2, 0.1],
+        "method": "vision",
+    }
+    evidence = SimpleNamespace(
+        **raw_evidence,
+        to_dict=lambda current=dict(raw_evidence): dict(current),
+    )
+    span = SimpleNamespace(
+        order=1,
+        from_tid=left.tid,
+        to_tid=right.tid,
+        expected_loss_db=None,
+        distance_km=62.0,
+        circuit_id="GENERIC-CIRCUIT",
+        fiber_start=1,
+        fiber_end=2,
+        fiber_type="LEAF",
+        evidence=(evidence,),
+    )
+    result = SimpleNamespace(
+        source=SimpleNamespace(sha256="source-sha"),
+        active_spans=(span,),
+        issues=(
+            SimpleNamespace(
+                code=module.SOURCE_EVIDENCE_DISCREPANCY_CODE,
+                field="spans[1].expected_loss_db",
+                blocking=True,
+            ),
+        ),
+    )
+
+    path = module._diagram_route_links(result, (left, right))[0].paths[0]
+
+    assert path.expected_loss_db is None
+    assert path.source_evidence["fields"][0]["raw_text"] == "14.68 dB"
+    assert path.source_evidence[
+        module.PATH_SOURCE_DISCREPANCIES_KEY
+    ] == (
+        {
+            "field": "expected_loss_db",
+            "source_field": "spans[1].expected_loss_db",
+            "issue_code": module.SOURCE_EVIDENCE_DISCREPANCY_CODE,
+            "status": module.PATH_SOURCE_DISCREPANCY_PENDING,
+            "deployable_cli": False,
+        },
+    )
+
+
+def test_diagram_route_link_preserves_explicit_composite_sections() -> None:
+    module = _route_module()
+    left = _row(
+        module,
+        shelf_id="left",
+        tid="LEFT-RLS",
+        site_code="LEFT",
+    )
+    right = _row(
+        module,
+        shelf_id="right",
+        site_key="site-right",
+        tid="RIGHT-RLS",
+        site_code="RIGHT",
+    )
+
+    def segment_evidence(index: int, value: float):
+        raw = {
+            "field": f"segments.{index}.expected_loss_db",
+            "raw_text": f"{value} dB",
+            "normalized_value": str(value),
+            "confidence": 0.99,
+            "image_index": 0,
+            "source_label": "route.png",
+            "bbox": [0.1, 0.1, 0.2, 0.1],
+            "method": "vision",
+        }
+        return SimpleNamespace(
+            **raw,
+            to_dict=lambda current=dict(raw): dict(current),
+        )
+
+    span = SimpleNamespace(
+        order=1,
+        from_tid=left.tid,
+        to_tid=right.tid,
+        expected_loss_db=12.5,
+        distance_km=50.0,
+        circuit_id=None,
+        fiber_start=None,
+        fiber_end=None,
+        fiber_type="LEAF",
+        evidence=(),
+        segments=(
+            SimpleNamespace(
+                order=1,
+                from_tid=left.tid,
+                to_tid="REMOVED-RLS",
+                expected_loss_db=5.0,
+                distance_km=20.0,
+                circuit_id="SECTION-A",
+                fiber_start=1,
+                fiber_end=2,
+                fiber_type="LEAF",
+                evidence=(segment_evidence(0, 5.0),),
+            ),
+            SimpleNamespace(
+                order=2,
+                from_tid="REMOVED-RLS",
+                to_tid=right.tid,
+                expected_loss_db=7.5,
+                distance_km=30.0,
+                circuit_id="SECTION-B",
+                fiber_start=3,
+                fiber_end=4,
+                fiber_type="LEAF",
+                evidence=(segment_evidence(1, 7.5),),
+            ),
+        ),
+    )
+    result = SimpleNamespace(
+        source=SimpleNamespace(sha256="source-sha"),
+        active_spans=(span,),
+        issues=(),
+    )
+
+    path = module._diagram_route_links(result, (left, right))[0].paths[0]
+
+    assert len(path.segments) == 2
+    assert path.segments[0].to_tid == "REMOVED-RLS"
+    assert path.segments[1].from_tid == "REMOVED-RLS"
+    assert path.segments[1].source_evidence["fields"][0]["raw_text"] == (
+        "7.5 dB"
+    )
+    assert len(path.to_dict()["segments"]) == 2
 
 
 def _fiber_scope_result(
@@ -2447,6 +2626,176 @@ def test_one_degree_terminal_applies_only_its_modeled_bidirectional_degree() -> 
         )
 
 
+def test_paired_endpoint_reviews_supersede_preserved_loss_discrepancy() -> None:
+    module = _route_module()
+    first = _row(
+        module,
+        shelf_id="terminal-a",
+        profile_id="roadm_a",
+        site_code="A",
+        site_name="A Site",
+        tid="A-RLS",
+    )
+    second = _row(
+        module,
+        shelf_id="terminal-z",
+        profile_id="roadm_z",
+        site_key="site-z",
+        site_code="Z",
+        site_name="Z Site",
+        tid="Z-RLS",
+        primary_oam_ip="192.0.2.11",
+    )
+    marker = {
+        "field": "expected_loss_db",
+        "source_field": "spans[1].expected_loss_db",
+        "issue_code": module.SOURCE_EVIDENCE_DISCREPANCY_CODE,
+        "status": module.PATH_SOURCE_DISCREPANCY_PENDING,
+        "deployable_cli": False,
+    }
+    link = module.RouteLink(
+        link_id="link-a-z",
+        order=1,
+        from_shelf_id=first.shelf_id,
+        to_shelf_id=second.shelf_id,
+        paths=(
+            module.OpticalPath(
+                path_id="path-a-z",
+                path_role="route",
+                expected_loss_db=None,
+                fiber_type="LEAF",
+                review_state="pending",
+                source_evidence={
+                    "fields": [
+                        {
+                            "field": "expected_loss_db",
+                            "raw_text": "14.68 dB",
+                            "normalized_value": "14.88",
+                        },
+                    ],
+                    module.PATH_SOURCE_DISCREPANCIES_KEY: [marker],
+                },
+            ),
+        ),
+    )
+    first_request = SimpleNamespace(
+        line_1_route_side="Z",
+        line_1=SimpleNamespace(
+            link_name="A-LOCAL",
+            expected_loss_db=14.68,
+            fiber_type="LEAF",
+        ),
+        line_2=None,
+    )
+    after_first = module._apply_r40_reviewed_lines_to_links(
+        (first, second),
+        (link,),
+        first.shelf_id,
+        first_request,
+    )
+
+    first_path = after_first[0].paths[0]
+    assert first_path.review_state == "pending"
+    assert first_path.source_evidence[
+        module.PATH_SOURCE_DISCREPANCIES_KEY
+    ][0]["status"] == module.PATH_SOURCE_DISCREPANCY_PENDING
+
+    second_request = SimpleNamespace(
+        line_1_route_side="A",
+        line_1=SimpleNamespace(
+            link_name="Z-LOCAL",
+            expected_loss_db=14.68,
+            fiber_type="LEAF",
+        ),
+        line_2=None,
+    )
+    completed = module._apply_r40_reviewed_lines_to_links(
+        (first, second),
+        after_first,
+        second.shelf_id,
+        second_request,
+    )
+
+    completed_path = completed[0].paths[0]
+    assert completed_path.review_state == "corrected"
+    assert completed_path.expected_loss_db == 14.68
+    assert completed_path.source_evidence[
+        module.PATH_SOURCE_DISCREPANCIES_KEY
+    ][0]["status"] == module.PATH_SOURCE_DISCREPANCY_SUPERSEDED
+    assert completed_path.source_evidence["fields"][0] == {
+        "field": "expected_loss_db",
+        "raw_text": "14.68 dB",
+        "normalized_value": "14.88",
+    }
+
+
+def test_paired_endpoint_review_keeps_parent_loss_unset_when_values_differ() -> None:
+    module = _route_module()
+    first = _row(
+        module,
+        shelf_id="terminal-a",
+        profile_id="roadm_a",
+        site_code="A",
+        site_name="A Site",
+        tid="A-RLS",
+    )
+    second = _row(
+        module,
+        shelf_id="terminal-z",
+        profile_id="roadm_z",
+        site_key="site-z",
+        site_code="Z",
+        site_name="Z Site",
+        tid="Z-RLS",
+        primary_oam_ip="192.0.2.11",
+    )
+    link = module.RouteLink(
+        link_id="link-a-z",
+        order=1,
+        from_shelf_id=first.shelf_id,
+        to_shelf_id=second.shelf_id,
+        paths=(
+            module.OpticalPath(
+                path_id="path-a-z",
+                path_role="route",
+                expected_loss_db=None,
+                fiber_type="LEAF",
+                review_state="pending",
+            ),
+        ),
+    )
+    after_first = module._apply_r40_reviewed_lines_to_links(
+        (first, second),
+        (link,),
+        first.shelf_id,
+        SimpleNamespace(
+            line_1_route_side="Z",
+            line_1=SimpleNamespace(
+                link_name="A-LOCAL",
+                expected_loss_db=14.68,
+                fiber_type="LEAF",
+            ),
+            line_2=None,
+        ),
+    )
+    completed = module._apply_r40_reviewed_lines_to_links(
+        (first, second),
+        after_first,
+        second.shelf_id,
+        SimpleNamespace(
+            line_1_route_side="A",
+            line_1=SimpleNamespace(
+                link_name="Z-LOCAL",
+                expected_loss_db=14.88,
+                fiber_type="LEAF",
+            ),
+            line_2=None,
+        ),
+    )
+
+    assert completed[0].paths[0].expected_loss_db is None
+
+
 def test_r40_endpoint_review_reapply_replaces_case_insensitive_shelf_id() -> None:
     module = _route_module()
     first = _row(
@@ -2597,6 +2946,14 @@ def test_r40_editor_seed_preserves_route_sides_and_missing_external_degree() -> 
         title="Endpoint seed audit",
         revision="1",
         ospf_area="10.6.8.0",
+        customer_policy=module.RouteCustomerPolicy(
+            neighbor_dns_suffix="customer.example",
+            a_input_patch_loss_db=0.5,
+            a_output_patch_loss_db=0.5,
+            z_input_patch_loss_db=0.2,
+            z_output_patch_loss_db=0.2,
+            colan_ospf_metric=25,
+        ),
         rows=(first, second),
         links=(link,),
         diagram_source={
@@ -2624,6 +2981,22 @@ def test_r40_editor_seed_preserves_route_sides_and_missing_external_degree() -> 
     assert first_seed["lines_by_side"]["Z"]["fiber_start"] == 14
     assert first_seed["lines_by_side"]["Z"]["fiber_end"] == 15
     assert first_seed["lines_by_side"]["Z"]["source_fiber_label"] == "LEAF"
+    assert first_seed["lines_by_side"]["Z"]["neighbor_node"] == (
+        "USQTN1-L8I2.customer.example"
+    )
+    assert first_seed["lines_by_side"]["A"]["input_patch_loss_db"] == 0.5
+    assert first_seed["lines_by_side"]["A"]["output_patch_loss_db"] == 0.5
+    assert first_seed["lines_by_side"]["Z"]["input_patch_loss_db"] == 0.5
+    assert first_seed["lines_by_side"]["Z"]["output_patch_loss_db"] == 0.5
+    assert second_seed["lines_by_side"]["A"]["input_patch_loss_db"] == 0.5
+    assert second_seed["lines_by_side"]["A"]["output_patch_loss_db"] == 0.5
+    assert second_seed["lines_by_side"]["Z"]["input_patch_loss_db"] == 0.2
+    assert second_seed["lines_by_side"]["Z"]["output_patch_loss_db"] == 0.2
+    assert first_seed["colan_ospf_metric"] == 25
+    assert first_seed["member_name"] == "USELP1-L8R2"
+    assert first_seed["hostname"] == "USELP1-L8R2.customer.example"
+    assert second_seed["member_name"] == "USQTN1-L8I2"
+    assert second_seed["hostname"] == "USQTN1-L8I2.customer.example"
     assert second_seed["lines_by_side"]["A"]["expected_loss_db"] == 14.55
     assert second_seed["lines_by_side"]["Z"]["expected_loss_db"] is None
     assert first_seed["diagram_optical_band"] == "c+l"
@@ -2667,6 +3040,104 @@ def test_r40_editor_seed_preserves_route_sides_and_missing_external_degree() -> 
     assert "ila_colan_prohibited" in second_seed["prepopulation"][
         "policy_exclusions"
     ]
+    assert (
+        "neighbor_fqdn_from_tid_and_route_customer_policy"
+        in first_seed["prepopulation"]["controlled_derivations"]
+    )
+    assert (
+        "hostname_fqdn_from_tid_and_route_customer_policy"
+        in first_seed["prepopulation"]["controlled_derivations"]
+    )
+    assert (
+        "terminal_route_degree_patch_losses_from_audited_workflow_default"
+        in first_seed["prepopulation"]["controlled_derivations"]
+    )
+    assert (
+        "directional_patch_losses_from_route_customer_policy"
+        in second_seed["prepopulation"]["controlled_derivations"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("profile_id", "terminal_first", "represented_side"),
+    (
+        ("roadm_a", True, "Z"),
+        ("roadm_z", False, "A"),
+        ("add_drop_a", True, "Z"),
+        ("add_drop_z", False, "A"),
+    ),
+)
+def test_terminal_roles_seed_route_facing_patch_loss_at_half_db(
+    profile_id: str,
+    terminal_first: bool,
+    represented_side: str,
+) -> None:
+    module = _route_module()
+    terminal = _row(
+        module,
+        shelf_id="terminal",
+        profile_id=profile_id,
+        site_key="terminal-site",
+        site_code="TERM",
+        site_name="Terminal",
+        tid="TERMINAL-RLS",
+        source_evidence=_no_sra_source_evidence(line_endpoints=[]),
+    )
+    ila = _row(
+        module,
+        shelf_id="ila",
+        profile_id="ila",
+        site_key="ila-site",
+        site_code="ILA",
+        site_name="ILA",
+        tid="ILA-RLS",
+        primary_oam_ip="192.0.2.11",
+        source_evidence=_no_sra_source_evidence(line_endpoints=[]),
+    )
+    rows = (terminal, ila) if terminal_first else (ila, terminal)
+    project = module.build_route_project(
+        route_code="TERM-ILA",
+        title="Terminal patch default",
+        revision="1",
+        rows=rows,
+        customer_policy=module.RouteCustomerPolicy(
+            a_input_patch_loss_db=0.5,
+            a_output_patch_loss_db=0.5,
+            z_input_patch_loss_db=0.2,
+            z_output_patch_loss_db=0.2,
+        ),
+        links=(
+            module.RouteLink(
+                link_id="link-1",
+                order=1,
+                from_shelf_id=rows[0].shelf_id,
+                to_shelf_id=rows[1].shelf_id,
+                paths=(
+                    module.OpticalPath(
+                        path_id="path-1",
+                        path_role="route",
+                        link_name="CIRCUIT-1",
+                        expected_loss_db=12.5,
+                        fiber_type="LEAF",
+                    ),
+                ),
+            ),
+        ),
+        require_valid=False,
+    )
+
+    seed = module._r4_0_editor_seed(project, terminal.shelf_id)
+    route_line = seed["lines_by_side"][represented_side]
+
+    assert route_line["represented_by_route_span"] is True
+    assert route_line["input_patch_loss_db"] == 0.5
+    assert route_line["output_patch_loss_db"] == 0.5
+    assert seed["member_name"] == "TERMINAL-RLS"
+    assert seed["hostname"] == "TERMINAL-RLS"
+    assert (
+        "terminal_route_degree_patch_losses_from_audited_workflow_default"
+        in seed["prepopulation"]["controlled_derivations"]
+    )
 
 
 def test_r40_editor_seed_prepopulates_terminal_dle_peer_pfgs_fail_closed() -> None:
@@ -4312,6 +4783,78 @@ def test_ospf_edit_clears_every_route_bound_provider_payload() -> None:
     assert all(not row.profile_payload for row in subject._rows)
     assert calls[:2] == ["project", "tree"]
     assert "Review every affected configuration" in calls[2]
+
+
+def test_customer_policy_edit_clears_every_route_bound_provider_payload() -> None:
+    module = _route_module()
+    payload = {"schema_id": "provider.request"}
+    rows = [
+        _row(
+            module,
+            shelf_id="a",
+            profile_id="roadm_a",
+            software_release="RLS R4.0",
+            profile_payload=payload,
+        ),
+        _row(
+            module,
+            shelf_id="z",
+            profile_id="roadm_z",
+            tid="Z-ROADM-01",
+            primary_oam_ip="192.0.2.11",
+            software_release="RLS R4.0",
+            profile_payload=payload,
+        ),
+    ]
+    calls: list[str] = []
+    subject = SimpleNamespace(
+        _loading_project=False,
+        _rows=rows,
+        _on_project_edited=lambda: calls.append("project"),
+        _refresh_tree=lambda: calls.append("tree"),
+        _refresh_status=lambda message="": calls.append(message),
+    )
+
+    module.RlsRouteFrame._on_customer_policy_edited(subject)
+
+    assert all(not row.profile_payload for row in subject._rows)
+    assert calls[:2] == ["project", "tree"]
+    assert "Review every affected configuration" in calls[2]
+
+
+def test_customer_policy_editor_builds_typed_validated_policy() -> None:
+    module = _route_module()
+
+    class Variable:
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+        def get(self) -> str:
+            return self.value
+
+    subject = SimpleNamespace(
+        _neighbor_dns_suffix_var=Variable(".customer.example"),
+        _a_input_patch_loss_var=Variable("0.5"),
+        _a_output_patch_loss_var=Variable("0.6"),
+        _z_input_patch_loss_var=Variable("0.2"),
+        _z_output_patch_loss_var=Variable("0.3"),
+        _colan_ospf_metric_var=Variable("25"),
+    )
+
+    policy = module.RlsRouteFrame._customer_policy(subject)
+
+    assert policy == module.RouteCustomerPolicy(
+        neighbor_dns_suffix=".customer.example",
+        a_input_patch_loss_db=0.5,
+        a_output_patch_loss_db=0.6,
+        z_input_patch_loss_db=0.2,
+        z_output_patch_loss_db=0.3,
+        colan_ospf_metric=25,
+    )
+
+    subject._neighbor_dns_suffix_var.value = "bad..suffix"
+    with pytest.raises(ValueError, match="Node/neighbor DNS suffix"):
+        module.RlsRouteFrame._customer_policy(subject)
 
 
 def test_sra_topology_edits_restage_only_the_facing_peer_in_either_order() -> None:

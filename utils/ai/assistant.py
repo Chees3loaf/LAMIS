@@ -511,6 +511,13 @@ def _group_label(group: List[str]) -> str:
 PLATFORM_CHOICES = [
     ("Any (auto-detect)", None),
     ("Ciena RLS", ["RLS", "2051"]),
+    # Release-scoped RLS. The corpus holds both R4.0 and R4.2 manuals, and the
+    # generic "Ciena RLS" filter above matches every one of them -- so a question
+    # about the release ATLAS actually generates for (R4.0) can be answered with
+    # verbatim text from R4.2. These entries let the operator pin the release.
+    # "RLS_4.2" (no R) is needed for 323-2051-310, which omits it.
+    ("Ciena RLS R4.0", ["RLS_R4.0"]),
+    ("Ciena RLS R4.2", ["RLS_R4.2", "RLS_4.2"]),
     ("Nokia 1830 OLS", ["1830", "OLS"]),
     ("Ciena 6500", ["6500", "1851"]),
     ("Ciena SAOS 6", ["saos_6"]),

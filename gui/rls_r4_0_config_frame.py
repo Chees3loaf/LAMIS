@@ -1245,7 +1245,7 @@ class RlsR40ConfigFrame(ttk.Frame):
         self._shelf_name_var = self._new_string()
         self._shelf_label_var = self._new_string()
         self._site_name_var = self._new_string()
-        self._site_id_var = self._new_string("0")
+        self._site_id_var = self._new_string()
         self._site_description_var = self._new_string()
         self._site_address_var = self._new_string()
         self._member_name_var = self._new_string()
@@ -1269,7 +1269,12 @@ class RlsR40ConfigFrame(ttk.Frame):
         )
         self._field(tab, 1, "Shelf label", self._shelf_label_var)
         self._field(tab, 1, "Site name", self._site_name_var, column=2)
-        self._field(tab, 2, "Numeric site ID", self._site_id_var)
+        self._field(
+            tab,
+            2,
+            "Numeric site ID (optional)",
+            self._site_id_var,
+        )
         self._field(tab, 2, "Member name", self._member_name_var, column=2)
         self._field(tab, 3, "Hostname", self._hostname_var)
         self._field(
@@ -1292,7 +1297,9 @@ class RlsR40ConfigFrame(ttk.Frame):
                 "also cover 4.00.01. Verify the running shelf and require "
                 "successful validate before commit. "
                 "Frame/rack location may remain blank until onsite; when blank, "
-                "ATLAS omits the shelf-location command."
+                "ATLAS omits the shelf-location command. Numeric site ID may "
+                "also remain blank until the customer supplies it; ATLAS then "
+                "omits the site-identity command instead of inventing ID 0."
             ),
             foreground="#555555",
             justify=tk.LEFT,
@@ -1686,7 +1693,8 @@ class RlsR40ConfigFrame(ttk.Frame):
         self._shelf_name_var.set(str(seed.get("shelf_name", "")))
         self._shelf_label_var.set(str(seed.get("shelf_label", "")))
         self._site_name_var.set(str(seed.get("site_name", "")))
-        self._site_id_var.set(str(seed.get("site_id", 0)))
+        site_id = seed.get("site_id")
+        self._site_id_var.set("" if site_id is None else str(site_id))
         self._site_description_var.set(str(seed.get("site_description", "")))
         self._site_address_var.set(str(seed.get("site_address", "")))
         self._member_name_var.set(str(seed.get("member_name", "")))
@@ -1696,6 +1704,11 @@ class RlsR40ConfigFrame(ttk.Frame):
         self._physical_shelf_var.set(str(seed.get("physical_shelf", 0)))
         self._loopback_var.set(str(seed.get("loopback_ip", "")))
         self._ospf_area_var.set(str(seed.get("ospf_area", "")))
+        ospf_metric_var = getattr(self, "_ospf_metric_var", None)
+        if ospf_metric_var is not None:
+            ospf_metric_var.set(
+                str(seed.get("colan_ospf_metric", 10))
+            )
         self._diagram_band_display.set(
             _display_optical_band(seed.get("diagram_optical_band", ""))
         )
@@ -1780,6 +1793,12 @@ class RlsR40ConfigFrame(ttk.Frame):
         widgets.fiber_type.set(str(seed.get("fiber_type", "")))
         loss = seed.get("expected_loss_db")
         widgets.expected_loss.set("" if loss is None else str(loss))
+        widgets.input_patch_loss.set(
+            str(seed.get("input_patch_loss_db", 0.5))
+        )
+        widgets.output_patch_loss.set(
+            str(seed.get("output_patch_loss_db", 0.5))
+        )
 
     def load_request(self, request: R40ExactRequest) -> None:
         if not isinstance(request, R40ExactRequest):
@@ -1801,7 +1820,9 @@ class RlsR40ConfigFrame(ttk.Frame):
             self._shelf_name_var.set(request.shelf_name)
             self._shelf_label_var.set(request.shelf_label)
             self._site_name_var.set(request.site_name)
-            self._site_id_var.set(str(request.site_id))
+            self._site_id_var.set(
+                "" if request.site_id is None else str(request.site_id)
+            )
             self._site_description_var.set(request.site_description)
             self._site_address_var.set(request.site_address)
             self._member_name_var.set(request.member_name)
@@ -2769,6 +2790,13 @@ class RlsR40ConfigFrame(ttk.Frame):
             raise ValueError(f"{label} must be a whole number.") from exc
 
     @staticmethod
+    def _optional_int(value: str, label: str) -> int | None:
+        clean = value.strip()
+        if not clean:
+            return None
+        return RlsR40ConfigFrame._required_int(clean, label)
+
+    @staticmethod
     def _required_float(value: str, label: str) -> float:
         try:
             return float(value.strip())
@@ -2939,7 +2967,7 @@ class RlsR40ConfigFrame(ttk.Frame):
             shelf_name=self._shelf_name_var.get().strip(),
             shelf_label=self._shelf_label_var.get().strip(),
             site_name=self._site_name_var.get().strip(),
-            site_id=self._required_int(self._site_id_var.get(), "Site ID"),
+            site_id=self._optional_int(self._site_id_var.get(), "Site ID"),
             site_description=self._site_description_var.get().strip(),
             site_address=self._site_address_var.get().strip(),
             member_name=self._member_name_var.get().strip(),

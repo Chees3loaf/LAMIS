@@ -270,6 +270,20 @@ class BomFrame(ttk.Frame):
             except Exception as exc:
                 self._append_log(f"  tab formatting failed on '{tab}': {exc}")
 
+        # Give every device tab the live Asset Tag lookup before propagating
+        # literals. Imported spares workbooks never had it, and tabs built
+        # before the _xlfn. fix carry a bare XLOOKUP that Excel evaluates to
+        # #NAME? — the plant refreshes both. Ordering matters: propagation
+        # deliberately skips cells that already hold a formula.
+        try:
+            planted = builder.plant_asset_tag_formula_on_device_tabs(wb)
+            if planted:
+                self._append_log(
+                    f"Asset Tag lookup planted on {planted} device tab(s)"
+                )
+        except Exception as exc:
+            self._append_log(f"  asset-tag formula plant failed: {exc}")
+
         # Propagate any operator-entered Asset Tag values from Summary E10+
         # onto the matching device tab's Chassis/Shelf row (column G). This
         # is a no-op on the first build (column is empty); subsequent builds

@@ -123,11 +123,21 @@ _TID_SITE_CODE_PREFIX_RE = re.compile(
 _TERMINAL_ROUTE_TOKEN_RE = re.compile(r"^[A-Z0-9]{2,32}$")
 _TERMINAL_ROUTE_SHARED_PREFIX = "US"
 _TERMINAL_ROUTE_TITLE_RULE_ID = "terminal-site-route-title-v1"
+_LOSS_DB_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_.])"
+    r"(?P<value>[+-]?(?:\d+(?:\.\d+)?|\.\d+))"
+    r"\s*d\s*b\b",
+    re.IGNORECASE,
+)
+_PLAIN_NUMBER_RE = re.compile(
+    r"^\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*$"
+)
 
 DIAGRAM_EVIDENCE_SCHEMA_ID = "atlas.ciena.rls.diagram-import-evidence"
-DIAGRAM_EVIDENCE_SCHEMA_VERSION = "1.7"
-PROVIDER_RESPONSE_NAME = "ciena_rls_route_diagram_v5"
+DIAGRAM_EVIDENCE_SCHEMA_VERSION = "1.8"
+PROVIDER_RESPONSE_NAME = "ciena_rls_route_diagram_v6"
 MIN_FIELD_CONFIDENCE = 0.85
+SOURCE_EVIDENCE_DISCREPANCY_CODE = "SOURCE_EVIDENCE_DISCREPANCY"
 RAMAN_CALLOUT_CONVENTION_DISABLED = "disabled"
 RAMAN_CALLOUT_CONVENTION_SMALL_RED_SLOT_PORT = "small-red-slot-port-v1"
 _EVIDENCE_BBOX_FLOAT_EPSILON = 0.000001
@@ -200,6 +210,7 @@ class DiagramImportLimits:
     max_total_normalized_image_bytes: int = 80 * 1024 * 1024
     max_provider_shelves: int = 128
     max_provider_spans: int = 256
+    max_provider_segments_per_span: int = 32
     max_provider_raman_callouts: int = 256
     max_provider_evidence_items: int = 512
     max_provider_string_chars: int = 4096
@@ -401,6 +412,22 @@ class ShelfCandidate:
 
 
 @dataclass(frozen=True)
+class SpanSegmentCandidate:
+    """One directly observed physical section of a composite logical span."""
+
+    order: int
+    from_tid: str | None
+    to_tid: str | None
+    expected_loss_db: float | None
+    distance_km: float | None
+    circuit_id: str | None
+    fiber_start: int | None
+    fiber_end: int | None
+    fiber_type: str | None
+    evidence: tuple[FieldEvidence, ...]
+
+
+@dataclass(frozen=True)
 class SpanCandidate:
     """One ordered active or removal-related optical span."""
 
@@ -416,6 +443,7 @@ class SpanCandidate:
     lifecycle: Lifecycle
     notes: str | None
     evidence: tuple[FieldEvidence, ...]
+    segments: tuple[SpanSegmentCandidate, ...] = ()
 
     @property
     def active_for_route(self) -> bool:
@@ -702,6 +730,25 @@ views of that same source. Overlap intentionally repeats equipment. Return each
 physical shelf and span exactly once, use the overview/connectors to determine
 route order, use the clearest detail view for transcription, and express each
 bbox within the cited view rather than the overview.
+For one physical span loss, retain every legible direct observation of that
+same printed loss as a separate expected_loss_db evidence item, including a
+repeated overview/detail view or paired directional annotation. Transcribe each
+raw_text character-for-character and keep normalized_value numeric-only. All
+direct observations must agree digit-for-digit. If any observation conflicts,
+return expected_loss_db null and preserve the disagreeing evidence for review;
+never choose one value merely because its confidence is higher.
+Keep one top-level span for each active route adjacency. When the diagram
+explicitly shows that one logical bypass/composite span consists of multiple
+physical sections, also return those sections in that span's ordered segments
+array. A segment is allowed only when its two endpoint TIDs and at least one
+section-specific optical fact are visibly attributable to that section. Cite
+segment evidence with fields
+"segments.<zero-based-index>.<field-name>". Preserve a visibly removed shelf
+TID as the shared boundary between adjoining sections. Never split an ordinary
+span, invent a segment boundary, copy an aggregate value into a segment, or
+derive a segment value by subtraction. Keep separately printed aggregate
+combined loss/distance in the parent span and separately printed section
+loss/distance in segments; do not calculate either in the vision response.
 Use the structured topology, band, add_drop_structure, protection_type, and
 module_inventory fields only for exact visible facts. Cite each non-null
 structured value in evidence; cite module leaves in evidence as
@@ -772,6 +819,12 @@ populate fiber_type only when every visible constituent section explicitly
 prints the same fiber type. Cite direct fiber_type evidence from every
 constituent section. Return null if any constituent fiber type is absent or
 conflicts. Never merge or propagate their circuit IDs or fiber-number ranges.
+Populate that logical span's segments only when the diagram exposes the
+section callouts and their shared endpoint boundary. Each section remains
+independent: preserve its own loss, distance, circuit ID, fiber range, fiber
+type, and evidence; leave any unprinted section field null. Do not emit a
+single-segment segments array and do not infer section values from the printed
+combined totals.
 Do not derive or transcribe a generator request or executable provider payload
 from the image.
 """
@@ -886,6 +939,39 @@ _LINE_ENDPOINTS_SCHEMA: dict[str, object] = {
                     },
                 },
             },
+        },
+    },
+}
+
+_SPAN_SEGMENT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "order",
+        "from_tid",
+        "to_tid",
+        "expected_loss_db",
+        "distance_km",
+        "circuit_id",
+        "fiber_start",
+        "fiber_end",
+        "fiber_type",
+        "evidence",
+    ],
+    "properties": {
+        "order": {"type": "integer", "minimum": 1},
+        "from_tid": _NULLABLE_STRING,
+        "to_tid": _NULLABLE_STRING,
+        "expected_loss_db": _NULLABLE_NUMBER,
+        "distance_km": _NULLABLE_NUMBER,
+        "circuit_id": _NULLABLE_STRING,
+        "fiber_start": _NULLABLE_INTEGER,
+        "fiber_end": _NULLABLE_INTEGER,
+        "fiber_type": _NULLABLE_STRING,
+        "evidence": {
+            "type": "array",
+            "maxItems": 256,
+            "items": _EVIDENCE_SCHEMA,
         },
     },
 }
@@ -1044,6 +1130,7 @@ PROVIDER_SCHEMA: dict[str, object] = {
                     "fiber_start",
                     "fiber_end",
                     "fiber_type",
+                    "segments",
                     "lifecycle",
                     "notes",
                     "evidence",
@@ -1058,6 +1145,15 @@ PROVIDER_SCHEMA: dict[str, object] = {
                     "fiber_start": _NULLABLE_INTEGER,
                     "fiber_end": _NULLABLE_INTEGER,
                     "fiber_type": _NULLABLE_STRING,
+                    "segments": {
+                        "type": "array",
+                        "maxItems": 32,
+                        "items": _SPAN_SEGMENT_SCHEMA,
+                        "description": (
+                            "Explicit ordered physical sections of a visibly "
+                            "composite logical span; otherwise an empty array."
+                        ),
+                    },
                     "lifecycle": {
                         "type": "string",
                         "enum": sorted(_ALLOWED_LIFECYCLES),
@@ -1327,6 +1423,11 @@ def parse_provider_result(
         title,
         route_evidence,
         evidenced_shelves,
+        spans,
+        minimum_confidence,
+        issues,
+    )
+    spans = _invalidate_conflicting_span_source_values(
         spans,
         minimum_confidence,
         issues,
@@ -2463,6 +2564,7 @@ def _parse_span(
         "fiber_start",
         "fiber_end",
         "fiber_type",
+        "segments",
         "lifecycle",
         "notes",
         "evidence",
@@ -2494,7 +2596,81 @@ def _parse_span(
         evidence=_parse_evidence_list(
             item["evidence"], source, f"{context}.evidence", limits, issues
         ),
+        segments=_parse_span_segments(
+            item["segments"],
+            source,
+            context,
+            limits,
+            issues,
+        ),
     )
+
+
+def _parse_span_segments(
+    value: object,
+    source: DiagramSource,
+    span_context: str,
+    limits: DiagramImportLimits,
+    issues: list[DiagramImportIssue],
+) -> tuple[SpanSegmentCandidate, ...]:
+    values = _expect_sequence(value, f"{span_context}.segments")
+    if len(values) > limits.max_provider_segments_per_span:
+        raise DiagramImportError(
+            f"{span_context}.segments contains too many component records."
+        )
+    segments: list[SpanSegmentCandidate] = []
+    keys = {
+        "order",
+        "from_tid",
+        "to_tid",
+        "expected_loss_db",
+        "distance_km",
+        "circuit_id",
+        "fiber_start",
+        "fiber_end",
+        "fiber_type",
+        "evidence",
+    }
+    for index, raw in enumerate(values):
+        context = f"{span_context}.segments[{index}]"
+        item = _expect_mapping(raw, context)
+        _strict_keys(item, keys, set(), context)
+        segments.append(
+            SpanSegmentCandidate(
+                order=_positive_integer(item["order"], f"{context}.order"),
+                from_tid=_nullable_string(
+                    item["from_tid"], f"{context}.from_tid"
+                ),
+                to_tid=_nullable_string(item["to_tid"], f"{context}.to_tid"),
+                expected_loss_db=_nullable_number(
+                    item["expected_loss_db"],
+                    f"{context}.expected_loss_db",
+                ),
+                distance_km=_nullable_number(
+                    item["distance_km"], f"{context}.distance_km"
+                ),
+                circuit_id=_nullable_string(
+                    item["circuit_id"], f"{context}.circuit_id"
+                ),
+                fiber_start=_nullable_integer(
+                    item["fiber_start"], f"{context}.fiber_start"
+                ),
+                fiber_end=_nullable_integer(
+                    item["fiber_end"], f"{context}.fiber_end"
+                ),
+                fiber_type=_nullable_string(
+                    item["fiber_type"], f"{context}.fiber_type"
+                ),
+                evidence=_parse_evidence_list(
+                    item["evidence"],
+                    source,
+                    f"{context}.evidence",
+                    limits,
+                    issues,
+                ),
+            )
+        )
+    return tuple(segments)
 
 
 def _parse_evidence_list(
@@ -2861,6 +3037,7 @@ def _orient_route_from_terminal_header(
                     from_tid=span.to_tid,
                     to_tid=span.from_tid,
                     evidence=swapped_evidence,
+                    segments=_reverse_span_segments(span.segments),
                 )
             )
         shelves = tuple(reversed_shelves)
@@ -2901,6 +3078,40 @@ def _orient_route_from_terminal_header(
         }
     )
     return shelves, spans, orientation
+
+
+def _reverse_span_segments(
+    segments: Sequence[SpanSegmentCandidate],
+) -> tuple[SpanSegmentCandidate, ...]:
+    """Reverse a component chain without changing its source observations."""
+
+    result: list[SpanSegmentCandidate] = []
+    segment_count = len(segments)
+    for new_index, segment in enumerate(reversed(segments)):
+        old_index = segment_count - new_index - 1
+        old_prefix = f"segments.{old_index}."
+        new_prefix = f"segments.{new_index}."
+        evidence_items: list[FieldEvidence] = []
+        for item in segment.evidence:
+            field = item.field
+            if field.startswith(old_prefix):
+                leaf = field[len(old_prefix) :]
+                if leaf == "from_tid":
+                    leaf = "to_tid"
+                elif leaf == "to_tid":
+                    leaf = "from_tid"
+                field = f"{new_prefix}{leaf}"
+            evidence_items.append(replace(item, field=field))
+        result.append(
+            replace(
+                segment,
+                order=new_index + 1,
+                from_tid=segment.to_tid,
+                to_tid=segment.from_tid,
+                evidence=tuple(evidence_items),
+            )
+        )
+    return tuple(result)
 
 
 def _assign_endpoint_profiles(
@@ -3730,19 +3941,21 @@ def _validate_spans(
 
     shelf_tids = {shelf.tid for shelf in shelves if shelf.tid}
     seen_pairs: set[tuple[str, str]] = set()
-    required = (
-        "from_tid",
-        "to_tid",
-        "expected_loss_db",
-        "distance_km",
-        "circuit_id",
-        "fiber_start",
-        "fiber_end",
-        "fiber_type",
-    )
     for span in spans:
         prefix = f"spans[{span.order}]"
         if span.active_for_route:
+            required = (
+                "from_tid",
+                "to_tid",
+                "expected_loss_db",
+                "distance_km",
+                "fiber_type",
+                *(
+                    ()
+                    if span.segments
+                    else ("circuit_id", "fiber_start", "fiber_end")
+                ),
+            )
             for field_name in required:
                 _require_supported_field(
                     f"{prefix}.{field_name}",
@@ -3825,10 +4038,403 @@ def _validate_spans(
                     "Fiber start cannot be greater than fiber end.",
                 )
             )
+        _validate_span_segments(
+            span,
+            shelf_tids,
+            threshold,
+            issues,
+        )
+
+
+def _validate_span_segments(
+    span: SpanCandidate,
+    shelf_tids: set[str],
+    threshold: float,
+    issues: list[DiagramImportIssue],
+) -> None:
+    """Validate optional source-observed sections of one logical span."""
+
+    segments = span.segments
+    if not segments:
+        return
+    prefix = f"spans[{span.order}].segments"
+    if len(segments) < 2:
+        issues.append(
+            _blocking(
+                "INVALID_SPAN_SEGMENT_COUNT",
+                prefix,
+                (
+                    "A composite span requires at least two explicitly "
+                    "observed physical sections."
+                ),
+            )
+        )
+    _validate_orders(segments, prefix, issues)
+
+    optical_fields = (
+        "expected_loss_db",
+        "distance_km",
+        "circuit_id",
+        "fiber_start",
+        "fiber_end",
+        "fiber_type",
+    )
+    for segment_index, segment in enumerate(segments):
+        item_prefix = f"{prefix}[{segment_index}]"
+        evidence_prefix = f"segments.{segment_index}."
+        for field_name in ("from_tid", "to_tid"):
+            _require_supported_field(
+                f"{item_prefix}.{field_name}",
+                f"{evidence_prefix}{field_name}",
+                getattr(segment, field_name),
+                segment.evidence,
+                threshold,
+                issues,
+                direct_required=True,
+            )
+        populated_optical_fields = [
+            field_name
+            for field_name in optical_fields
+            if (
+                (value := getattr(segment, field_name)) is not None
+                and not (isinstance(value, str) and not value.strip())
+            )
+        ]
+        if not populated_optical_fields:
+            issues.append(
+                _blocking(
+                    "EMPTY_SPAN_SEGMENT",
+                    item_prefix,
+                    (
+                        "A component record requires at least one directly "
+                        "observed section-specific optical fact."
+                    ),
+                )
+            )
+        for field_name in populated_optical_fields:
+            _require_supported_field(
+                f"{item_prefix}.{field_name}",
+                f"{evidence_prefix}{field_name}",
+                getattr(segment, field_name),
+                segment.evidence,
+                threshold,
+                issues,
+                direct_required=True,
+            )
+        for endpoint_name in ("from_tid", "to_tid"):
+            endpoint = getattr(segment, endpoint_name)
+            if endpoint and endpoint not in shelf_tids:
+                issues.append(
+                    _blocking(
+                        "UNKNOWN_SPAN_SEGMENT_ENDPOINT",
+                        f"{item_prefix}.{endpoint_name}",
+                        (
+                            "A section endpoint TID must match an extracted "
+                            "active or removal shelf exactly."
+                        ),
+                    )
+                )
+        if segment.expected_loss_db is not None and not (
+            0 <= segment.expected_loss_db <= 100
+        ):
+            issues.append(
+                _blocking(
+                    "INVALID_SPAN_SEGMENT_LOSS",
+                    f"{item_prefix}.expected_loss_db",
+                    "Section loss must be from 0 through 100 dB.",
+                )
+            )
+        if segment.distance_km is not None and not (
+            0 < segment.distance_km <= 2_000
+        ):
+            issues.append(
+                _blocking(
+                    "INVALID_SPAN_SEGMENT_DISTANCE",
+                    f"{item_prefix}.distance_km",
+                    "Section distance must be greater than 0 and at most 2000 km.",
+                )
+            )
+        for field_name in ("fiber_start", "fiber_end"):
+            value = getattr(segment, field_name)
+            if value is not None and value <= 0:
+                issues.append(
+                    _blocking(
+                        "INVALID_SPAN_SEGMENT_FIBER_RANGE",
+                        f"{item_prefix}.{field_name}",
+                        "Section fiber numbers must be positive.",
+                    )
+                )
+        if (segment.fiber_start is None) != (segment.fiber_end is None):
+            issues.append(
+                _blocking(
+                    "INCOMPLETE_SPAN_SEGMENT_FIBER_RANGE",
+                    item_prefix,
+                    (
+                        "A section fiber range must contain both start and "
+                        "end when either value is visible."
+                    ),
+                )
+            )
+        elif (
+            segment.fiber_start is not None
+            and segment.fiber_end is not None
+            and segment.fiber_start > segment.fiber_end
+        ):
+            issues.append(
+                _blocking(
+                    "INVALID_SPAN_SEGMENT_FIBER_RANGE",
+                    f"{item_prefix}.fiber_start",
+                    "Section fiber start cannot be greater than fiber end.",
+                )
+            )
+
+    if (
+        segments[0].from_tid != span.from_tid
+        or segments[-1].to_tid != span.to_tid
+        or any(
+            left.to_tid != right.from_tid
+            for left, right in zip(segments, segments[1:])
+        )
+    ):
+        issues.append(
+            _blocking(
+                "SPAN_SEGMENT_DISCONTINUITY",
+                prefix,
+                (
+                    "Component sections must form one continuous chain from "
+                    "the logical span's source TID to its destination TID."
+                ),
+            )
+        )
+
+    _validate_segment_aggregate(
+        span.expected_loss_db,
+        tuple(segment.expected_loss_db for segment in segments),
+        f"spans[{span.order}].expected_loss_db",
+        "loss",
+        issues,
+    )
+    _validate_segment_aggregate(
+        span.distance_km,
+        tuple(segment.distance_km for segment in segments),
+        f"spans[{span.order}].distance_km",
+        "distance",
+        issues,
+    )
+    if span.fiber_type and (
+        any(not segment.fiber_type for segment in segments)
+        or any(segment.fiber_type != span.fiber_type for segment in segments)
+    ):
+        issues.append(
+            _blocking(
+                "SPAN_SEGMENT_FIBER_TYPE_MISMATCH",
+                f"spans[{span.order}].fiber_type",
+                (
+                    "A composite span fiber type is valid only when every "
+                    "section explicitly carries the same fiber type."
+                ),
+            )
+        )
+
+
+def _validate_segment_aggregate(
+    aggregate: float | None,
+    components: Sequence[float | None],
+    field: str,
+    label: str,
+    issues: list[DiagramImportIssue],
+) -> None:
+    if aggregate is None or any(value is None for value in components):
+        return
+    total = sum(float(value) for value in components if value is not None)
+    if not math.isclose(
+        float(aggregate),
+        total,
+        rel_tol=0.0,
+        abs_tol=0.02,
+    ):
+        issues.append(
+            _blocking(
+                "SPAN_SEGMENT_AGGREGATE_MISMATCH",
+                field,
+                (
+                    f"The printed combined {label} does not match the sum of "
+                    "the explicitly observed component sections."
+                ),
+            )
+        )
+
+
+def _invalidate_conflicting_span_source_values(
+    spans: tuple[SpanCandidate, ...],
+    threshold: float,
+    issues: list[DiagramImportIssue],
+) -> tuple[SpanCandidate, ...]:
+    """Clear unsafe span values when their direct source observations disagree.
+
+    A provider response can contain a perfectly confident normalized typo while
+    preserving a different visible token in ``raw_text``. Overlapping views can
+    also produce two independently confident readings of the same physical
+    annotation. Neither case may silently select one loss for both route
+    endpoints. The evidence remains intact for operator review; only the unsafe
+    prepopulation value is cleared.
+    """
+
+    normalized: list[SpanCandidate] = []
+    for span in spans:
+        if _span_loss_source_evidence_disagrees(span, threshold):
+            issues.append(
+                _blocking(
+                    SOURCE_EVIDENCE_DISCREPANCY_CODE,
+                    f"spans[{span.order}].expected_loss_db",
+                    (
+                        "Direct source observations for the physical span loss "
+                        "do not agree. ATLAS preserved the evidence but cleared "
+                        "the prepopulated loss for explicit endpoint review."
+                    ),
+                )
+            )
+            span = replace(span, expected_loss_db=None)
+        normalized_segments: list[SpanSegmentCandidate] = []
+        for segment_index, segment in enumerate(span.segments):
+            evidence_field = (
+                f"segments.{segment_index}.expected_loss_db"
+            )
+            if _loss_source_evidence_disagrees(
+                segment.evidence,
+                evidence_field,
+                segment.expected_loss_db,
+                threshold,
+            ):
+                issues.append(
+                    _blocking(
+                        SOURCE_EVIDENCE_DISCREPANCY_CODE,
+                        (
+                            f"spans[{span.order}].segments"
+                            f"[{segment_index}].expected_loss_db"
+                        ),
+                        (
+                            "Direct source observations for this physical "
+                            "section loss do not agree. ATLAS preserved the "
+                            "evidence but cleared the section value for "
+                            "explicit review."
+                        ),
+                    )
+                )
+                segment = replace(segment, expected_loss_db=None)
+            normalized_segments.append(segment)
+        span = replace(span, segments=tuple(normalized_segments))
+        normalized.append(span)
+    return tuple(normalized)
+
+
+def _span_loss_source_evidence_disagrees(
+    span: SpanCandidate,
+    threshold: float,
+) -> bool:
+    return _loss_source_evidence_disagrees(
+        span.evidence,
+        "expected_loss_db",
+        span.expected_loss_db,
+        threshold,
+    )
+
+
+def _loss_source_evidence_disagrees(
+    evidence: Sequence[FieldEvidence],
+    evidence_field: str,
+    candidate_value: object,
+    threshold: float,
+) -> bool:
+    direct = tuple(
+        item
+        for item in evidence
+        if item.field == evidence_field
+        and item.method in _DIRECT_EVIDENCE_METHODS
+        and item.confidence >= threshold
+    )
+    if not direct:
+        return False
+
+    normalized_values: list[float] = []
+    raw_values: list[float] = []
+    for item in direct:
+        normalized_value = _finite_number(item.normalized_value)
+        observed_raw_values = _loss_values_from_raw_text(item.raw_text)
+        if normalized_value is not None:
+            normalized_values.append(normalized_value)
+        raw_values.extend(observed_raw_values)
+        if (
+            normalized_value is not None
+            and observed_raw_values
+            and any(
+                not _same_source_number(normalized_value, raw_value)
+                for raw_value in observed_raw_values
+            )
+        ):
+            return True
+
+    candidate = _finite_number(candidate_value)
+    if (
+        candidate is not None
+        and normalized_values
+        and any(
+            not _same_source_number(candidate, value)
+            for value in normalized_values
+        )
+    ):
+        return True
+    if (
+        candidate is not None
+        and raw_values
+        and any(
+            not _same_source_number(candidate, value) for value in raw_values
+        )
+    ):
+        return True
+    return not _all_source_numbers_agree(
+        normalized_values
+    ) or not _all_source_numbers_agree(raw_values)
+
+
+def _loss_values_from_raw_text(raw_text: str) -> tuple[float, ...]:
+    unit_values = tuple(
+        value
+        for match in _LOSS_DB_TOKEN_RE.finditer(str(raw_text or ""))
+        if (value := _finite_number(match.group("value"))) is not None
+    )
+    if unit_values:
+        return unit_values
+    if _PLAIN_NUMBER_RE.fullmatch(str(raw_text or "")) is None:
+        return ()
+    value = _finite_number(str(raw_text).strip())
+    return () if value is None else (value,)
+
+
+def _finite_number(value: object) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _same_source_number(left: float, right: float) -> bool:
+    return math.isclose(left, right, rel_tol=0.0, abs_tol=1e-9)
+
+
+def _all_source_numbers_agree(values: Sequence[float]) -> bool:
+    return not values or all(
+        _same_source_number(values[0], value) for value in values[1:]
+    )
 
 
 def _validate_orders(
-    values: Sequence[ShelfCandidate | SpanCandidate],
+    values: Sequence[
+        ShelfCandidate | SpanCandidate | SpanSegmentCandidate
+    ],
     field: str,
     issues: list[DiagramImportIssue],
 ) -> None:
@@ -4696,7 +5302,9 @@ __all__ = [
     "RamanCalloutConvention",
     "RamanSlotPortCalloutCandidate",
     "ShelfCandidate",
+    "SOURCE_EVIDENCE_DISCREPANCY_CODE",
     "SpanCandidate",
+    "SpanSegmentCandidate",
     "import_route_diagram",
     "load_diagram_source",
     "parse_provider_result",

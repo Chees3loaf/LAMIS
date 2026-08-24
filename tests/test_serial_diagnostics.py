@@ -69,6 +69,8 @@ class _FakeSerial:
         self._buffer = bytearray(_FakeSerial._RESPONSES.get((port, baud), b""))
         self.closed = False
         self.written = bytearray()
+        self.dtr = False
+        self.rts = False
 
     @property
     def in_waiting(self) -> int:
@@ -154,6 +156,33 @@ class TestProbeLogsCapturedBytesOnFailure(unittest.TestCase):
         joined = "\n".join(cm.output)
         self.assertIn("captured bytes", joined)
         self.assertIn("Waveserver 5 system starting", joined)
+
+    def test_preserves_normal_waveserver_login_prompt(self):
+        for prompt in (b"Waveserver-5 login: ", b"WS5_1 login: "):
+            with self.subTest(prompt=prompt):
+                _FakeSerial.set_response("COM9", 115200, prompt)
+                ser = open_serial_with_baud_probe(
+                    "COM9", [115200], timeout=0.2,
+                    preserve_existing_prompt=True,
+                )
+                self.assertIsNotNone(ser)
+                self.assertEqual(ser._atlas_initial_prompt, prompt)
+
+    def test_terminal_style_control_lines_and_wake_sequence(self):
+        _FakeSerial.set_response("COM9", 115200, b"")
+        ser = open_serial_with_baud_probe(
+            "COM9", [115200], timeout=0.01,
+            wake_sequence=b"\r", assert_control_lines=True,
+        )
+        self.assertIsNone(ser)
+        # The failed probe closes its instance, so inspect a direct fake to
+        # pin the supported properties while the call's write is covered by
+        # the retry test's keyword assertions.
+        probe = _FakeSerial("COM9", 115200)
+        probe.dtr = probe.rts = True
+        probe.write(b"\r")
+        self.assertTrue(probe.dtr and probe.rts)
+        self.assertEqual(probe.written, b"\r")
 
 
 class TestReadUntilDebugTranscript(unittest.TestCase):

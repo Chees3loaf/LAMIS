@@ -787,7 +787,7 @@ Its controlled source SHA-256 is:
 
 This is the sanitized controlled template: the two unused generic sheets and
 the old route-specific Diagram pictures were removed, while the requested
-static tabs and the 222 IRM formula nodes were retained. The uploaded source is
+static tabs and all 186 authoritative IRM formula nodes were retained. The uploaded source is
 inserted into the now-neutral Diagram drawing at export time.
 
 The exporter copies the complete OOXML package and patches only the dynamic
@@ -800,6 +800,8 @@ FBN behavior:
 - shelves remain in entered route order;
 - a rack contains at most eight shelf records;
 - rack diagrams repeat to the right until every shelf is represented;
+- every generated rack is marked as a planning layout whose RU locations have
+  not been field-verified when physical frame/RU facts are absent;
 - the route summary and SITE/TID/IP/RAMAN/POWER table move to the right of the
   final rack;
 - a machine-readable shelf-type value accompanies each table row so material
@@ -820,7 +822,9 @@ IRM receives route code, A/Z endpoint codes, distinct-site count, and the ILA,
 ROADM, Add/Drop-A, and Add/Drop-Z shelf counts from the same shelf register used
 to render FBN. The existing template formula nodes and formula text are
 preserved. Formula display is turned off and Excel is instructed to perform a
-full recalculation when the workbook opens.
+full recalculation when the workbook opens. ATLAS also refreshes the cached
+result beside every one of the 186 live formula nodes, so IRM totals are
+visible in non-calculating previewers without converting formulas to literals.
 
 Protected-DCI shelves have no valid bucket in the supplied IRM and are reported
 as unmapped instead of being silently counted as another chassis family.
@@ -859,15 +863,17 @@ or JPEG contributes its single normalized full source image; a DOCX contributes
 its normalized embedded source-image occurrences in document-relationship
 order.
 
-The representation is bounded canonical RGB PNG
-(`canonical-rgb-png-v2-max2048`). Each source occurrence is deterministically
-reduced to at most 2,048 pixels on its longest edge before workbook rendering.
-Pictures use internal OOXML image relationships, retain aspect ratio, are
-never enlarged beyond native size, are capped at 16 inches wide, and are
-stacked in source order. The source route file is not published separately,
-and the workbook contains no external image relationship. The bundle manifest
-records source and normalized SHA-256 digests, the render bound, image
-occurrence/unique-media counts, dimensions, and the `Diagram` sheet name.
+The representation is canonical RGB PNG
+(`canonical-rgb-png-v3-full-resolution-max4096`). Source images at or below
+4,096 pixels on each axis retain their complete pixel dimensions; only a
+larger image is bounded for workbook safety. Pictures use internal OOXML image
+relationships, retain aspect ratio, are never enlarged beyond native size,
+are capped at 16 inches wide, and are stacked in source order. Only `FBN` is
+selected when the workbook opens; `Diagram` is never left grouped with it.
+The source route file is not published separately, and the workbook contains
+no external image relationship. The bundle manifest records source and
+normalized SHA-256 digests, the render bound, image occurrence/unique-media
+counts, dimensions, and the `Diagram` sheet name.
 
 Route-project JSON intentionally persists only path-free, hash-only diagram
 provenance; it does not retain source paths or pixel bytes. The current ATLAS
@@ -903,11 +909,28 @@ in-memory preview or earlier payload is not blindly copied into the delivery.
 | `<route>_RLS_route_validation.txt` | Route counts, extraction-review result, provider status, and route-wide blockers |
 | `<route>_RLS_route_manifest.json` | Project/template metadata, provider/readiness state, and SHA-256 hashes for every published artifact |
 
+The read-only acceptance tool reopens a published folder instead of trusting
+the in-memory export result:
+
+```powershell
+python tools/audit_rls_route_deliverable.py <bundle-folder> <golden-fixture.json>
+```
+
+It verifies every manifest-listed SHA-256, scans every raw candidate for an
+executable `commit`, inspects formula/cache and worksheet-selection state
+inside the MOP package, and compares the saved ordered shelf/span facts with a
+reviewed data fixture. The ELP1–SAT4 regression oracle is
+`tests/fixtures/rls/elp1_sat4_golden.json`; it is test data and does not add
+route-specific behavior to the importer or generator.
+
 The CLI outputs are documented pre-calibration candidates, not deployment
 approval. Their manifests identify that live schema/on-box validation and the
 separate customer-approved runtime-tuning/calibration procedure—including
 PlannerPlus when applicable—are still required. Secret material is not
-included.
+included. Every raw candidate filename ends in `_candidate.cli`; it contains
+`batch`, configuration, `validate`, and `quit` transactions but deliberately
+contains no `commit`. Bundle staging rejects the entire export if an
+executable commit is present or the candidate safety fields are inconsistent.
 
 Each per-shelf manifest exposes the applicable records in
 `deployment_controls`, with `mode: automatic_background_advisory`,
@@ -918,6 +941,14 @@ Each per-shelf manifest exposes the applicable records in
 changes `deployment_approved: false` or
 `on_box_validate_required: true`.
 
+Route-bundle readiness is explicitly scoped. `candidate_generation_ready`
+means all reviewed shelves produced complete pre-calibration candidates.
+`route_cli_ready`, `deployable_cli_ready`, and `deployment_approved` remain
+false until a separate deployment-approval workflow exists. The route
+validation report also aggregates route-project warnings, per-shelf candidate
+warnings, and deployment-control advisories, and lists the counts for every
+shelf.
+
 The same manifest records `colan_policy`, `colan_state`, and
 `colan_commands_emitted`; the route-bundle candidate record repeats those
 fields for at-a-glance audit. A deferred terminal is therefore visibly marked
@@ -927,6 +958,34 @@ ordered shelf.
 Configured terminals must carry one complete, strictly validated customer
 record. ILA remains `prohibited`. None of these states removes the mandatory
 successful on-box `validate` boundary.
+
+The numeric network site ID is optional during factory staging. A blank value
+is stored as `null` and omits the complete site-identity command; ATLAS does
+not invent site ID `0`. A reviewed numeric value, including an intentional
+zero, is preserved. Neighbor identity accepts either the directly derived bare
+TID or a strictly validated customer FQDN whose first DNS label is that exact
+TID.
+
+The Project panel persists customer-neutral route policy controls for an
+optional node/neighbor DNS suffix, independent A-side input/output patch loss,
+independent Z-side input/output patch loss, and the COLAN OSPF metric. Blank
+suffix leaves both the shelf hostname and diagram-derived neighbors as bare
+TIDs. A valid configured suffix creates reviewable FQDNs for the hostname and
+neighbors without embedding any customer domain in ATLAS; member/shelf identity
+continues to use the bare TID.
+
+The A/Z route-policy patch losses seed two-sided ILA and intermediate shelves.
+New and legacy-migrated projects start from the supplied known-good field-config
+contract: 0.5/0.5 dB on the A-facing pair and 0.2/0.2 dB on the Z-facing pair.
+Those four values remain editable for a different customer plant standard.
+The audited legacy-workbook workflow instead seeds a terminal's single
+route-facing Add/Drop or ROADM degree at 0.5-dB input and 0.5-dB output on
+either end of the route. This is an editable review default, not a vendor or
+deployment assertion: every exact-review patch field can be corrected before
+validation. Changing any route policy value invalidates all stored route-bound
+provider payloads and requires fresh validation. COLAN metric is emitted only
+when the optional terminal COLAN record is fully configured; deferred terminal
+COLAN and prohibited ILA COLAN still emit no COLAN commands.
 
 Publication fails closed for the whole route. If one shelf is unsupported,
 unreviewed, incomplete, or fails provider validation, ATLAS publishes neither a
@@ -1019,7 +1078,8 @@ Therefore:
 - a route containing Add/Drop, ILA, ROADM, or another profile without a
   registered audited provider fails configuration readiness as a whole;
 - another software release or a retired exact payload blocks the whole route;
-  schemas 1.2 and 1.3 can be deliberately re-reviewed into current schema 1.4,
+  exact-request schemas 1.2 through 1.4 can be deliberately re-reviewed into
+  current schema 1.5,
   but are never regenerated silently;
 - partial route CLI or configuration bundles are never published;
 - a current MOP preview is required and any project edit invalidates it;
