@@ -20,7 +20,21 @@ def test_pilot_window_constructs() -> None:
     window = AtlasPilotWindow()
 
     assert window.windowTitle() == "ATLAS — PySide6 Proof of Concept"
-    assert isinstance(window.centralWidget(), AssetImportPage)
+    assert window.page_stack.currentWidget() is window.pages["overview"]
+    assert isinstance(window.pages["asset-import"], AssetImportPage)
+    assert window.nav_buttons["overview"].isChecked()
+    window.close()
+
+
+def test_shell_navigates_to_asset_import() -> None:
+    _application()
+    window = AtlasPilotWindow()
+
+    window.show_page("asset-import")
+
+    assert window.page_stack.currentWidget() is window.pages["asset-import"]
+    assert window.nav_buttons["asset-import"].isChecked()
+    assert not window.nav_buttons["overview"].isChecked()
     window.close()
 
 
