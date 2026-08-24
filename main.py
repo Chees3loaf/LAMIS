@@ -3,6 +3,35 @@ import os
 import sys
 
 
+def _maybe_dispatch_to_qt_pilot() -> None:
+    """Launch an opt-in PySide6 proof of concept without importing Tk."""
+    try:
+        flag_index = sys.argv.index("--qt-pilot")
+    except ValueError:
+        return
+
+    pilot = sys.argv[flag_index + 1] if flag_index + 1 < len(sys.argv) else ""
+    if pilot != "asset-import":
+        sys.stderr.write(
+            "Usage: python main.py --qt-pilot asset-import\n"
+        )
+        raise SystemExit(2)
+
+    # Do not pass pilot-only arguments to QApplication.
+    del sys.argv[flag_index:flag_index + 2]
+    try:
+        from gui_qt.app import run_asset_import_pilot
+    except ModuleNotFoundError as exc:
+        if exc.name == "PySide6":
+            sys.stderr.write(
+                "The PySide6 pilot requires PySide6. Install the project "
+                "requirements and try again.\n"
+            )
+            raise SystemExit(2) from exc
+        raise
+    raise SystemExit(run_asset_import_pilot())
+
+
 def _maybe_dispatch_to_tds() -> None:
     """If ``--tds-mode`` is on the command line, hand off to TDS_v6.2.py.
 
@@ -91,6 +120,7 @@ def _relaunch_as_admin() -> bool:
 
 # Dispatch BEFORE any heavy imports (tkinter, gui, paramiko, ...) so the
 # TDS subprocess doesn't pay the GUI startup tax.
+_maybe_dispatch_to_qt_pilot()
 _maybe_dispatch_to_tds()
 
 # Relaunch elevated (UAC) for the GUI path -- after the TDS dispatch (the
