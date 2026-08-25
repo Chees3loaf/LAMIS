@@ -25,9 +25,9 @@ and aggregate BOM sheets.
 Sales BOM Import supports multi-select worksheet input and merges selected
 sheets into one per-site output workbook.
 
-Inventory currently supports direct LAN and Serial collection, append mode,
-and report export. Concurrent Pod/Lab scanning remains on the Tkinter screen
-until the next Inventory migration stage.
+Inventory supports direct LAN and Serial collection plus concurrent Pod/Lab
+network scanning, credential retries, partial-failure summaries, append mode,
+and family-aware report export.
 
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.

@@ -3,28 +3,69 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from queue import Queue
+import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QVBoxLayout, QWidget, QInputDialog
 
-from services.inventory_direct_service import DirectInventoryRequest, InventoryRunControl, LAN_SCRIPTS, SERIAL_SCRIPTS, run_direct_inventory
+import config
+from services.inventory_direct_service import DirectInventoryRequest, InventoryRunControl, LAN_SCRIPTS, NetworkInventoryRequest, SERIAL_SCRIPTS, combine_network_ranges, expand_network_range, run_direct_inventory, run_network_inventory
 from utils.workbook_metadata import extract_workbook_metadata
 
 
 class InventoryWorker(QObject):
     progress = Signal(str)
+    numeric_progress = Signal(int, int, str)
+    credentials_requested = Signal(str)
     succeeded = Signal(object)
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, request: DirectInventoryRequest, control: InventoryRunControl) -> None:
+    def __init__(self, request: DirectInventoryRequest | NetworkInventoryRequest, control: InventoryRunControl) -> None:
         super().__init__()
         self.request, self.control = request, control
+        self._credential_queues: dict[str, Queue] = {}
+        self._credential_lock = threading.Lock()
+
+    def submit_credentials(self, ip: str, credentials: tuple[str, str] | None) -> None:
+        with self._credential_lock:
+            response = self._credential_queues.get(ip)
+        if response is not None:
+            response.put(credentials)
+
+    def _request_credentials(self, ip: str) -> tuple[str, str] | None:
+        response: Queue = Queue(maxsize=1)
+        with self._credential_lock:
+            self._credential_queues[ip] = response
+        self.credentials_requested.emit(ip)
+        try:
+            while not self.control.should_stop():
+                try:
+                    return response.get(timeout=0.25)
+                except Exception:
+                    continue
+            return None
+        finally:
+            with self._credential_lock:
+                self._credential_queues.pop(ip, None)
 
     @Slot()
     def run(self) -> None:
         try:
-            result = run_direct_inventory(self.request, progress=self.progress.emit, control=self.control)
+            if isinstance(self.request, NetworkInventoryRequest):
+                result = run_network_inventory(
+                    self.request, progress=self.progress.emit,
+                    numeric_progress=self.numeric_progress.emit,
+                    request_credentials=self._request_credentials,
+                    control=self.control,
+                )
+            else:
+                result = run_direct_inventory(
+                    self.request, progress=self.progress.emit,
+                    request_credentials=self._request_credentials,
+                    control=self.control,
+                )
         except Exception as exc:
             logging.exception("Qt direct inventory failed")
             self.failed.emit(str(exc))
@@ -54,7 +95,7 @@ class InventoryPage(QWidget):
         connection = QGroupBox("Connection")
         connection_form = QFormLayout(connection)
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["LAN", "Serial"])
+        self.mode_combo.addItems(["Network", "LAN", "Serial"])
         self.mode_combo.currentTextChanged.connect(self._mode_changed)
         self.script_combo = QComboBox()
         self.target_edit = QLineEdit()
@@ -64,6 +105,12 @@ class InventoryPage(QWidget):
         connection_form.addRow("Device family", self.script_combo)
         connection_form.addRow("IP address / serial port", self.target_edit)
         connection_form.addRow("Baud rate", self.baud_combo)
+
+        self.ranges_box = QGroupBox("Pod / Lab ranges")
+        ranges_form = QFormLayout(self.ranges_box)
+        self.range_controls = [self._range_row(1), self._range_row(2)]
+        ranges_form.addRow("IP Selection 1", self.range_controls[0][0])
+        ranges_form.addRow("IP Selection 2 (optional)", self.range_controls[1][0])
 
         report = QGroupBox("Report")
         report_form = QFormLayout(report)
@@ -121,20 +168,55 @@ class InventoryPage(QWidget):
         layout.addWidget(heading)
         layout.addWidget(intro)
         layout.addWidget(connection)
+        layout.addWidget(self.ranges_box)
         layout.addWidget(report)
         layout.addWidget(details)
         layout.addLayout(controls)
         layout.addWidget(self.progress_bar)
         layout.addWidget(self.log, 1)
-        self._mode_changed("LAN")
+        self._mode_changed("Network")
+
+    def _range_row(self, _number: int):
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        pod = QComboBox()
+        pod.addItems([f"Pod {number}" for number in range(1, config.POD_COUNT + 1)] + [config.LAB_LABEL])
+        start_third, start_host, end_third, end_host = (QLineEdit() for _ in range(4))
+        for edit in (start_third, start_host, end_third, end_host):
+            edit.setMaximumWidth(55)
+        start_host.setPlaceholderText("start")
+        end_host.setPlaceholderText("end")
+        start_third.setPlaceholderText("3rd")
+        end_third.setPlaceholderText("3rd")
+        layout.addWidget(pod)
+        layout.addWidget(QLabel("Start"))
+        layout.addWidget(start_third)
+        layout.addWidget(start_host)
+        layout.addWidget(QLabel("End"))
+        layout.addWidget(end_third)
+        layout.addWidget(end_host)
+        layout.addStretch(1)
+
+        def update_third(selection: str) -> None:
+            enabled = selection == config.LAB_LABEL
+            start_third.setEnabled(enabled)
+            end_third.setEnabled(enabled)
+        pod.currentTextChanged.connect(update_third)
+        update_third(pod.currentText())
+        return row, pod, start_third, start_host, end_third, end_host
 
     @Slot(str)
     def _mode_changed(self, mode: str) -> None:
-        options = LAN_SCRIPTS if mode == "LAN" else SERIAL_SCRIPTS
+        network = mode == "Network"
+        options = LAN_SCRIPTS if mode in {"LAN", "Network"} else SERIAL_SCRIPTS
         self.script_combo.clear()
         self.script_combo.addItems(options)
+        self.script_combo.setEnabled(not network)
+        self.target_edit.setEnabled(not network)
         self.baud_combo.setEnabled(mode == "Serial")
-        self.target_edit.setPlaceholderText("Example: 10.0.0.1" if mode == "LAN" else "Example: COM3")
+        self.ranges_box.setVisible(network)
+        self.target_edit.setPlaceholderText("Example: 10.0.0.1" if mode != "Serial" else "Example: COM3")
 
     @Slot()
     def _browse_output(self) -> None:
@@ -169,13 +251,30 @@ class InventoryPage(QWidget):
     @Slot()
     def _start(self) -> None:
         try:
-            request = DirectInventoryRequest(
-                mode=self.mode_combo.currentText(), script_name=self.script_combo.currentText(),
-                target=self.target_edit.text().strip(), output_path=Path(self.output_edit.text().strip()),
+            common = dict(
+                output_path=Path(self.output_edit.text().strip()),
                 customer=self.customer_edit.text(), project=self.project_edit.text(),
                 purchase_order=self.po_edit.text(), sales_order=self.so_edit.text(),
-                baud_rate=int(self.baud_combo.currentText()), append_mode=self._append_mode,
+                append_mode=self._append_mode,
             )
+            if self.mode_combo.currentText() == "Network":
+                expanded = []
+                for index, (_row, pod, start_third, start_host, end_third, end_host) in enumerate(self.range_controls):
+                    if not any(edit.text().strip() for edit in (start_third, start_host, end_third, end_host)):
+                        if index == 0:
+                            raise ValueError("Enter IP Selection 1.")
+                        continue
+                    expanded.append(expand_network_range(
+                        pod.currentText(), start_host.text(), end_host.text(),
+                        start_third.text(), end_third.text(),
+                    ))
+                request = NetworkInventoryRequest(targets=combine_network_ranges(*expanded), **common)
+            else:
+                request = DirectInventoryRequest(
+                    mode=self.mode_combo.currentText(), script_name=self.script_combo.currentText(),
+                    target=self.target_edit.text().strip(), baud_rate=int(self.baud_combo.currentText()),
+                    **common,
+                )
         except Exception as exc:
             QMessageBox.warning(self, "Inventory", str(exc))
             return
@@ -185,6 +284,8 @@ class InventoryPage(QWidget):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self.log.appendPlainText)
+        worker.numeric_progress.connect(self._on_progress)
+        worker.credentials_requested.connect(self._prompt_credentials)
         worker.succeeded.connect(self._on_success)
         worker.failed.connect(self._on_failure)
         worker.finished.connect(thread.quit)
@@ -199,6 +300,27 @@ class InventoryPage(QWidget):
         self.progress_bar.setRange(0, 0)
         self._thread, self._worker, self._control = thread, worker, control
         thread.start()
+
+    @Slot(int, int, str)
+    def _on_progress(self, current: int, total: int, label: str) -> None:
+        self.progress_bar.setRange(0, max(total, 1))
+        self.progress_bar.setValue(current)
+        self.status_label.setText(label)
+
+    @Slot(str)
+    def _prompt_credentials(self, ip: str) -> None:
+        worker = self._worker
+        if worker is None:
+            return
+        username, accepted = QInputDialog.getText(self, "Device credentials", f"Username for {ip}:")
+        if not accepted or not username.strip():
+            worker.submit_credentials(ip, None)
+            return
+        password, accepted = QInputDialog.getText(
+            self, "Device credentials", f"Password for {ip}:",
+            QLineEdit.EchoMode.Password,
+        )
+        worker.submit_credentials(ip, (username.strip(), password) if accepted else None)
 
     @Slot()
     def _toggle_pause(self) -> None:
@@ -224,6 +346,16 @@ class InventoryPage(QWidget):
         self.status_label.setText(f"Done — {outcome.output_path.name}")
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(1)
+        failed = getattr(outcome, "failed", {})
+        if failed:
+            lines = [f"{ip}: {reason}" for ip, reason in list(failed.items())[:15]]
+            remaining = len(failed) - len(lines)
+            if remaining:
+                lines.append(f"…and {remaining} more; see the activity log.")
+            QMessageBox.warning(
+                self, "Some devices failed",
+                f"{len(failed)} device(s) did not return inventory data.\n\n" + "\n".join(lines),
+            )
 
     @Slot(str)
     def _on_failure(self, message: str) -> None:

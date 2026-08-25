@@ -58,6 +58,8 @@ def test_shell_navigates_to_inventory() -> None:
     window.show_page("inventory")
     assert window.page_stack.currentWidget() is window.pages["inventory"]
     assert window.nav_buttons["inventory"].isChecked()
+    assert window.pages["inventory"].mode_combo.currentText() == "Network"
+    assert not window.pages["inventory"].ranges_box.isHidden()
     window.close()
 
 
