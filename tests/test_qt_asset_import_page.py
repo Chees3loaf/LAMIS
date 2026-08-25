@@ -8,6 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from gui_qt.asset_import_page import AssetImportPage
+from gui_qt.bom_build_page import BomBuildPage
 from gui_qt.main_window import AtlasPilotWindow
 
 
@@ -22,6 +23,7 @@ def test_pilot_window_constructs() -> None:
     assert window.windowTitle() == "ATLAS — PySide6 Proof of Concept"
     assert window.page_stack.currentWidget() is window.pages["overview"]
     assert isinstance(window.pages["asset-import"], AssetImportPage)
+    assert isinstance(window.pages["bom-build"], BomBuildPage)
     assert window.nav_buttons["overview"].isChecked()
     window.close()
 
@@ -35,6 +37,15 @@ def test_shell_navigates_to_asset_import() -> None:
     assert window.page_stack.currentWidget() is window.pages["asset-import"]
     assert window.nav_buttons["asset-import"].isChecked()
     assert not window.nav_buttons["overview"].isChecked()
+    window.close()
+
+
+def test_shell_navigates_to_bom_build() -> None:
+    _application()
+    window = AtlasPilotWindow()
+    window.show_page("bom-build")
+    assert window.page_stack.currentWidget() is window.pages["bom-build"]
+    assert window.nav_buttons["bom-build"].isChecked()
     window.close()
 
 

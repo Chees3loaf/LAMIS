@@ -2,8 +2,9 @@
 
 ATLAS currently keeps its production Tkinter interface as the default. The
 PySide6 proof of concept is an opt-in ATLAS navigation shell with a working
-Asset Import page that shares the same merge logic through a UI-independent
-service. Workflows that have not been migrated are visibly disabled.
+Asset Import and BOM Build/Refresh pages that share production logic through
+UI-independent services. Workflows that have not been migrated are visibly
+disabled.
 
 ## Run the pilot
 
