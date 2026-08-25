@@ -44,8 +44,11 @@ and publish ready projects through the existing audited atomic bundle
 exporter. It can also create projects and add, update, remove, or reorder
 planning shelves. Updating a shelf preserves its audited provider payload and
 source evidence; reordering is refused when reviewed topology links exist.
-Exact-provider editing and diagram transcription remain on Tkinter until their
-dedicated Qt panels are complete.
+Exact RLS R4.0 provider review is also available in Qt: provider choices are
+role-compatible, templates use the strict versioned payload schema, and the
+payload must decode, validate, and generate a complete no-commit candidate
+before it can replace a shelf review. Diagram transcription remains on
+Tkinter until its dedicated Qt panel is complete.
 
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import json
 from pathlib import Path
 from typing import Mapping
 from uuid import uuid4
@@ -9,6 +10,8 @@ from uuid import uuid4
 from utils.rls_config.route_bundle import export_route_bundle
 from utils.rls_config.route_config import RouteConfigBuild, evaluate_route_configs
 from utils.rls_config.route_project import PROFILE_LABELS, PROFILE_REGISTRY, RouteProject, ShelfInstance, Site, load_route_project_draft, save_route_project_draft
+from utils.rls_config.common import DEFAULT_R40_TARGET_BUILD_SCHEMA, ManagementInterface, ROUTING_OSPF_OSC_ONLY
+from utils.rls_config.r4_0_generator import R40_PROVIDER_CATALOG, R40ExactConfigGenerator, R40ExactRequest, R40LinePath, decode_r40_exact_payload, encode_r40_exact_payload
 
 
 @dataclass(frozen=True)
@@ -144,3 +147,66 @@ def move_route_shelf(project: RouteProject, shelf_id: str, offset: int) -> Route
         raise ValueError("Shelf order cannot change while route links exist. Remove or rebuild the reviewed topology in the diagram workflow first.")
     shelves[index], shelves[target] = shelves[target], shelves[index]
     return replace(project, shelves=tuple(shelves))
+
+
+def exact_provider_choices(profile_id: str) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (provider.provider_id, provider.display_name)
+        for provider in R40_PROVIDER_CATALOG.values()
+        if profile_id in provider.role_profiles
+    )
+
+
+def exact_payload_template(project: RouteProject, shelf_id: str, provider_id: str) -> str:
+    shelf = next((item for item in project.shelves if item.shelf_id == shelf_id), None)
+    if shelf is None: raise ValueError("Select a shelf before creating an exact-provider template.")
+    provider = R40_PROVIDER_CATALOG.get(provider_id)
+    if provider is None or shelf.profile_id not in provider.role_profiles:
+        raise ValueError("The selected exact provider is not compatible with this shelf role.")
+    site = project.site_by_key(shelf.site_key)
+    line = lambda number: R40LinePath(
+        link_name=provider.line_link_names[number - 1], neighbor_node="REVIEW-PEER",
+        neighbor_line_mux_pfg=provider.line_pfg_names[number - 1][0],
+        neighbor_line_demux_pfg=provider.line_pfg_names[number - 1][1],
+        fiber_type="NDSF", expected_loss_db=1.0,
+    )
+    colan_enabled = provider.colan_policy != "prohibited"
+    request = R40ExactRequest(
+        provider_id=provider.provider_id, profile=shelf.profile_id,
+        software_release="RLS R4.0", target_software_build=DEFAULT_R40_TARGET_BUILD_SCHEMA,
+        chassis_family=provider.chassis_family, chassis_pec=provider.chassis_pec,
+        hardware_profile=provider.hardware_profile, shelf_name=shelf.tid,
+        site_name=site.name if site else "", member_name=shelf.tid,
+        hostname=shelf.tid, frame_identification_code="", loopback_ip=shelf.primary_oam_ip,
+        ospf_area=project.ospf_area, line_1=line(1),
+        line_2=line(2) if len(provider.line_outputs) > 1 else None,
+        line_1_route_side="A", shelf_label=shelf.notes,
+        management=ManagementInterface(enabled=colan_enabled, routing_mode=(ManagementInterface().routing_mode if colan_enabled else ROUTING_OSPF_OSC_ONLY)),
+    )
+    return json.dumps(encode_r40_exact_payload(request), indent=2, ensure_ascii=False)
+
+
+def validate_exact_payload(project: RouteProject, shelf_id: str, payload_text: str):
+    shelf = next((item for item in project.shelves if item.shelf_id == shelf_id), None)
+    if shelf is None: raise ValueError("Select a shelf before validating an exact-provider payload.")
+    try: raw = json.loads(payload_text)
+    except json.JSONDecodeError as exc: raise ValueError(f"Exact-provider JSON is invalid at line {exc.lineno}, column {exc.colno}: {exc.msg}") from exc
+    request = decode_r40_exact_payload(raw)
+    if request.profile != shelf.profile_id:
+        raise ValueError(f"Payload role {request.profile!r} does not match shelf role {shelf.profile_id!r}.")
+    generator = R40ExactConfigGenerator()
+    issues = generator.validate(request)
+    errors = tuple(issue for issue in issues if issue.severity == "error")
+    if errors:
+        raise ValueError("Exact-provider validation failed:\n" + "\n".join(f"- [{issue.code}] {issue.field}: {issue.message}" for issue in errors))
+    artifact = generator.generate(request)
+    return encode_r40_exact_payload(request), artifact
+
+
+def apply_exact_payload(project: RouteProject, shelf_id: str, payload_text: str):
+    payload, artifact = validate_exact_payload(project, shelf_id, payload_text)
+    shelves = list(project.shelves)
+    index = next(i for i, shelf in enumerate(shelves) if shelf.shelf_id == shelf_id)
+    shelves[index] = replace(shelves[index], profile_payload=payload, review_state="confirmed")
+    updated = replace(project, shelves=tuple(shelves))
+    return updated, artifact

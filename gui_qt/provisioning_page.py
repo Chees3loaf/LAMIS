@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import logging
 import threading
+import json
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from services.provisioning_service import DEVICE_TYPES, ProvisioningDevice, ProvisioningRequest, read_provisioning_devices, run_live_provisioning, validate_provisioning_request
-from services.rls_route_service import evaluate_route, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, remove_route_shelf, review_route, route_profile_choices, save_route_draft, update_route_details, upsert_route_shelf
+from services.rls_route_service import apply_exact_payload, evaluate_route, exact_payload_template, exact_provider_choices, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, remove_route_shelf, review_route, route_profile_choices, save_route_draft, update_route_details, upsert_route_shelf, validate_exact_payload
 
 
 class ProvisioningWorker(QObject):
@@ -206,11 +207,18 @@ class RlsRouteProjectPage(QWidget):
         shelf_buttons = QHBoxLayout(); add_update = QPushButton("Add / Update Shelf"); add_update.clicked.connect(self._upsert_shelf); clear = QPushButton("Clear Editor"); clear.clicked.connect(self._clear_shelf_editor); remove = QPushButton("Remove"); remove.clicked.connect(self._remove_shelf); up = QPushButton("Move Up"); up.clicked.connect(lambda: self._move_shelf(-1)); down = QPushButton("Move Down"); down.clicked.connect(lambda: self._move_shelf(1))
         for button in (add_update, clear, remove, up, down): shelf_buttons.addWidget(button)
         shelf_form.addRow(shelf_buttons)
+        exact_box = QGroupBox("Exact RLS R4.0 provider review")
+        exact_layout = QVBoxLayout(exact_box)
+        provider_row = QHBoxLayout(); self.provider_combo = QComboBox(); template_button = QPushButton("Create Review Template"); template_button.clicked.connect(self._create_exact_template); validate_exact = QPushButton("Validate / Preview CLI"); validate_exact.clicked.connect(self._validate_exact); apply_exact = QPushButton("Apply Validated Payload"); apply_exact.clicked.connect(self._apply_exact)
+        provider_row.addWidget(QLabel("Compatible provider")); provider_row.addWidget(self.provider_combo, 1); provider_row.addWidget(template_button); provider_row.addWidget(validate_exact); provider_row.addWidget(apply_exact)
+        self.exact_json = QPlainTextEdit(); self.exact_json.setPlaceholderText("Select a shelf, choose a compatible provider, and create a review template. Every placeholder must be reviewed before validation can pass."); self.exact_json.setMinimumHeight(220)
+        self.exact_preview = QPlainTextEdit(); self.exact_preview.setReadOnly(True); self.exact_preview.setPlaceholderText("Validation report and candidate CLI preview"); self.exact_preview.setMinimumHeight(180)
+        exact_layout.addLayout(provider_row); exact_layout.addWidget(self.exact_json); exact_layout.addWidget(self.exact_preview)
         controls = QHBoxLayout(); self.validate_button = QPushButton("Validate / Evaluate CLI"); self.validate_button.clicked.connect(self._validate); self.export_button = QPushButton("Export Route Bundle…"); self.export_button.clicked.connect(self._export); self.validate_button.setEnabled(False); self.export_button.setEnabled(False); self.status = QLabel("Open a route project to begin")
         controls.addWidget(self.validate_button); controls.addWidget(self.export_button); controls.addWidget(self.status, 1)
         self.results = QPlainTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(150)
         note = QLabel("This migration slice preserves reviewed provider payloads and route ordering. Exact-provider editing and diagram transcription remain in the Tkinter Route Builder until their Qt panels complete."); note.setObjectName("mutedText"); note.setWordWrap(True)
-        editor_content = QWidget(); editor_layout = QVBoxLayout(editor_content); editor_layout.addWidget(project_box); editor_layout.addWidget(details); editor_layout.addWidget(self.table); editor_layout.addWidget(shelf_box); editor_layout.addLayout(controls); editor_layout.addWidget(self.results); editor_layout.addWidget(note)
+        editor_content = QWidget(); editor_layout = QVBoxLayout(editor_content); editor_layout.addWidget(project_box); editor_layout.addWidget(details); editor_layout.addWidget(self.table); editor_layout.addWidget(shelf_box); editor_layout.addWidget(exact_box); editor_layout.addLayout(controls); editor_layout.addWidget(self.results); editor_layout.addWidget(note)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(editor_content)
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(scroll)
 
@@ -291,11 +299,15 @@ class RlsRouteProjectPage(QWidget):
         self.site_code_edit.setText(site.code if site else ""); self.site_name_edit.setText(site.name if site else ""); self.tid_edit.setText(shelf.tid); self.oam_edit.setText(shelf.primary_oam_ip); self.release_edit.setText(shelf.software_release); self.variant_edit.setText(shelf.shelf_variant); self.power_edit.setText(shelf.power_label); self.raman_edit.setText(shelf.raman_label); self.shelf_notes_edit.setText(shelf.notes)
         index = self.role_combo.findData(shelf.profile_id)
         if index >= 0: self.role_combo.setCurrentIndex(index)
+        self._refresh_provider_choices(shelf.profile_id)
+        self.exact_json.setPlainText(json.dumps(dict(shelf.profile_payload), indent=2, ensure_ascii=False) if shelf.profile_payload else "")
+        self.exact_preview.clear()
 
     def _clear_shelf_editor(self) -> None:
         self.selected_shelf_id = ""; self.table.clearSelection()
         for widget in (self.site_code_edit, self.site_name_edit, self.tid_edit, self.oam_edit, self.raman_edit, self.shelf_notes_edit): widget.clear()
         self.release_edit.setText("RLS R4.0"); self.variant_edit.setText("RLS"); self.power_edit.setText("A/B -48 VDC"); self.role_combo.setCurrentIndex(0)
+        self.provider_combo.clear(); self.exact_json.clear(); self.exact_preview.clear()
 
     def _upsert_shelf(self) -> None:
         if self.project is None: self._new()
@@ -322,3 +334,37 @@ class RlsRouteProjectPage(QWidget):
         self._render_review(); row = next((i for i, shelf in enumerate(self.project.shelves) if shelf.shelf_id == shelf_id), -1)
         if row >= 0: self.table.selectRow(row)
         self.status.setText("Shelf order changed — save the project draft")
+
+    def _refresh_provider_choices(self, profile_id: str) -> None:
+        self.provider_combo.clear()
+        for provider_id, label in exact_provider_choices(profile_id): self.provider_combo.addItem(label, provider_id)
+
+    def _create_exact_template(self) -> None:
+        if self.project is None or not self.selected_shelf_id:
+            self._error("No shelf is selected.", "Select a shelf row before creating an exact-provider review template."); return
+        provider_id = self.provider_combo.currentData()
+        if not provider_id:
+            self._error("No compatible exact provider is selected.", "Choose a compatible registered provider for this route role."); return
+        if self.exact_json.toPlainText().strip() and QMessageBox.question(self, "Replace provider review", "Replace the current exact-provider JSON with a new template?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
+        try: payload = exact_payload_template(self.project, self.selected_shelf_id, provider_id)
+        except Exception as exc: self._error(str(exc), "Confirm the shelf role and provider selection, then create the template again."); return
+        self.exact_json.setPlainText(payload); self.exact_preview.setPlainText("Template created. Review every identity, management, routing, line-path, loss, and provider-control field before validation.")
+
+    def _validate_exact(self) -> None:
+        if self.project is None or not self.selected_shelf_id:
+            self._error("No shelf is selected.", "Select a shelf and provide its exact-provider JSON first."); return
+        try: _payload, artifact = validate_exact_payload(self.project, self.selected_shelf_id, self.exact_json.toPlainText())
+        except Exception as exc:
+            self.exact_preview.setPlainText(f"VALIDATION FAILED — no payload was applied and no deployable artifact was retained.\n\n{exc}"); self._error(str(exc), "Correct every listed exact-provider field and validate again. No shelf data has been changed."); return
+        warning_count = sum(issue.severity == "warning" for issue in artifact.issues)
+        self.exact_preview.setPlainText(f"VALIDATION PASSED\nCommands: {artifact.command_count}\nWarnings: {warning_count}\nCommit commands: 0\n\n{artifact.validation_report}\n\n--- CANDIDATE CLI ---\n{artifact.cli_text}")
+
+    def _apply_exact(self) -> None:
+        if self.project is None or not self.selected_shelf_id:
+            self._error("No shelf is selected.", "Select a shelf and validate its exact-provider JSON first."); return
+        try: self.project, artifact = apply_exact_payload(self.project, self.selected_shelf_id, self.exact_json.toPlainText())
+        except Exception as exc:
+            self._error(str(exc), "Correct every validation error and apply again. The existing shelf payload remains unchanged."); return
+        shelf_id = self.selected_shelf_id; self._render_review(); row = next((i for i, shelf in enumerate(self.project.shelves) if shelf.shelf_id == shelf_id), -1)
+        if row >= 0: self.table.selectRow(row)
+        self.status.setText(f"Exact provider applied ({artifact.command_count} candidate commands) — save the project draft")

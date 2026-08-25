@@ -1,8 +1,11 @@
 from pathlib import Path
+import json
 
 from services import rls_route_service
-from services.rls_route_service import evaluate_route, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, remove_route_shelf, review_route, save_route_draft, update_route_details, upsert_route_shelf
+from services.rls_route_service import apply_exact_payload, evaluate_route, exact_payload_template, exact_provider_choices, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, remove_route_shelf, review_route, save_route_draft, update_route_details, upsert_route_shelf, validate_exact_payload
 from utils.rls_config.route_project import OpticalPath, RouteLink, RouteProject, ShelfInstance, Site
+from utils.rls_config.r4_0_generator import encode_r40_exact_payload
+from tests.test_rls_r4_0_generator import _request
 
 
 def _draft() -> RouteProject:
@@ -88,3 +91,43 @@ def test_reorder_is_blocked_when_reviewed_links_exist():
     try: move_route_shelf(project, z.shelf_id, -1)
     except ValueError as exc: assert "links exist" in str(exc)
     else: raise AssertionError("linked route was reordered")
+
+
+def _project_for_request(request):
+    project = new_route_project()
+    return upsert_route_shelf(project, site_code="SITE-104", site_name="SITE-104", profile_id=request.profile, tid="SITE-104-1", primary_oam_ip="10.6.22.104")
+
+
+def test_provider_choices_are_role_compatible():
+    choices = exact_provider_choices("ila")
+    assert choices
+    assert all("DLE" in label for _provider_id, label in choices)
+
+
+def test_template_is_strict_decodable_envelope():
+    request = _request(next(iter(exact_provider_choices("ila")))[0])
+    project = _project_for_request(request)
+    payload = json.loads(exact_payload_template(project, project.shelves[0].shelf_id, request.provider_id))
+    assert payload["request"]["profile"] == "ila"
+    assert payload["request"]["provider_id"] == request.provider_id
+
+
+def test_valid_payload_generates_and_applies_confirmed_review():
+    request = _request(next(iter(exact_provider_choices("ila")))[0])
+    project = _project_for_request(request); shelf_id = project.shelves[0].shelf_id
+    text = json.dumps(encode_r40_exact_payload(request))
+    _payload, artifact = validate_exact_payload(project, shelf_id, text)
+    assert artifact.command_count > 0 and "commit" not in artifact.cli_text.splitlines()
+    updated, applied_artifact = apply_exact_payload(project, shelf_id, text)
+    assert applied_artifact.command_count == artifact.command_count
+    assert updated.shelves[0].review_state == "confirmed"
+    assert updated.shelves[0].profile_payload["request"]["provider_id"] == request.provider_id
+
+
+def test_role_mismatch_never_changes_project():
+    ila_request = _request(next(iter(exact_provider_choices("ila")))[0])
+    project = upsert_route_shelf(new_route_project(), site_code="A", site_name="Alpha", profile_id="add_drop_a", tid="A-RLS", primary_oam_ip="10.6.22.104")
+    try: apply_exact_payload(project, project.shelves[0].shelf_id, json.dumps(encode_r40_exact_payload(ila_request)))
+    except ValueError as exc: assert "does not match shelf role" in str(exc)
+    else: raise AssertionError("mismatched payload was applied")
+    assert not project.shelves[0].profile_payload and project.shelves[0].review_state == "manual"
