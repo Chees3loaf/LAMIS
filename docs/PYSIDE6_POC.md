@@ -41,8 +41,11 @@ worker, and Stop uses the existing scripts' cooperative cancellation contract.
 The Ciena RLS Route Builder can open and save safe project drafts, display the
 ordered shelf review state, run fail-closed project/configuration evaluation,
 and publish ready projects through the existing audited atomic bundle
-exporter. Exact-provider editing and diagram transcription remain on Tkinter
-until their dedicated Qt panels are complete.
+exporter. It can also create projects and add, update, remove, or reorder
+planning shelves. Updating a shelf preserves its audited provider payload and
+source evidence; reordering is refused when reviewed topology links exist.
+Exact-provider editing and diagram transcription remain on Tkinter until their
+dedicated Qt panels are complete.
 
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.

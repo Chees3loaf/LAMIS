@@ -8,7 +8,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from services.provisioning_service import DEVICE_TYPES, ProvisioningDevice, ProvisioningRequest, read_provisioning_devices, run_live_provisioning, validate_provisioning_request
-from services.rls_route_service import evaluate_route, load_route_draft, publish_route_bundle, review_route, save_route_draft
+from services.rls_route_service import evaluate_route, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, remove_route_shelf, review_route, route_profile_choices, save_route_draft, update_route_details, upsert_route_shelf
 
 
 class ProvisioningWorker(QObject):
@@ -189,17 +189,30 @@ class RlsRouteProjectPage(QWidget):
         project_box = QGroupBox("Route project")
         project_form = QFormLayout(project_box)
         self.path_edit = QLineEdit(); self.path_edit.setReadOnly(True)
+        new_button = QPushButton("New"); new_button.clicked.connect(self._new)
         open_button = QPushButton("Open project…"); open_button.clicked.connect(self._open)
         save_button = QPushButton("Save copy…"); save_button.clicked.connect(self._save_copy)
-        path_row = QWidget(); path_layout = QHBoxLayout(path_row); path_layout.setContentsMargins(0, 0, 0, 0); path_layout.addWidget(self.path_edit, 1); path_layout.addWidget(open_button); path_layout.addWidget(save_button)
+        path_row = QWidget(); path_layout = QHBoxLayout(path_row); path_layout.setContentsMargins(0, 0, 0, 0); path_layout.addWidget(self.path_edit, 1); path_layout.addWidget(new_button); path_layout.addWidget(open_button); path_layout.addWidget(save_button)
         self.route_label = QLabel("No project loaded")
         project_form.addRow("File", path_row); project_form.addRow("Route", self.route_label)
-        self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Order", "Site", "TID", "Role", "OAM IP", "Review"]); self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.table.horizontalHeader().setStretchLastSection(True)
+        details = QGroupBox("Project details"); details_form = QFormLayout(details)
+        self.route_edit = QLineEdit(); self.title_edit = QLineEdit(); self.revision_edit = QLineEdit("1"); self.ospf_edit = QLineEdit(); self.notes_edit = QLineEdit()
+        for label, widget in (("Route code", self.route_edit), ("Title", self.title_edit), ("Revision", self.revision_edit), ("OSPF area", self.ospf_edit), ("Notes", self.notes_edit)): details_form.addRow(label, widget)
+        self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Order", "Site", "TID", "Role", "OAM IP", "Review"]); self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection); self.table.itemSelectionChanged.connect(self._load_selected_shelf); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.table.horizontalHeader().setStretchLastSection(True)
+        shelf_box = QGroupBox("Shelf editor"); shelf_form = QFormLayout(shelf_box)
+        self.selected_shelf_id = ""; self.site_code_edit = QLineEdit(); self.site_name_edit = QLineEdit(); self.tid_edit = QLineEdit(); self.oam_edit = QLineEdit(); self.release_edit = QLineEdit("RLS R4.0"); self.variant_edit = QLineEdit("RLS"); self.power_edit = QLineEdit("A/B -48 VDC"); self.raman_edit = QLineEdit(); self.shelf_notes_edit = QLineEdit(); self.role_combo = QComboBox()
+        for profile_id, label in route_profile_choices(): self.role_combo.addItem(label, profile_id)
+        for label, widget in (("Site code", self.site_code_edit), ("Site name", self.site_name_edit), ("Role", self.role_combo), ("TID", self.tid_edit), ("Primary OAM IP", self.oam_edit), ("Software release", self.release_edit), ("Shelf variant", self.variant_edit), ("Power label", self.power_edit), ("Raman label", self.raman_edit), ("Notes", self.shelf_notes_edit)): shelf_form.addRow(label, widget)
+        shelf_buttons = QHBoxLayout(); add_update = QPushButton("Add / Update Shelf"); add_update.clicked.connect(self._upsert_shelf); clear = QPushButton("Clear Editor"); clear.clicked.connect(self._clear_shelf_editor); remove = QPushButton("Remove"); remove.clicked.connect(self._remove_shelf); up = QPushButton("Move Up"); up.clicked.connect(lambda: self._move_shelf(-1)); down = QPushButton("Move Down"); down.clicked.connect(lambda: self._move_shelf(1))
+        for button in (add_update, clear, remove, up, down): shelf_buttons.addWidget(button)
+        shelf_form.addRow(shelf_buttons)
         controls = QHBoxLayout(); self.validate_button = QPushButton("Validate / Evaluate CLI"); self.validate_button.clicked.connect(self._validate); self.export_button = QPushButton("Export Route Bundle…"); self.export_button.clicked.connect(self._export); self.validate_button.setEnabled(False); self.export_button.setEnabled(False); self.status = QLabel("Open a route project to begin")
         controls.addWidget(self.validate_button); controls.addWidget(self.export_button); controls.addWidget(self.status, 1)
         self.results = QPlainTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(150)
         note = QLabel("This migration slice preserves reviewed provider payloads and route ordering. Exact-provider editing and diagram transcription remain in the Tkinter Route Builder until their Qt panels complete."); note.setObjectName("mutedText"); note.setWordWrap(True)
-        layout = QVBoxLayout(self); layout.addWidget(project_box); layout.addWidget(self.table, 1); layout.addLayout(controls); layout.addWidget(self.results); layout.addWidget(note)
+        editor_content = QWidget(); editor_layout = QVBoxLayout(editor_content); editor_layout.addWidget(project_box); editor_layout.addWidget(details); editor_layout.addWidget(self.table); editor_layout.addWidget(shelf_box); editor_layout.addLayout(controls); editor_layout.addWidget(self.results); editor_layout.addWidget(note)
+        scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(editor_content)
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(scroll)
 
     def _error(self, detail: str, action: str) -> None:
         QMessageBox.critical(self, "RLS Route Builder error", f"Error: {detail or 'Unknown error'}\n\nWhat to do: {action}")
@@ -210,7 +223,17 @@ class RlsRouteProjectPage(QWidget):
         try: project = load_route_draft(path)
         except Exception as exc:
             self._error(str(exc), "Choose an ATLAS RLS R4.0 route-project JSON file and try again."); return
-        self.project = project; self.path = path; self.path_edit.setText(path); self.route_label.setText(f"{project.route_code} — {project.title}  |  Revision {project.revision}"); self.validate_button.setEnabled(True); self.export_button.setEnabled(True); self._render_review()
+        self.project = project; self.path = path; self.path_edit.setText(path); self._load_project_fields(); self.validate_button.setEnabled(True); self.export_button.setEnabled(True); self._render_review()
+
+    def _new(self) -> None:
+        self.project = new_route_project(); self.path = ""; self.path_edit.clear(); self._load_project_fields(); self.validate_button.setEnabled(True); self.export_button.setEnabled(True); self._clear_shelf_editor(); self._render_review()
+
+    def _load_project_fields(self) -> None:
+        project = self.project; self.route_edit.setText(project.route_code); self.title_edit.setText(project.title); self.revision_edit.setText(project.revision); self.ospf_edit.setText(project.ospf_area); self.notes_edit.setText(project.notes); self.route_label.setText(f"{project.route_code or '(new route)'} — {project.title or '(untitled)'}  |  Revision {project.revision}")
+
+    def _apply_project_fields(self) -> None:
+        self.project = update_route_details(self.project, route_code=self.route_edit.text(), title=self.title_edit.text(), revision=self.revision_edit.text(), ospf_area=self.ospf_edit.text(), notes=self.notes_edit.text())
+        self.route_label.setText(f"{self.project.route_code or '(new route)'} — {self.project.title or '(untitled)'}  |  Revision {self.project.revision}")
 
     def _render_review(self) -> None:
         review = review_route(self.project); self.table.setRowCount(len(review.shelves))
@@ -226,6 +249,7 @@ class RlsRouteProjectPage(QWidget):
     def _save_copy(self) -> None:
         if self.project is None:
             self._error("No route project is loaded.", "Open a route-project JSON file first."); return
+        self._apply_project_fields()
         path, _ = QFileDialog.getSaveFileName(self, "Save route project copy", "", "Route projects (*.json)")
         if not path: return
         if not path.lower().endswith(".json"): path += ".json"
@@ -236,6 +260,7 @@ class RlsRouteProjectPage(QWidget):
 
     def _validate(self) -> None:
         if self.project is None: return
+        self._apply_project_fields()
         self._render_review()
         try: build = evaluate_route(self.project)
         except Exception as exc:
@@ -245,6 +270,7 @@ class RlsRouteProjectPage(QWidget):
 
     def _export(self) -> None:
         if self.project is None: return
+        self._apply_project_fields()
         directory = QFileDialog.getExistingDirectory(self, "Choose route bundle output folder")
         if not directory: return
         self.thread = QThread(self); self.worker = RouteBundleWorker(self.project, directory); self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run); self.worker.succeeded.connect(self._exported); self.worker.failed.connect(self._export_failed); self.worker.finished.connect(self.thread.quit); self.worker.finished.connect(self.worker.deleteLater); self.thread.finished.connect(self.thread.deleteLater); self.export_button.setEnabled(False); self.status.setText("Exporting audited bundle…"); self.thread.start()
@@ -256,3 +282,43 @@ class RlsRouteProjectPage(QWidget):
     @Slot(str)
     def _export_failed(self, detail: str) -> None:
         self.export_button.setEnabled(True); self.status.setText("Export blocked"); self._error(detail, "Resolve every validation, provider-review, fiber-review, or diagram-attachment blocker, then export again.")
+
+    def _load_selected_shelf(self) -> None:
+        if self.project is None or not self.table.selectionModel().selectedRows(): return
+        row = self.table.selectionModel().selectedRows()[0].row()
+        if not 0 <= row < len(self.project.shelves): return
+        shelf = self.project.shelves[row]; site = self.project.site_by_key(shelf.site_key); self.selected_shelf_id = shelf.shelf_id
+        self.site_code_edit.setText(site.code if site else ""); self.site_name_edit.setText(site.name if site else ""); self.tid_edit.setText(shelf.tid); self.oam_edit.setText(shelf.primary_oam_ip); self.release_edit.setText(shelf.software_release); self.variant_edit.setText(shelf.shelf_variant); self.power_edit.setText(shelf.power_label); self.raman_edit.setText(shelf.raman_label); self.shelf_notes_edit.setText(shelf.notes)
+        index = self.role_combo.findData(shelf.profile_id)
+        if index >= 0: self.role_combo.setCurrentIndex(index)
+
+    def _clear_shelf_editor(self) -> None:
+        self.selected_shelf_id = ""; self.table.clearSelection()
+        for widget in (self.site_code_edit, self.site_name_edit, self.tid_edit, self.oam_edit, self.raman_edit, self.shelf_notes_edit): widget.clear()
+        self.release_edit.setText("RLS R4.0"); self.variant_edit.setText("RLS"); self.power_edit.setText("A/B -48 VDC"); self.role_combo.setCurrentIndex(0)
+
+    def _upsert_shelf(self) -> None:
+        if self.project is None: self._new()
+        try:
+            self._apply_project_fields(); self.project = upsert_route_shelf(self.project, shelf_id=self.selected_shelf_id, site_code=self.site_code_edit.text(), site_name=self.site_name_edit.text(), profile_id=self.role_combo.currentData(), tid=self.tid_edit.text(), primary_oam_ip=self.oam_edit.text(), software_release=self.release_edit.text(), shelf_variant=self.variant_edit.text(), power_label=self.power_edit.text(), raman_label=self.raman_edit.text(), notes=self.shelf_notes_edit.text())
+        except Exception as exc:
+            self._error(str(exc), "Correct the site, role, TID, addressing, or release fields and apply the shelf again."); return
+        self._clear_shelf_editor(); self._render_review(); self.status.setText("Shelf applied — save the project draft")
+
+    def _remove_shelf(self) -> None:
+        if self.project is None or not self.selected_shelf_id:
+            self._error("No shelf is selected.", "Select one shelf row before removing it."); return
+        if QMessageBox.question(self, "Remove shelf", "Remove the selected shelf and any links attached to it?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
+        try: self.project = remove_route_shelf(self.project, self.selected_shelf_id)
+        except Exception as exc: self._error(str(exc), "Refresh the project and select the shelf again."); return
+        self._clear_shelf_editor(); self._render_review(); self.status.setText("Shelf removed — save the project draft")
+
+    def _move_shelf(self, offset: int) -> None:
+        if self.project is None or not self.selected_shelf_id:
+            self._error("No shelf is selected.", "Select one shelf row before changing route order."); return
+        shelf_id = self.selected_shelf_id
+        try: self.project = move_route_shelf(self.project, shelf_id, offset)
+        except Exception as exc: self._error(str(exc), "Review or rebuild the linked topology before changing shelf order."); return
+        self._render_review(); row = next((i for i, shelf in enumerate(self.project.shelves) if shelf.shelf_id == shelf_id), -1)
+        if row >= 0: self.table.selectRow(row)
+        self.status.setText("Shelf order changed — save the project draft")
