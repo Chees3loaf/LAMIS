@@ -38,8 +38,11 @@ or Ciena SAOS 10 device over LAN (SSH) or serial. Targets can be entered
 directly or selected from an `.xlsx` file with IP and Hostname columns. Device
 options change with the selected platform, execution remains in a background
 worker, and Stop uses the existing scripts' cooperative cancellation contract.
-The audited Ciena RLS Route Builder remains on Tkinter until its dedicated
-migration phase is complete.
+The Ciena RLS Route Builder can open and save safe project drafts, display the
+ordered shelf review state, run fail-closed project/configuration evaluation,
+and publish ready projects through the existing audited atomic bundle
+exporter. Exact-provider editing and diagram transcription remain on Tkinter
+until their dedicated Qt panels are complete.
 
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.

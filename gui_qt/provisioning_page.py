@@ -5,9 +5,10 @@ import logging
 import threading
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from services.provisioning_service import DEVICE_TYPES, ProvisioningDevice, ProvisioningRequest, read_provisioning_devices, run_live_provisioning, validate_provisioning_request
+from services.rls_route_service import evaluate_route, load_route_draft, publish_route_bundle, review_route, save_route_draft
 
 
 class ProvisioningWorker(QObject):
@@ -159,5 +160,99 @@ class ProvisioningPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         heading = QLabel("Provisioning"); heading.setObjectName("pageHeading")
-        intro = QLabel("Configure one live Nokia or Ciena device over LAN or serial. The audited Ciena RLS Route Builder is the next provisioning migration phase."); intro.setObjectName("pageIntro"); intro.setWordWrap(True)
-        layout = QVBoxLayout(self); layout.addWidget(heading); layout.addWidget(intro); layout.addWidget(LiveProvisioningPage(), 1)
+        intro = QLabel("Configure live Nokia or Ciena devices and review audited Ciena RLS R4.0 route projects."); intro.setObjectName("pageIntro"); intro.setWordWrap(True)
+        tabs = QTabWidget(); tabs.addTab(LiveProvisioningPage(), "Live Device Provisioning"); tabs.addTab(RlsRouteProjectPage(), "Ciena RLS Route Builder")
+        layout = QVBoxLayout(self); layout.addWidget(heading); layout.addWidget(intro); layout.addWidget(tabs, 1)
+
+
+class RouteBundleWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, project, output_directory: str) -> None:
+        super().__init__(); self.project = project; self.output_directory = output_directory
+
+    @Slot()
+    def run(self) -> None:
+        try: result = publish_route_bundle(self.project, self.output_directory)
+        except Exception as exc:
+            logging.exception("Qt RLS route bundle export failed"); self.failed.emit(str(exc) or exc.__class__.__name__)
+        else: self.succeeded.emit(dict(result))
+        finally: self.finished.emit()
+
+
+class RlsRouteProjectPage(QWidget):
+    """Review and publish existing audited route projects without reimplementing their core."""
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent); self.project = None; self.path = ""; self.thread = None; self.worker = None
+        project_box = QGroupBox("Route project")
+        project_form = QFormLayout(project_box)
+        self.path_edit = QLineEdit(); self.path_edit.setReadOnly(True)
+        open_button = QPushButton("Open project…"); open_button.clicked.connect(self._open)
+        save_button = QPushButton("Save copy…"); save_button.clicked.connect(self._save_copy)
+        path_row = QWidget(); path_layout = QHBoxLayout(path_row); path_layout.setContentsMargins(0, 0, 0, 0); path_layout.addWidget(self.path_edit, 1); path_layout.addWidget(open_button); path_layout.addWidget(save_button)
+        self.route_label = QLabel("No project loaded")
+        project_form.addRow("File", path_row); project_form.addRow("Route", self.route_label)
+        self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Order", "Site", "TID", "Role", "OAM IP", "Review"]); self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.table.horizontalHeader().setStretchLastSection(True)
+        controls = QHBoxLayout(); self.validate_button = QPushButton("Validate / Evaluate CLI"); self.validate_button.clicked.connect(self._validate); self.export_button = QPushButton("Export Route Bundle…"); self.export_button.clicked.connect(self._export); self.validate_button.setEnabled(False); self.export_button.setEnabled(False); self.status = QLabel("Open a route project to begin")
+        controls.addWidget(self.validate_button); controls.addWidget(self.export_button); controls.addWidget(self.status, 1)
+        self.results = QPlainTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(150)
+        note = QLabel("This migration slice preserves reviewed provider payloads and route ordering. Exact-provider editing and diagram transcription remain in the Tkinter Route Builder until their Qt panels complete."); note.setObjectName("mutedText"); note.setWordWrap(True)
+        layout = QVBoxLayout(self); layout.addWidget(project_box); layout.addWidget(self.table, 1); layout.addLayout(controls); layout.addWidget(self.results); layout.addWidget(note)
+
+    def _error(self, detail: str, action: str) -> None:
+        QMessageBox.critical(self, "RLS Route Builder error", f"Error: {detail or 'Unknown error'}\n\nWhat to do: {action}")
+
+    def _open(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Open Ciena RLS route project", "", "Route projects (*.json);;All files (*)")
+        if not path: return
+        try: project = load_route_draft(path)
+        except Exception as exc:
+            self._error(str(exc), "Choose an ATLAS RLS R4.0 route-project JSON file and try again."); return
+        self.project = project; self.path = path; self.path_edit.setText(path); self.route_label.setText(f"{project.route_code} — {project.title}  |  Revision {project.revision}"); self.validate_button.setEnabled(True); self.export_button.setEnabled(True); self._render_review()
+
+    def _render_review(self) -> None:
+        review = review_route(self.project); self.table.setRowCount(len(review.shelves))
+        for row_index, shelf in enumerate(review.shelves):
+            for column, value in enumerate((shelf.order, shelf.site, shelf.tid, shelf.role, shelf.oam_ip, shelf.review_state)):
+                self.table.setItem(row_index, column, QTableWidgetItem(str(value)))
+        self.results.clear(); self.results.appendPlainText(f"Shelves: {len(review.shelves)}\nDeployment ready: {'Yes' if review.ready else 'No'}")
+        if review.errors: self.results.appendPlainText("\nValidation errors:\n- " + "\n- ".join(review.errors))
+        if review.warnings: self.results.appendPlainText("\nWarnings:\n- " + "\n- ".join(review.warnings))
+        if review.blockers: self.results.appendPlainText("\nDeployment blockers:\n- " + "\n- ".join(review.blockers))
+        self.status.setText("Ready for export" if review.ready else f"Review required ({len(review.errors)} error(s))")
+
+    def _save_copy(self) -> None:
+        if self.project is None:
+            self._error("No route project is loaded.", "Open a route-project JSON file first."); return
+        path, _ = QFileDialog.getSaveFileName(self, "Save route project copy", "", "Route projects (*.json)")
+        if not path: return
+        if not path.lower().endswith(".json"): path += ".json"
+        try: output = save_route_draft(self.project, path)
+        except Exception as exc:
+            self._error(str(exc), "Choose a writable destination and confirm the loaded project is structurally safe."); return
+        self.status.setText(f"Saved {output.name}")
+
+    def _validate(self) -> None:
+        if self.project is None: return
+        self._render_review()
+        try: build = evaluate_route(self.project)
+        except Exception as exc:
+            self._error(str(exc), "Review the route validation findings and exact-provider selections, then evaluate again."); return
+        if build.ready: self.results.appendPlainText(f"\nConfiguration evaluation passed: {build.config_count} complete shelf candidate(s).")
+        else: self.results.appendPlainText("\nConfiguration evaluation blocked:\n- " + "\n- ".join(build.blocking_reasons))
+
+    def _export(self) -> None:
+        if self.project is None: return
+        directory = QFileDialog.getExistingDirectory(self, "Choose route bundle output folder")
+        if not directory: return
+        self.thread = QThread(self); self.worker = RouteBundleWorker(self.project, directory); self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run); self.worker.succeeded.connect(self._exported); self.worker.failed.connect(self._export_failed); self.worker.finished.connect(self.thread.quit); self.worker.finished.connect(self.worker.deleteLater); self.thread.finished.connect(self.thread.deleteLater); self.export_button.setEnabled(False); self.status.setText("Exporting audited bundle…"); self.thread.start()
+
+    @Slot(object)
+    def _exported(self, files) -> None:
+        self.export_button.setEnabled(True); destinations = sorted({str(path.parent) for path in files.values()}); destination = destinations[0] if destinations else "the selected folder"; self.status.setText("Bundle exported"); QMessageBox.information(self, "Route bundle exported", f"The audited route bundle was exported to:\n{destination}")
+
+    @Slot(str)
+    def _export_failed(self, detail: str) -> None:
+        self.export_button.setEnabled(True); self.status.setText("Export blocked"); self._error(detail, "Resolve every validation, provider-review, fiber-review, or diagram-attachment blocker, then export again.")
