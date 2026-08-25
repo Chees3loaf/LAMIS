@@ -45,6 +45,19 @@ def _is_non_inventory_tab(name: str) -> bool:
     return False
 
 
+def _unique_display_title(label: str, used: set) -> str:
+    """Return a stable BOM column label without collapsing duplicate TIDs."""
+    if label not in used:
+        used.add(label)
+        return label
+    occurrence = 2
+    while f"{label} ({occurrence})" in used:
+        occurrence += 1
+    title = f"{label} ({occurrence})"
+    used.add(title)
+    return title
+
+
 def _resolve_hyperlink_target(cell: Any) -> Optional[str]:
     """Return the underlying sheet name a Summary cell links to, if any."""
     link = getattr(cell, "hyperlink", None)
@@ -488,14 +501,16 @@ class BomFrame(ttk.Frame):
 
         # Build the new summary_items entries from F5/F6 when
         # available, falling back to tab-name-as-name with no IP.
+        used_display_titles = {item[2] for item in summary_items}
         for tab_name in orphan_tabs:
             ws = wb[tab_name]
             ip_val = ws["F5"].value if ws["F5"].value is not None else ""
             name_val = ws["F6"].value if ws["F6"].value is not None else ""
             ip = str(ip_val).strip()
             display = str(name_val).strip() or tab_name
-            summary_items.append((ip or display, display, display))
-            display_to_tab[display] = tab_name
+            display_title = _unique_display_title(display, used_display_titles)
+            summary_items.append((ip or display, display, display_title))
+            display_to_tab[display_title] = tab_name
 
         # Rewrite the Summary sheet so the healed workbook carries the
         # full site list on disk going forward. Uses the same
@@ -558,7 +573,11 @@ class BomFrame(ttk.Frame):
         """
         items: List[Tuple[str, str, str]] = []
         display_to_tab: Dict[str, str] = {}
-        seen: set = set()
+        # Distinct device tabs can share a reported system name. Keep physical
+        # targets separate and suffix repeated display labels so downstream
+        # dictionaries cannot collapse their quantities into one BOM column.
+        seen_tabs: set = set()
+        used_display_titles: set = set()
 
         ip_re = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 
@@ -580,9 +599,9 @@ class BomFrame(ttk.Frame):
                 if s in sheetnames:
                     label_cell, label, tab = cell, s, s
                     break
-            if not label_cell or label in seen:
+            if not label_cell or tab in seen_tabs:
                 continue
-            seen.add(label)
+            seen_tabs.add(tab)
 
             ip = ""
             for cell in row:
@@ -596,8 +615,10 @@ class BomFrame(ttk.Frame):
                     ip = s
                     break
 
-            items.append((ip or label, label, label))
-            display_to_tab[label] = tab
+            display_title = _unique_display_title(label, used_display_titles)
+
+            items.append((ip or label, label, display_title))
+            display_to_tab[display_title] = tab
 
         return items, display_to_tab
 

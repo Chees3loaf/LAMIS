@@ -119,6 +119,27 @@ class TestExtractSummaryWithDottedLabels(unittest.TestCase):
         items, _ = BomFrame._extract_summary(ws, set(wb.sheetnames))
         self.assertEqual(items, [])
 
+    def test_distinct_tabs_with_same_device_name_get_unique_display_titles(self):
+        wb = openpyxl.Workbook()
+        summary = wb.active
+        summary.title = "Summary"
+        wb.create_sheet("SMTSNJ91_2")
+        wb.create_sheet("SMTSNJ91_2_2")
+        summary["C10"], summary["D10"] = "10.9.101.122", "SMTSNJ91-2"
+        summary["D10"].hyperlink = "#'SMTSNJ91_2'!A1"
+        summary["C11"], summary["D11"] = "10.9.101.123", "SMTSNJ91-2"
+        summary["D11"].hyperlink = "#'SMTSNJ91_2_2'!A1"
+
+        items, display_to_tab = BomFrame._extract_summary(
+            summary, set(wb.sheetnames)
+        )
+
+        self.assertEqual(
+            [item[2] for item in items], ["SMTSNJ91-2", "SMTSNJ91-2 (2)"]
+        )
+        self.assertEqual(display_to_tab["SMTSNJ91-2"], "SMTSNJ91_2")
+        self.assertEqual(display_to_tab["SMTSNJ91-2 (2)"], "SMTSNJ91_2_2")
+
 
 if __name__ == "__main__":
     unittest.main()

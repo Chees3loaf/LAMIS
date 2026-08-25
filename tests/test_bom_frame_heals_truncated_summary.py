@@ -215,6 +215,37 @@ class TestBomFrameHealsTruncatedSummary(unittest.TestCase):
         self.assertEqual(added, 0, "Complete Summary must add nothing")
         self.assertEqual(len(summary_items), before)
 
+    def test_duplicate_device_names_keep_separate_bom_columns_and_totals(self):
+        wb = openpyxl.Workbook()
+        summary = wb.active
+        summary.title = "Summary"
+        parts_one = [("PIM", "Shelf", "NTK805RA", "SER-1", "Power module")]
+        parts_two = parts_one + [("PIM", "Shelf", "NTK805RA", "SER-2", "Power module")]
+        _add_device_tab(wb, "SMTSNJ91_2", "10.9.101.122", "SMTSNJ91-2", parts_one)
+        _add_device_tab(wb, "SMTSNJ91_2_2", "10.9.101.123", "SMTSNJ91-2", parts_two)
+        _add_summary_row(summary, 10, 1, "10.9.101.122", "SMTSNJ91-2", "SMTSNJ91_2")
+        _add_summary_row(summary, 11, 2, "10.9.101.123", "SMTSNJ91-2", "SMTSNJ91_2_2")
+        source = os.path.join(self.tmp_dir, "duplicate_names.xlsx")
+        wb.save(source)
+        wb.close()
+
+        frame = BomFrame.__new__(BomFrame)
+        frame.gui = MagicMock()
+        frame.gui.workbook_builder = _make_builder()
+        frame._append_log = lambda _msg: None
+        output = frame._build(source)
+
+        built = openpyxl.load_workbook(output, data_only=False)
+        bom = built["Inventory by Site"]
+        # Programmatic fallback layout: header row 2, quantities from row 5.
+        self.assertEqual(bom["D2"].value, "SMTSNJ91-2")
+        self.assertEqual(bom["E2"].value, "SMTSNJ91-2 (2)")
+        self.assertEqual(bom["D5"].value, 1)
+        self.assertEqual(bom["E5"].value, 2)
+        self.assertEqual(bom["F5"].value, "=SUM(D5:E5)")
+        self.assertEqual(bom["G5"].value, "=SUM(D5,E5)")
+        built.close()
+
 
 if __name__ == "__main__":
     unittest.main()
