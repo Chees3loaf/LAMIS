@@ -13,6 +13,7 @@ from gui_qt.bom_compare_page import BomComparePage
 from gui_qt.part_lookup_page import PartLookupPage
 from gui_qt.raw_processing_page import RawProcessingPage
 from gui_qt.packing_slip_page import PackingSlipPage
+from gui_qt.sales_bom_import_page import SalesBomImportPage
 from gui_qt.main_window import AtlasPilotWindow
 
 
@@ -32,6 +33,7 @@ def test_pilot_window_constructs() -> None:
     assert isinstance(window.pages["part-lookup"], PartLookupPage)
     assert isinstance(window.pages["raw-processing"], RawProcessingPage)
     assert isinstance(window.pages["packing-slip"], PackingSlipPage)
+    assert isinstance(window.pages["sales-bom-import"], SalesBomImportPage)
     assert window.nav_buttons["overview"].isChecked()
     window.close()
 
@@ -81,6 +83,15 @@ def test_shell_navigates_to_raw_processing() -> None:
     window.show_page("raw-processing")
     assert window.page_stack.currentWidget() is window.pages["raw-processing"]
     assert window.nav_buttons["raw-processing"].isChecked()
+    window.close()
+
+
+def test_shell_navigates_to_sales_bom_import() -> None:
+    _application()
+    window = AtlasPilotWindow()
+    window.show_page("sales-bom-import")
+    assert window.page_stack.currentWidget() is window.pages["sales-bom-import"]
+    assert window.nav_buttons["sales-bom-import"].isChecked()
     window.close()
 
 

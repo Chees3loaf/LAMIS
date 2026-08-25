@@ -10,6 +10,7 @@ from gui_qt.bom_build_page import BomBuildPage
 from gui_qt.bom_compare_page import BomComparePage
 from gui_qt.part_lookup_page import PartLookupPage
 from gui_qt.raw_processing_page import RawProcessingPage
+from gui_qt.sales_bom_import_page import SalesBomImportPage
 from gui_qt.packing_slip_page import PackingSlipPage
 from gui_qt.pages import OverviewPage, PlannedPage
 
@@ -28,6 +29,7 @@ class AtlasPilotWindow(QMainWindow):
             "bom-compare": BomComparePage(),
             "part-lookup": PartLookupPage(),
             "raw-processing": RawProcessingPage(),
+            "sales-bom-import": SalesBomImportPage(),
             "inventory": PlannedPage("Inventory"),
             "diagnostics": PlannedPage("Diagnostics"),
             "packing-slip": PackingSlipPage(),
@@ -83,7 +85,7 @@ class AtlasPilotWindow(QMainWindow):
         self._add_nav_button(layout, "Build / Refresh BOM", "bom-build")
         self._add_nav_button(layout, "Compare BOMs", "bom-compare")
         self._add_nav_button(layout, "Raw Processing", "raw-processing")
-        self._add_nav_button(layout, "More tools", "file-processing", available=False)
+        self._add_nav_button(layout, "Sales BOM Import", "sales-bom-import")
         layout.addSpacing(14)
         self._add_section_label(layout, "TOOLS")
         self._add_nav_button(layout, "Part Lookup", "part-lookup")

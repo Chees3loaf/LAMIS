@@ -2,8 +2,8 @@
 
 ATLAS currently keeps its production Tkinter interface as the default. The
 PySide6 proof of concept is an opt-in ATLAS navigation shell with a working
-Asset Import, BOM Build/Refresh, Raw Processing, Packing Slip Generator, and
-Part Lookup pages that share production logic through UI-independent
+Asset Import, BOM Build/Refresh, BOM Compare, Raw Processing, Sales BOM Import,
+Packing Slip Generator, and Part Lookup pages that share production logic through UI-independent
 boundaries. Workflows that have not been migrated are visibly disabled.
 
 ## Run the pilot
@@ -21,6 +21,9 @@ asset tags and customer purchase-order values.
 Packing Slip Generator supports both a workbook containing individual device
 sheets and a consolidated single-sheet output. Device counts exclude Summary
 and aggregate BOM sheets.
+
+Sales BOM Import supports multi-select worksheet input and merges selected
+sheets into one per-site output workbook.
 
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.

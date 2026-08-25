@@ -46,6 +46,7 @@ class OverviewPage(QWidget):
             ("Compare BOMs", "Compare live inventory to a Sales BOM and produce traceable shortfalls.", "bom-compare", True),
             ("Part Lookup", "Search the runtime parts database by complete or partial SKU.", "part-lookup", True),
             ("Raw Processing", "Convert captured CLI transcripts into a Device Report.", "raw-processing", True),
+            ("Sales BOM Import", "Turn selected Sales BOM sheets into per-site packing workbooks.", "sales-bom-import", True),
             ("Packing Slips", "Generate packing-slip workbooks from inventory files.", "packing-slip", True),
             ("Inventory", "Collect and assemble network inventory workbooks.", "inventory", False),
             ("Diagnostics", "Run TDS and Nokia network-audit workflows.", "diagnostics", False),
