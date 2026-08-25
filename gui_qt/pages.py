@@ -34,8 +34,8 @@ class OverviewPage(QWidget):
         heading.setObjectName("pageHeading")
         intro = QLabel(
             "The PySide6 migration is being introduced workflow by workflow. "
-            "Asset Import is ready for evaluation; the production Tkinter "
-            "application remains available for every other operation."
+            "Core file-processing workflows are ready for evaluation; the "
+            "production Tkinter application remains available during migration."
         )
         intro.setWordWrap(True)
         intro.setObjectName("pageIntro")
@@ -43,6 +43,7 @@ class OverviewPage(QWidget):
         definitions = (
             ("Asset Import", "Apply ASN asset tags and customer purchase orders with an automatic backup.", "asset-import", True),
             ("Build / Refresh BOM", "Create an Inventory by Site BOM from an inventory workbook.", "bom-build", True),
+            ("Compare BOMs", "Compare live inventory to a Sales BOM and produce traceable shortfalls.", "bom-compare", True),
             ("Part Lookup", "Search the runtime parts database by complete or partial SKU.", "part-lookup", True),
             ("Raw Processing", "Convert captured CLI transcripts into a Device Report.", "raw-processing", True),
             ("Packing Slips", "Generate packing-slip workbooks from inventory files.", "packing-slip", True),

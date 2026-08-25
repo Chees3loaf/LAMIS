@@ -535,7 +535,12 @@ class BomCompareFrame(ttk.Frame):
     # Core compare
     # ------------------------------------------------------------------
 
-    def _compare(self, factory_path: str, sales_path: str) -> str:
+    def _compare(
+        self,
+        factory_path: str,
+        sales_path: str,
+        output_path: Optional[str] = None,
+    ) -> str:
         self._append_log(f"Loading Factory: {factory_path}")
         # data_only=True returns the LAST CACHED VALUE Excel wrote for
         # every formula cell, instead of the formula string itself. We
@@ -940,7 +945,7 @@ class BomCompareFrame(ttk.Frame):
         leftover = [n for n in out_wb.sheetnames if n not in present]
         out_wb._sheets = [out_wb[n] for n in present + leftover]
 
-        out_path = self._derive_out_path(factory_path)
+        out_path = output_path or self._derive_out_path(factory_path)
         out_wb.save(out_path)
         return out_path
 

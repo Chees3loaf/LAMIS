@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QPushBut
 import config
 from gui_qt.asset_import_page import AssetImportPage
 from gui_qt.bom_build_page import BomBuildPage
+from gui_qt.bom_compare_page import BomComparePage
 from gui_qt.part_lookup_page import PartLookupPage
 from gui_qt.raw_processing_page import RawProcessingPage
 from gui_qt.packing_slip_page import PackingSlipPage
@@ -24,6 +25,7 @@ class AtlasPilotWindow(QMainWindow):
             "overview": OverviewPage(),
             "asset-import": AssetImportPage(),
             "bom-build": BomBuildPage(),
+            "bom-compare": BomComparePage(),
             "part-lookup": PartLookupPage(),
             "raw-processing": RawProcessingPage(),
             "inventory": PlannedPage("Inventory"),
@@ -79,6 +81,7 @@ class AtlasPilotWindow(QMainWindow):
         self._add_section_label(layout, "FILE PROCESSING")
         self._add_nav_button(layout, "Asset Import", "asset-import")
         self._add_nav_button(layout, "Build / Refresh BOM", "bom-build")
+        self._add_nav_button(layout, "Compare BOMs", "bom-compare")
         self._add_nav_button(layout, "Raw Processing", "raw-processing")
         self._add_nav_button(layout, "More tools", "file-processing", available=False)
         layout.addSpacing(14)
