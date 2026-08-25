@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import os
+from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel
 
 from gui_qt.asset_import_page import AssetImportPage
 from gui_qt.bom_build_page import BomBuildPage
@@ -96,6 +97,31 @@ def test_inventory_network_mode_hides_irrelevant_direct_fields() -> None:
     assert page.connection_form.isRowVisible(page.script_combo)
     assert page.connection_form.isRowVisible(page.target_edit)
     assert not page.connection_form.isRowVisible(page.baud_combo)
+    page.close()
+
+
+def test_inventory_new_report_clears_previous_append_target() -> None:
+    _application()
+    page = InventoryPage()
+    page._append_mode = True
+    page.output_edit.setText("existing.xlsx")
+    page.report_mode_label.setText("Append to existing.xlsx")
+    page._new_report()
+    assert not page._append_mode
+    assert not page.output_edit.text()
+    assert page.report_mode_label.text() == "New report"
+    page.close()
+
+
+def test_inventory_run_prompts_for_missing_new_report_destination() -> None:
+    _application()
+    page = InventoryPage()
+    page.customer_edit.setText("RPA")
+    page.project_edit.setText("Task Order 3")
+    with patch.object(QFileDialog, "getSaveFileName", return_value=("C:/tmp/inventory.xlsx", "")):
+        assert page._choose_output()
+    assert page.output_edit.text() == "C:/tmp/inventory.xlsx"
+    assert not page._append_mode
     page.close()
 
 

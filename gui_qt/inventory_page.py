@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from pathlib import Path
 from queue import Queue
 import threading
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGroupBox, QH
 import config
 from services.inventory_direct_service import DirectInventoryRequest, InventoryRunControl, LAN_SCRIPTS, NetworkInventoryRequest, SERIAL_SCRIPTS, combine_network_ranges, expand_network_range, run_direct_inventory, run_network_inventory
 from utils.workbook_metadata import extract_workbook_metadata
+from utils.helpers import sanitize_filename_component
 
 
 class InventoryWorker(QObject):
@@ -128,7 +130,7 @@ class InventoryPage(QWidget):
         append = QPushButton("Append existing…")
         append.clicked.connect(self._browse_append)
         clear = QPushButton("New report")
-        clear.clicked.connect(self._clear_append)
+        clear.clicked.connect(self._new_report)
         output_layout.addWidget(self.output_edit, 1)
         output_layout.addWidget(save)
         output_layout.addWidget(append)
@@ -257,10 +259,24 @@ class InventoryPage(QWidget):
 
     @Slot()
     def _browse_output(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(self, "Save inventory report", self.output_edit.text(), "Excel workbooks (*.xlsx)")
+        self._choose_output()
+
+    def _suggested_output_name(self) -> str:
+        customer = sanitize_filename_component(self.customer_edit.text(), fallback="Customer")
+        project = sanitize_filename_component(self.project_edit.text(), fallback="Project")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
+        return f"ATLAS_{customer}_{project}_Inventory_{timestamp}.xlsx"
+
+    def _choose_output(self) -> bool:
+        suggested = self.output_edit.text().strip() or self._suggested_output_name()
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save inventory report", suggested, "Excel workbooks (*.xlsx)"
+        )
         if path:
             self.output_edit.setText(path if path.lower().endswith(".xlsx") else path + ".xlsx")
-            self._clear_append()
+            self._set_new_report(clear_output=False)
+            return True
+        return False
 
     @Slot()
     def _browse_append(self) -> None:
@@ -281,15 +297,28 @@ class InventoryPage(QWidget):
         self.so_edit.setText(metadata.get("so", ""))
 
     @Slot()
-    def _clear_append(self) -> None:
+    def _set_new_report(self, *, clear_output: bool) -> None:
         self._append_mode = False
         self.report_mode_label.setText("New report")
+        if clear_output:
+            self.output_edit.clear()
+
+    @Slot()
+    def _new_report(self) -> None:
+        self._set_new_report(clear_output=True)
 
     @Slot()
     def _start(self) -> None:
+        if not self._append_mode and not self.output_edit.text().strip():
+            if not self._choose_output():
+                return
+        output_path = Path(self.output_edit.text().strip())
+        if output_path.suffix.lower() != ".xlsx":
+            QMessageBox.warning(self, "Inventory", "Choose an .xlsx output file.")
+            return
         try:
             common = dict(
-                output_path=Path(self.output_edit.text().strip()),
+                output_path=output_path,
                 customer=self.customer_edit.text(), project=self.project_edit.text(),
                 purchase_order=self.po_edit.text(), sales_order=self.so_edit.text(),
                 append_mode=self._append_mode,
