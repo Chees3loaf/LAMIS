@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QFileDialog, QLabel
+from PySide6.QtWidgets import QApplication, QFileDialog, QLabel, QMessageBox
 
 from gui_qt.asset_import_page import AssetImportPage
 from gui_qt.bom_build_page import BomBuildPage
@@ -122,6 +122,26 @@ def test_inventory_run_prompts_for_missing_new_report_destination() -> None:
         assert page._choose_output()
     assert page.output_edit.text() == "C:/tmp/inventory.xlsx"
     assert not page._append_mode
+    page.close()
+
+
+def test_inventory_runtime_popup_includes_actual_error_and_action() -> None:
+    _application()
+    page = InventoryPage()
+    with patch.object(QMessageBox, "critical") as critical:
+        page._on_failure("No reachable devices were found")
+    popup_text = critical.call_args.args[2]
+    assert "Error: No reachable devices were found" in popup_text
+    assert "What to do:" in popup_text
+    page.close()
+
+
+def test_inventory_empty_worker_error_still_has_a_reason() -> None:
+    _application()
+    page = InventoryPage()
+    with patch.object(QMessageBox, "critical") as critical:
+        page._on_failure("")
+    assert "without an error description" in critical.call_args.args[2]
     page.close()
 
 

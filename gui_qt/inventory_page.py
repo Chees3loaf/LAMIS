@@ -183,6 +183,21 @@ class InventoryPage(QWidget):
         layout.addWidget(self.log, 1)
         self._mode_changed("Network")
 
+    def _show_problem(
+        self,
+        title: str,
+        detail: str,
+        action: str,
+        *,
+        critical: bool = False,
+    ) -> None:
+        reason = str(detail or "Unknown error").strip()
+        message = f"Error: {reason}\n\nWhat to do: {action}"
+        if critical:
+            QMessageBox.critical(self, title, message)
+        else:
+            QMessageBox.warning(self, title, message)
+
     def _range_row(self, number: int):
         card = QWidget()
         card_layout = QVBoxLayout(card)
@@ -290,6 +305,11 @@ class InventoryPage(QWidget):
             metadata = extract_workbook_metadata(path)
         except Exception as exc:
             logging.warning("Inventory metadata extraction failed: %s", exc)
+            self._show_problem(
+                "Could not read report metadata",
+                str(exc),
+                "Verify that the workbook is a valid ATLAS report and is not open or locked, then try again.",
+            )
             return
         self.customer_edit.setText(metadata.get("customer", ""))
         self.project_edit.setText(metadata.get("project", ""))
@@ -314,7 +334,11 @@ class InventoryPage(QWidget):
                 return
         output_path = Path(self.output_edit.text().strip())
         if output_path.suffix.lower() != ".xlsx":
-            QMessageBox.warning(self, "Inventory", "Choose an .xlsx output file.")
+            self._show_problem(
+                "Inventory input error",
+                "The selected output is not an .xlsx workbook.",
+                "Click Save as… and choose an Excel .xlsx destination.",
+            )
             return
         try:
             common = dict(
@@ -342,7 +366,11 @@ class InventoryPage(QWidget):
                     **common,
                 )
         except Exception as exc:
-            QMessageBox.warning(self, "Inventory", str(exc))
+            self._show_problem(
+                "Inventory input error",
+                str(exc),
+                "Correct the highlighted connection, IP-range, report, or metadata values and run Inventory again.",
+            )
             return
         control = InventoryRunControl()
         thread = QThread(self)
@@ -420,15 +448,23 @@ class InventoryPage(QWidget):
                 lines.append(f"…and {remaining} more; see the activity log.")
             QMessageBox.warning(
                 self, "Some devices failed",
-                f"{len(failed)} device(s) did not return inventory data.\n\n" + "\n".join(lines),
+                f"Error: {len(failed)} device(s) did not return inventory data.\n\n"
+                + "\n".join(lines)
+                + "\n\nWhat to do: Correct the listed reachability, management-access, or credential errors and rerun those devices.",
             )
 
     @Slot(str)
     def _on_failure(self, message: str) -> None:
-        self.log.appendPlainText(f"ERROR: {message}")
-        self.status_label.setText("Aborted" if "aborted" in message.lower() else "Failed")
-        if "aborted" not in message.lower():
-            QMessageBox.critical(self, "Inventory failed", message)
+        detail = str(message or "The inventory worker stopped without an error description.").strip()
+        self.log.appendPlainText(f"ERROR: {detail}")
+        self.status_label.setText("Aborted" if "aborted" in detail.lower() else "Failed")
+        if "aborted" not in detail.lower():
+            self._show_problem(
+                "Inventory failed",
+                detail,
+                "Review the activity log for the affected address, correct the reported issue, and run Inventory again.",
+                critical=True,
+            )
 
     @Slot()
     def _on_finished(self) -> None:
