@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QPushBut
 import config
 from gui_qt.asset_import_page import AssetImportPage
 from gui_qt.bom_build_page import BomBuildPage
+from gui_qt.part_lookup_page import PartLookupPage
 from gui_qt.pages import OverviewPage, PlannedPage
 
 
@@ -21,6 +22,7 @@ class AtlasPilotWindow(QMainWindow):
             "overview": OverviewPage(),
             "asset-import": AssetImportPage(),
             "bom-build": BomBuildPage(),
+            "part-lookup": PartLookupPage(),
             "inventory": PlannedPage("Inventory"),
             "diagnostics": PlannedPage("Diagnostics"),
             "packing-slip": PlannedPage("Packing Slip Generator"),
@@ -75,6 +77,9 @@ class AtlasPilotWindow(QMainWindow):
         self._add_nav_button(layout, "Asset Import", "asset-import")
         self._add_nav_button(layout, "Build / Refresh BOM", "bom-build")
         self._add_nav_button(layout, "More tools", "file-processing", available=False)
+        layout.addSpacing(14)
+        self._add_section_label(layout, "TOOLS")
+        self._add_nav_button(layout, "Part Lookup", "part-lookup")
         layout.addStretch(1)
         pilot = QLabel("PYSIDE6 PILOT")
         pilot.setObjectName("pilotBadge")
