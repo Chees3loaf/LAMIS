@@ -54,6 +54,13 @@ incomplete topology leaves the current route unchanged. Accepted drafts retain
 hash-only provenance in JSON and session-only pixels for the Diagram worksheet.
 Saved projects can reattach the exact original locally without AI processing.
 
+Software Upgrades supports Ciena RLS, Ciena Waveserver 5, Nokia G42, Nokia
+PSI, and Nokia PSS. Qt preserves temporary wired-NIC addressing, byte-level
+HTTP transfer progress, device-specific execution, cooperative Stop, automatic
+server shutdown, and DHCP/DNS restoration. PSI/PSS inputs must contain an
+unzipped release beneath `CC/`; Waveserver 5 retains its serial-plus-DCN
+preflight requirements.
+
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.
 
