@@ -4,12 +4,15 @@ from __future__ import annotations
 from datetime import datetime
 import logging
 from pathlib import Path
+from queue import Queue
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout, QWidget
 
 from services.network_audit_service import NetworkAuditRequest, run_network_audit, validate_network_audit_request
+from services.tds_service import TdsRequest, run_tds, validate_tds_request
 from utils.credentials import get_default_credential_for_vendor
+from utils.helpers import ensure_host_key_known, set_host_key_prompt
 
 
 class NetworkAuditWorker(QObject):
@@ -31,6 +34,56 @@ class NetworkAuditWorker(QObject):
             self.failed.emit(str(exc) or exc.__class__.__name__)
         else:
             self.succeeded.emit(str(output))
+        finally:
+            self.finished.emit()
+
+
+class TdsWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    credentials_requested = Signal(str)
+    host_key_requested = Signal(str, str, str)
+    finished = Signal()
+
+    def __init__(self, request: TdsRequest) -> None:
+        super().__init__()
+        self.request = request
+        self._credential_response: Queue = Queue(maxsize=1)
+        self._host_key_response: Queue = Queue(maxsize=1)
+
+    def submit_credentials(self, credentials: tuple[str, str] | None) -> None:
+        self._credential_response.put(credentials)
+
+    def submit_host_key(self, accepted: bool) -> None:
+        self._host_key_response.put(accepted)
+
+    def _request_credentials(self, host: str) -> tuple[str, str] | None:
+        self.credentials_requested.emit(host)
+        return self._credential_response.get()
+
+    def _host_key_prompt(self, hostname: str, key_type: str, fingerprint: str) -> bool:
+        self.host_key_requested.emit(hostname, key_type, fingerprint)
+        return bool(self._host_key_response.get())
+
+    def _verify_host_key(self, host: str) -> bool:
+        set_host_key_prompt(self._host_key_prompt)
+        try:
+            return ensure_host_key_known(host)
+        finally:
+            set_host_key_prompt(None)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            outcome = run_tds(
+                self.request, request_credentials=self._request_credentials,
+                verify_host_key=self._verify_host_key,
+            )
+        except Exception as exc:
+            logging.exception("Qt TDS failed")
+            self.failed.emit(str(exc) or exc.__class__.__name__)
+        else:
+            self.succeeded.emit(outcome)
         finally:
             self.finished.emit()
 
@@ -166,18 +219,146 @@ class NetworkAuditPage(QWidget):
         self._thread = self._worker = None
 
 
+class TdsPage(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._thread: QThread | None = None
+        self._worker: TdsWorker | None = None
+
+        config_box = QGroupBox("TDS diagnostics")
+        form = QFormLayout(config_box)
+        self.host_edit = QLineEdit()
+        self.host_edit.setPlaceholderText("Device IP address or hostname")
+        self.platform_combo = QComboBox()
+        self.platform_combo.addItems(["RLS", "6500"])
+        self.file_name_edit = QLineEdit()
+        self.file_name_edit.setPlaceholderText("Diagnostic output file name")
+        default = get_default_credential_for_vendor("ciena")
+        credential_hint = QLabel(
+            f"Login: {default[0]} (Ciena default; prompts on failure)"
+            if default else "Login: prompts on connect because no default is available"
+        )
+        credential_hint.setObjectName("mutedText")
+        form.addRow("IP address / hostname", self.host_edit)
+        form.addRow("Platform", self.platform_combo)
+        form.addRow("File name", self.file_name_edit)
+        form.addRow("Credentials", credential_hint)
+
+        controls = QHBoxLayout()
+        self.run_button = QPushButton("Run TDS Diagnostics")
+        self.run_button.clicked.connect(self._start)
+        self.status_label = QLabel("Ready")
+        controls.addWidget(self.run_button)
+        controls.addWidget(self.status_label, 1)
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(config_box)
+        layout.addLayout(controls)
+        layout.addWidget(self.log, 1)
+
+    def _show_error(self, detail: str, action: str) -> None:
+        QMessageBox.critical(
+            self, "TDS error",
+            f"Error: {detail or 'Unknown error'}\n\nWhat to do: {action}",
+        )
+
+    @Slot()
+    def _start(self) -> None:
+        request = TdsRequest(
+            host=self.host_edit.text().strip(),
+            platform=self.platform_combo.currentText().lower(),
+            file_name=self.file_name_edit.text().strip(),
+        )
+        try:
+            validate_tds_request(request)
+        except Exception as exc:
+            self._show_error(
+                str(exc),
+                "Correct the device address, platform, or output file name and run TDS again.",
+            )
+            return
+        self.log.clear()
+        self.run_button.setEnabled(False)
+        self.status_label.setText("Running…")
+        thread = QThread(self)
+        worker = TdsWorker(request)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.credentials_requested.connect(self._prompt_credentials)
+        worker.host_key_requested.connect(self._prompt_host_key)
+        worker.succeeded.connect(self._on_success)
+        worker.failed.connect(self._on_failure)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_finished)
+        self._thread, self._worker = thread, worker
+        thread.start()
+
+    @Slot(str)
+    def _prompt_credentials(self, host: str) -> None:
+        worker = self._worker
+        if worker is None:
+            return
+        username, accepted = QInputDialog.getText(self, "TDS credentials", f"Username for {host}:")
+        if not accepted or not username.strip():
+            worker.submit_credentials(None)
+            return
+        password, accepted = QInputDialog.getText(
+            self, "TDS credentials", f"Password for {host}:",
+            QLineEdit.EchoMode.Password,
+        )
+        worker.submit_credentials((username.strip(), password) if accepted else None)
+
+    @Slot(str, str, str)
+    def _prompt_host_key(self, host: str, key_type: str, fingerprint: str) -> None:
+        accepted = QMessageBox.question(
+            self,
+            "Verify SSH host key",
+            f"Host: {host}\nKey type: {key_type}\nFingerprint: {fingerprint}\n\n"
+            "Trust and save this host key?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) == QMessageBox.StandardButton.Yes
+        if self._worker is not None:
+            self._worker.submit_host_key(accepted)
+
+    @Slot(object)
+    def _on_success(self, outcome) -> None:
+        if outcome.output:
+            self.log.setPlainText(outcome.output)
+        self.status_label.setText("Done")
+        QMessageBox.information(self, "TDS complete", f"Diagnostics completed for {outcome.host}.")
+
+    @Slot(str)
+    def _on_failure(self, detail: str) -> None:
+        self.log.appendPlainText(f"ERROR: {detail}")
+        self.status_label.setText("Failed")
+        self._show_error(
+            detail,
+            "Review the diagnostic output, verify connectivity and credentials, then run TDS again.",
+        )
+
+    @Slot()
+    def _on_finished(self) -> None:
+        self.run_button.setEnabled(True)
+        self._thread = self._worker = None
+
+
 class DiagnosticsPage(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         heading = QLabel("Diagnostics")
         heading.setObjectName("pageHeading")
-        intro = QLabel("Run topology-aware network audits. TDS migration is the next Diagnostics slice.")
+        intro = QLabel("Run single-device TDS diagnostics and topology-aware network audits.")
         intro.setObjectName("pageIntro")
         tabs = QTabWidget()
-        tabs.addTab(NetworkAuditPage(), "Network Audit")
-        tds_pending = QLabel("TDS is being migrated next; use the Tkinter interface for TDS until then.")
-        tds_pending.setWordWrap(True)
-        tabs.addTab(tds_pending, "TDS — migration pending")
+        self.tds_page = TdsPage()
+        self.network_audit_page = NetworkAuditPage()
+        tabs.addTab(self.tds_page, "TDS")
+        tabs.addTab(self.network_audit_page, "Network Audit")
         layout = QVBoxLayout(self)
         layout.addWidget(heading)
         layout.addWidget(intro)
