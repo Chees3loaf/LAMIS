@@ -94,12 +94,16 @@ class InventoryPage(QWidget):
 
         connection = QGroupBox("Connection")
         connection_form = QFormLayout(connection)
+        self.connection_form = connection_form
         self.mode_combo = QComboBox()
+        self.mode_combo.setMinimumHeight(30)
         self.mode_combo.addItems(["Network", "LAN", "Serial"])
         self.mode_combo.currentTextChanged.connect(self._mode_changed)
         self.script_combo = QComboBox()
+        self.script_combo.setMinimumHeight(30)
         self.target_edit = QLineEdit()
         self.baud_combo = QComboBox()
+        self.baud_combo.setMinimumHeight(30)
         self.baud_combo.addItems(["9600", "19200", "38400", "57600", "115200"])
         connection_form.addRow("Connection type", self.mode_combo)
         connection_form.addRow("Device family", self.script_combo)
@@ -107,6 +111,7 @@ class InventoryPage(QWidget):
         connection_form.addRow("Baud rate", self.baud_combo)
 
         self.ranges_box = QGroupBox("Pod / Lab ranges")
+        self.ranges_box.setMinimumHeight(155)
         ranges_layout = QHBoxLayout(self.ranges_box)
         self.range_controls = [self._range_row(1), self._range_row(2)]
         ranges_layout.addWidget(self.range_controls[0][0], 1)
@@ -182,19 +187,23 @@ class InventoryPage(QWidget):
         card_layout.setContentsMargins(4, 2, 4, 2)
 
         pod_box = QGroupBox(f"Pod Selection {number}")
+        pod_box.setMinimumHeight(62)
         pod_layout = QHBoxLayout(pod_box)
         pod_layout.addWidget(QLabel("Pod:"))
         pod = QComboBox()
         pod.addItems([f"Pod {number}" for number in range(1, config.POD_COUNT + 1)] + [config.LAB_LABEL])
         pod.setMinimumWidth(125)
+        pod.setMinimumHeight(30)
         pod_layout.addWidget(pod)
         pod_layout.addStretch(1)
 
         ip_box = QGroupBox(f"IP Selection {number}" + (" (Optional)" if number == 2 else ""))
+        ip_box.setMinimumHeight(68)
         ip_layout = QHBoxLayout(ip_box)
         start_third, start_host, end_third, end_host = (QLineEdit() for _ in range(4))
         for edit in (start_third, start_host, end_third, end_host):
             edit.setMaximumWidth(48)
+            edit.setMinimumHeight(30)
         start_host.setPlaceholderText("host")
         end_host.setPlaceholderText("host")
         start_third.setPlaceholderText("3rd")
@@ -240,6 +249,9 @@ class InventoryPage(QWidget):
         self.script_combo.setEnabled(not network)
         self.target_edit.setEnabled(not network)
         self.baud_combo.setEnabled(mode == "Serial")
+        self.connection_form.setRowVisible(self.script_combo, not network)
+        self.connection_form.setRowVisible(self.target_edit, not network)
+        self.connection_form.setRowVisible(self.baud_combo, mode == "Serial")
         self.ranges_box.setVisible(network)
         self.target_edit.setPlaceholderText("Example: 10.0.0.1" if mode != "Serial" else "Example: COM3")
 

@@ -83,6 +83,22 @@ def test_inventory_pod_selector_updates_visible_ip_prefix() -> None:
     page.close()
 
 
+def test_inventory_network_mode_hides_irrelevant_direct_fields() -> None:
+    _application()
+    page = InventoryPage()
+    assert page.mode_combo.minimumHeight() == 30
+    assert page.range_controls[0][1].minimumHeight() == 30
+    assert not page.connection_form.isRowVisible(page.script_combo)
+    assert not page.connection_form.isRowVisible(page.target_edit)
+    assert not page.connection_form.isRowVisible(page.baud_combo)
+
+    page.mode_combo.setCurrentText("LAN")
+    assert page.connection_form.isRowVisible(page.script_combo)
+    assert page.connection_form.isRowVisible(page.target_edit)
+    assert not page.connection_form.isRowVisible(page.baud_combo)
+    page.close()
+
+
 def test_shell_navigates_to_bom_build() -> None:
     _application()
     window = AtlasPilotWindow()
