@@ -9,6 +9,7 @@ from gui_qt.asset_import_page import AssetImportPage
 from gui_qt.bom_build_page import BomBuildPage
 from gui_qt.part_lookup_page import PartLookupPage
 from gui_qt.raw_processing_page import RawProcessingPage
+from gui_qt.packing_slip_page import PackingSlipPage
 from gui_qt.pages import OverviewPage, PlannedPage
 
 
@@ -27,7 +28,7 @@ class AtlasPilotWindow(QMainWindow):
             "raw-processing": RawProcessingPage(),
             "inventory": PlannedPage("Inventory"),
             "diagnostics": PlannedPage("Diagnostics"),
-            "packing-slip": PlannedPage("Packing Slip Generator"),
+            "packing-slip": PackingSlipPage(),
             "file-processing": PlannedPage("File Processing"),
             "provisioning": PlannedPage("Provisioning"),
             "upgrades": PlannedPage("Software Upgrades"),
@@ -71,7 +72,7 @@ class AtlasPilotWindow(QMainWindow):
         self._add_section_label(layout, "WORKFLOWS")
         self._add_nav_button(layout, "Inventory", "inventory", available=False)
         self._add_nav_button(layout, "Diagnostics", "diagnostics", available=False)
-        self._add_nav_button(layout, "Packing Slips", "packing-slip", available=False)
+        self._add_nav_button(layout, "Packing Slips", "packing-slip")
         self._add_nav_button(layout, "Provisioning", "provisioning", available=False)
         self._add_nav_button(layout, "Software Upgrades", "upgrades", available=False)
         layout.addSpacing(14)
