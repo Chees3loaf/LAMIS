@@ -5,7 +5,7 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from gui_qt.asset_import_page import AssetImportPage
 from gui_qt.bom_build_page import BomBuildPage
@@ -61,6 +61,26 @@ def test_shell_navigates_to_inventory() -> None:
     assert window.pages["inventory"].mode_combo.currentText() == "Network"
     assert not window.pages["inventory"].ranges_box.isHidden()
     window.close()
+
+
+def test_inventory_pod_selector_updates_visible_ip_prefix() -> None:
+    _application()
+    page = InventoryPage()
+    _card, pod, start_third, _start_host, end_third, _end_host = page.range_controls[0]
+    pod.setCurrentText("Pod 2")
+    labels = {label.text() for label in page.findChildren(QLabel)}
+    assert "Start IP: 172.21.102." in labels
+    assert "End IP: 172.21.102." in labels
+    assert start_third.isHidden()
+    assert end_third.isHidden()
+
+    pod.setCurrentText("Lab")
+    labels = {label.text() for label in page.findChildren(QLabel)}
+    assert "Start IP: 10.9." in labels
+    assert "End IP: 10.9." in labels
+    assert not start_third.isHidden()
+    assert not end_third.isHidden()
+    page.close()
 
 
 def test_shell_navigates_to_bom_build() -> None:

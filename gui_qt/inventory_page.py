@@ -83,11 +83,11 @@ class InventoryPage(QWidget):
         self._control: InventoryRunControl | None = None
         self._append_mode = False
 
-        heading = QLabel("Inventory — Direct Connection")
+        heading = QLabel("Inventory")
         heading.setObjectName("pageHeading")
         intro = QLabel(
-            "Collect live inventory from one LAN or serial-connected device. "
-            "Concurrent Pod/Lab network scanning is the next migration stage."
+            "Collect live inventory across Pod/Lab ranges or from one directly "
+            "connected LAN or serial device."
         )
         intro.setObjectName("pageIntro")
         intro.setWordWrap(True)
@@ -107,10 +107,10 @@ class InventoryPage(QWidget):
         connection_form.addRow("Baud rate", self.baud_combo)
 
         self.ranges_box = QGroupBox("Pod / Lab ranges")
-        ranges_form = QFormLayout(self.ranges_box)
+        ranges_layout = QHBoxLayout(self.ranges_box)
         self.range_controls = [self._range_row(1), self._range_row(2)]
-        ranges_form.addRow("IP Selection 1", self.range_controls[0][0])
-        ranges_form.addRow("IP Selection 2 (optional)", self.range_controls[1][0])
+        ranges_layout.addWidget(self.range_controls[0][0], 1)
+        ranges_layout.addWidget(self.range_controls[1][0], 1)
 
         report = QGroupBox("Report")
         report_form = QFormLayout(report)
@@ -176,35 +176,60 @@ class InventoryPage(QWidget):
         layout.addWidget(self.log, 1)
         self._mode_changed("Network")
 
-    def _range_row(self, _number: int):
-        row = QWidget()
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(0, 0, 0, 0)
+    def _range_row(self, number: int):
+        card = QWidget()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(4, 2, 4, 2)
+
+        pod_box = QGroupBox(f"Pod Selection {number}")
+        pod_layout = QHBoxLayout(pod_box)
+        pod_layout.addWidget(QLabel("Pod:"))
         pod = QComboBox()
         pod.addItems([f"Pod {number}" for number in range(1, config.POD_COUNT + 1)] + [config.LAB_LABEL])
+        pod.setMinimumWidth(125)
+        pod_layout.addWidget(pod)
+        pod_layout.addStretch(1)
+
+        ip_box = QGroupBox(f"IP Selection {number}" + (" (Optional)" if number == 2 else ""))
+        ip_layout = QHBoxLayout(ip_box)
         start_third, start_host, end_third, end_host = (QLineEdit() for _ in range(4))
         for edit in (start_third, start_host, end_third, end_host):
-            edit.setMaximumWidth(55)
-        start_host.setPlaceholderText("start")
-        end_host.setPlaceholderText("end")
+            edit.setMaximumWidth(48)
+        start_host.setPlaceholderText("host")
+        end_host.setPlaceholderText("host")
         start_third.setPlaceholderText("3rd")
         end_third.setPlaceholderText("3rd")
-        layout.addWidget(pod)
-        layout.addWidget(QLabel("Start"))
-        layout.addWidget(start_third)
-        layout.addWidget(start_host)
-        layout.addWidget(QLabel("End"))
-        layout.addWidget(end_third)
-        layout.addWidget(end_host)
-        layout.addStretch(1)
+        start_prefix = QLabel()
+        end_prefix = QLabel()
+        start_dot = QLabel(".")
+        end_dot = QLabel(".")
+        ip_layout.addWidget(start_prefix)
+        ip_layout.addWidget(start_third)
+        ip_layout.addWidget(start_dot)
+        ip_layout.addWidget(start_host)
+        ip_layout.addSpacing(10)
+        ip_layout.addWidget(end_prefix)
+        ip_layout.addWidget(end_third)
+        ip_layout.addWidget(end_dot)
+        ip_layout.addWidget(end_host)
+        ip_layout.addStretch(1)
+        card_layout.addWidget(pod_box)
+        card_layout.addWidget(ip_box)
 
         def update_third(selection: str) -> None:
-            enabled = selection == config.LAB_LABEL
-            start_third.setEnabled(enabled)
-            end_third.setEnabled(enabled)
+            lab = selection == config.LAB_LABEL
+            if lab:
+                prefix = config.LAB_NETWORK_PREFIX
+            else:
+                pod_number = int(selection.removeprefix("Pod "))
+                prefix = f"{config.POD_NETWORK_PREFIX}.{config.POD_THIRD_OCTET_BASE + pod_number}"
+            start_prefix.setText(f"Start IP: {prefix}.")
+            end_prefix.setText(f"End IP: {prefix}.")
+            for widget in (start_third, end_third, start_dot, end_dot):
+                widget.setVisible(lab)
         pod.currentTextChanged.connect(update_third)
         update_third(pod.currentText())
-        return row, pod, start_third, start_host, end_third, end_host
+        return card, pod, start_third, start_host, end_third, end_host
 
     @Slot(str)
     def _mode_changed(self, mode: str) -> None:
