@@ -49,7 +49,7 @@ class OverviewPage(QWidget):
             ("Sales BOM Import", "Turn selected Sales BOM sheets into per-site packing workbooks.", "sales-bom-import", True),
             ("Packing Slips", "Generate packing-slip workbooks from inventory files.", "packing-slip", True),
             ("Inventory", "Collect live LAN or serial inventory into report workbooks.", "inventory", True),
-            ("Diagnostics", "Run TDS and Nokia network-audit workflows.", "diagnostics", False),
+            ("Diagnostics", "Run Ciena RLS and Nokia PSI topology-aware network audits.", "diagnostics", True),
             ("Provisioning", "Generate and execute supported provisioning workflows.", "provisioning", False),
         )
         for index, definition in enumerate(definitions):

@@ -29,6 +29,9 @@ Inventory supports direct LAN and Serial collection plus concurrent Pod/Lab
 network scanning, credential retries, partial-failure summaries, append mode,
 and family-aware report export.
 
+Diagnostics currently includes Ciena RLS and Nokia PSI Network Audit. TDS is
+the remaining Diagnostics sub-mode awaiting migration.
+
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.
 

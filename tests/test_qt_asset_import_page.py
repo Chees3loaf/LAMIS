@@ -12,6 +12,7 @@ from gui_qt.asset_import_page import AssetImportPage
 from gui_qt.bom_build_page import BomBuildPage
 from gui_qt.bom_compare_page import BomComparePage
 from gui_qt.inventory_page import InventoryPage
+from gui_qt.diagnostics_page import DiagnosticsPage
 from gui_qt.part_lookup_page import PartLookupPage
 from gui_qt.raw_processing_page import RawProcessingPage
 from gui_qt.packing_slip_page import PackingSlipPage
@@ -33,6 +34,7 @@ def test_pilot_window_constructs() -> None:
     assert isinstance(window.pages["bom-build"], BomBuildPage)
     assert isinstance(window.pages["bom-compare"], BomComparePage)
     assert isinstance(window.pages["inventory"], InventoryPage)
+    assert isinstance(window.pages["diagnostics"], DiagnosticsPage)
     assert isinstance(window.pages["part-lookup"], PartLookupPage)
     assert isinstance(window.pages["raw-processing"], RawProcessingPage)
     assert isinstance(window.pages["packing-slip"], PackingSlipPage)
@@ -61,6 +63,15 @@ def test_shell_navigates_to_inventory() -> None:
     assert window.nav_buttons["inventory"].isChecked()
     assert window.pages["inventory"].mode_combo.currentText() == "Network"
     assert not window.pages["inventory"].ranges_box.isHidden()
+    window.close()
+
+
+def test_shell_navigates_to_diagnostics() -> None:
+    _application()
+    window = AtlasPilotWindow()
+    window.show_page("diagnostics")
+    assert window.page_stack.currentWidget() is window.pages["diagnostics"]
+    assert window.nav_buttons["diagnostics"].isChecked()
     window.close()
 
 
