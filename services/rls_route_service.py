@@ -67,11 +67,11 @@ def evaluate_route(project: RouteProject) -> RouteConfigBuild:
     return evaluate_route_configs(project)
 
 
-def publish_route_bundle(project: RouteProject, output_directory: str | Path) -> Mapping[str, Path]:
+def publish_route_bundle(project: RouteProject, output_directory: str | Path, *, diagram=None) -> Mapping[str, Path]:
     destination = Path(output_directory)
     if not str(output_directory).strip():
         raise ValueError("Choose an output folder for the route bundle.")
-    return export_route_bundle(project, destination)
+    return export_route_bundle(project, destination, diagram=diagram)
 
 
 def new_route_project() -> RouteProject:
@@ -210,3 +210,48 @@ def apply_exact_payload(project: RouteProject, shelf_id: str, payload_text: str)
     shelves[index] = replace(shelves[index], profile_payload=payload, review_state="confirmed")
     updated = replace(project, shelves=tuple(shelves))
     return updated, artifact
+
+
+def transcribe_route_diagram(path: str | Path, *, raman_callout_enabled: bool = False):
+    """Run the controlled external-vision transcription without GUI access."""
+    import config as atlas_config
+    from utils.ai.provider import OpenAIProvider
+    from utils.rls_config.diagram_import import DiagramImportConventions, RAMAN_CALLOUT_CONVENTION_DISABLED, RAMAN_CALLOUT_CONVENTION_SMALL_RED_SLOT_PORT, import_route_diagram
+    provider = OpenAIProvider(
+        chat_model=atlas_config.RLS_DIAGRAM_MODEL,
+        image_detail=atlas_config.RLS_DIAGRAM_IMAGE_DETAIL,
+        reasoning_effort=atlas_config.RLS_DIAGRAM_REASONING_EFFORT,
+        max_completion_tokens=atlas_config.RLS_DIAGRAM_MAX_COMPLETION_TOKENS,
+    )
+    conventions = DiagramImportConventions(
+        raman_callout_convention=(RAMAN_CALLOUT_CONVENTION_SMALL_RED_SLOT_PORT if raman_callout_enabled else RAMAN_CALLOUT_CONVENTION_DISABLED)
+    )
+    return import_route_diagram(Path(path), provider, conventions=conventions)
+
+
+def apply_diagram_transcription(result):
+    """Convert one accepted transcription using the established audited adapters."""
+    from gui.rls_route_frame import WORKBOOK_DIAGRAM_MARKER_KEY, _diagram_editor_rows, _diagram_route_links, _diagram_source_record, build_route_project, diagram_import_mutation_blockers
+    from utils.rls_config.diagram_assets import workbook_diagram_from_source
+    blockers = diagram_import_mutation_blockers(result)
+    if blockers:
+        raise ValueError("Diagram transcription is incomplete; route unchanged:\n" + "\n".join(f"- [{item.code}] {item.field}: {item.message}" for item in blockers[:12]))
+    rows = _diagram_editor_rows(result)
+    if not rows: raise ValueError("Diagram transcription contains no active shelves; route unchanged.")
+    links = _diagram_route_links(result, rows)
+    diagram_source = _diagram_source_record(result)
+    diagram = workbook_diagram_from_source(result.source)
+    diagram_source[WORKBOOK_DIAGRAM_MARKER_KEY] = diagram.marker_dict(required_in_mop=True)
+    project = build_route_project(
+        route_code=result.route_code or "", title=result.title or "",
+        revision=result.revision or "1", rows=rows, ospf_area=result.ospf_area or "",
+        links=links, diagram_source=diagram_source, require_valid=False,
+    )
+    return project, diagram
+
+
+def reattach_route_diagram(project: RouteProject, path: str | Path):
+    from utils.rls_config.diagram_assets import validate_workbook_diagram_for_project, workbook_diagram_from_source
+    from utils.rls_config.diagram_import import load_diagram_source
+    diagram = workbook_diagram_from_source(load_diagram_source(Path(path)))
+    return validate_workbook_diagram_for_project(project, diagram)

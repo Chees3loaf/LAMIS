@@ -2,10 +2,12 @@ from pathlib import Path
 import json
 
 from services import rls_route_service
-from services.rls_route_service import apply_exact_payload, evaluate_route, exact_payload_template, exact_provider_choices, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, remove_route_shelf, review_route, save_route_draft, update_route_details, upsert_route_shelf, validate_exact_payload
+from services.rls_route_service import apply_diagram_transcription, apply_exact_payload, evaluate_route, exact_payload_template, exact_provider_choices, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, reattach_route_diagram, remove_route_shelf, review_route, save_route_draft, update_route_details, upsert_route_shelf, validate_exact_payload
 from utils.rls_config.route_project import OpticalPath, RouteLink, RouteProject, ShelfInstance, Site
 from utils.rls_config.r4_0_generator import encode_r40_exact_payload
 from tests.test_rls_r4_0_generator import _request
+from tests.test_rls_diagram_import import _complete_response, _png_bytes
+from utils.rls_config.diagram_import import load_diagram_source, parse_provider_result
 
 
 def _draft() -> RouteProject:
@@ -40,7 +42,7 @@ def test_evaluation_remains_fail_closed_for_unreviewed_shelf():
 def test_publish_delegates_to_atomic_exporter(monkeypatch, tmp_path: Path):
     expected = {"project": tmp_path / "bundle" / "project.json"}
     calls = []
-    monkeypatch.setattr(rls_route_service, "export_route_bundle", lambda project, output: calls.append((project, output)) or expected)
+    monkeypatch.setattr(rls_route_service, "export_route_bundle", lambda project, output, **_kwargs: calls.append((project, output)) or expected)
     assert publish_route_bundle(_draft(), tmp_path) == expected
     assert calls == [(_draft(), tmp_path)]
 
@@ -131,3 +133,25 @@ def test_role_mismatch_never_changes_project():
     except ValueError as exc: assert "does not match shelf role" in str(exc)
     else: raise AssertionError("mismatched payload was applied")
     assert not project.shelves[0].profile_payload and project.shelves[0].review_state == "manual"
+
+
+def test_complete_diagram_transcription_builds_project_and_attachment(tmp_path: Path):
+    source = tmp_path / "route.png"; source.write_bytes(_png_bytes(size=(640, 320)))
+    result = parse_provider_result(load_diagram_source(source), _complete_response())
+    project, diagram = apply_diagram_transcription(result)
+    assert project.route_code == "RL-0037805"
+    assert len(project.shelves) == 3 and len(project.links) == 2
+    assert project.diagram_source["workbook_diagram"]["required_in_mop"] is True
+    assert diagram.source_file_name == "route.png"
+
+
+def test_diagram_reattachment_is_hash_matched(tmp_path: Path):
+    source = tmp_path / "route.png"; source.write_bytes(_png_bytes(size=(640, 320)))
+    result = parse_provider_result(load_diagram_source(source), _complete_response())
+    project, original = apply_diagram_transcription(result)
+    attached = reattach_route_diagram(project, source)
+    assert attached.source_sha256 == original.source_sha256
+    changed = tmp_path / "changed.png"; changed.write_bytes(_png_bytes((200, 10, 10), size=(640, 320)))
+    try: reattach_route_diagram(project, changed)
+    except ValueError as exc: assert "does not match" in str(exc)
+    else: raise AssertionError("different diagram was reattached")

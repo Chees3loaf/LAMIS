@@ -47,8 +47,12 @@ source evidence; reordering is refused when reviewed topology links exist.
 Exact RLS R4.0 provider review is also available in Qt: provider choices are
 role-compatible, templates use the strict versioned payload schema, and the
 payload must decode, validate, and generate a complete no-commit candidate
-before it can replace a shelf review. Diagram transcription remains on
-Tkinter until its dedicated Qt panel is complete.
+before it can replace a shelf review. Diagram transcription is available in
+the Qt Route Builder as well: supported sources are normalized and sent to the
+configured external vision provider only after an explicit privacy prompt;
+incomplete topology leaves the current route unchanged. Accepted drafts retain
+hash-only provenance in JSON and session-only pixels for the Diagram worksheet.
+Saved projects can reattach the exact original locally without AI processing.
 
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.

@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QTabWidget, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from services.provisioning_service import DEVICE_TYPES, ProvisioningDevice, ProvisioningRequest, read_provisioning_devices, run_live_provisioning, validate_provisioning_request
-from services.rls_route_service import apply_exact_payload, evaluate_route, exact_payload_template, exact_provider_choices, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, remove_route_shelf, review_route, route_profile_choices, save_route_draft, update_route_details, upsert_route_shelf, validate_exact_payload
+from services.rls_route_service import apply_diagram_transcription, apply_exact_payload, evaluate_route, exact_payload_template, exact_provider_choices, load_route_draft, move_route_shelf, new_route_project, publish_route_bundle, reattach_route_diagram, remove_route_shelf, review_route, route_profile_choices, save_route_draft, transcribe_route_diagram, update_route_details, upsert_route_shelf, validate_exact_payload
 
 
 class ProvisioningWorker(QObject):
@@ -171,22 +171,37 @@ class RouteBundleWorker(QObject):
     failed = Signal(str)
     finished = Signal()
 
-    def __init__(self, project, output_directory: str) -> None:
-        super().__init__(); self.project = project; self.output_directory = output_directory
+    def __init__(self, project, output_directory: str, diagram=None) -> None:
+        super().__init__(); self.project = project; self.output_directory = output_directory; self.diagram = diagram
 
     @Slot()
     def run(self) -> None:
-        try: result = publish_route_bundle(self.project, self.output_directory)
+        try: result = publish_route_bundle(self.project, self.output_directory, diagram=self.diagram)
         except Exception as exc:
             logging.exception("Qt RLS route bundle export failed"); self.failed.emit(str(exc) or exc.__class__.__name__)
         else: self.succeeded.emit(dict(result))
         finally: self.finished.emit()
 
 
+class DiagramTranscriptionWorker(QObject):
+    succeeded = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+    def __init__(self, path: str, raman_enabled: bool) -> None:
+        super().__init__(); self.path = path; self.raman_enabled = raman_enabled
+    @Slot()
+    def run(self) -> None:
+        try: result = transcribe_route_diagram(self.path, raman_callout_enabled=self.raman_enabled)
+        except Exception as exc:
+            logging.exception("Qt RLS diagram transcription failed"); self.failed.emit(str(exc) or exc.__class__.__name__)
+        else: self.succeeded.emit(result)
+        finally: self.finished.emit()
+
+
 class RlsRouteProjectPage(QWidget):
     """Review and publish existing audited route projects without reimplementing their core."""
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent); self.project = None; self.path = ""; self.thread = None; self.worker = None
+        super().__init__(parent); self.project = None; self.path = ""; self.thread = None; self.worker = None; self.attached_diagram = None
         project_box = QGroupBox("Route project")
         project_form = QFormLayout(project_box)
         self.path_edit = QLineEdit(); self.path_edit.setReadOnly(True)
@@ -214,11 +229,16 @@ class RlsRouteProjectPage(QWidget):
         self.exact_json = QPlainTextEdit(); self.exact_json.setPlaceholderText("Select a shelf, choose a compatible provider, and create a review template. Every placeholder must be reviewed before validation can pass."); self.exact_json.setMinimumHeight(220)
         self.exact_preview = QPlainTextEdit(); self.exact_preview.setReadOnly(True); self.exact_preview.setPlaceholderText("Validation report and candidate CLI preview"); self.exact_preview.setMinimumHeight(180)
         exact_layout.addLayout(provider_row); exact_layout.addWidget(self.exact_json); exact_layout.addWidget(self.exact_preview)
+        diagram_box = QGroupBox("Customer route diagram")
+        diagram_layout = QVBoxLayout(diagram_box); diagram_buttons = QHBoxLayout(); upload = QPushButton("Transcribe Diagram…"); upload.clicked.connect(self._upload_diagram); reattach = QPushButton("Reattach Original…"); reattach.clicked.connect(self._reattach_diagram); self.diagram_status = QLabel("No diagram attached")
+        diagram_buttons.addWidget(upload); diagram_buttons.addWidget(reattach); diagram_buttons.addWidget(self.diagram_status, 1)
+        diagram_note = QLabel("Supported sources: DOCX, PNG, JPG, and JPEG. Transcription sends normalized diagram images to the configured external AI provider only after confirmation. Reattachment is local and performs no AI processing."); diagram_note.setObjectName("mutedText"); diagram_note.setWordWrap(True)
+        diagram_layout.addLayout(diagram_buttons); diagram_layout.addWidget(diagram_note)
         controls = QHBoxLayout(); self.validate_button = QPushButton("Validate / Evaluate CLI"); self.validate_button.clicked.connect(self._validate); self.export_button = QPushButton("Export Route Bundle…"); self.export_button.clicked.connect(self._export); self.validate_button.setEnabled(False); self.export_button.setEnabled(False); self.status = QLabel("Open a route project to begin")
         controls.addWidget(self.validate_button); controls.addWidget(self.export_button); controls.addWidget(self.status, 1)
         self.results = QPlainTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(150)
         note = QLabel("This migration slice preserves reviewed provider payloads and route ordering. Exact-provider editing and diagram transcription remain in the Tkinter Route Builder until their Qt panels complete."); note.setObjectName("mutedText"); note.setWordWrap(True)
-        editor_content = QWidget(); editor_layout = QVBoxLayout(editor_content); editor_layout.addWidget(project_box); editor_layout.addWidget(details); editor_layout.addWidget(self.table); editor_layout.addWidget(shelf_box); editor_layout.addWidget(exact_box); editor_layout.addLayout(controls); editor_layout.addWidget(self.results); editor_layout.addWidget(note)
+        editor_content = QWidget(); editor_layout = QVBoxLayout(editor_content); editor_layout.addWidget(project_box); editor_layout.addWidget(details); editor_layout.addWidget(self.table); editor_layout.addWidget(shelf_box); editor_layout.addWidget(exact_box); editor_layout.addWidget(diagram_box); editor_layout.addLayout(controls); editor_layout.addWidget(self.results); editor_layout.addWidget(note)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(editor_content)
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(scroll)
 
@@ -231,10 +251,10 @@ class RlsRouteProjectPage(QWidget):
         try: project = load_route_draft(path)
         except Exception as exc:
             self._error(str(exc), "Choose an ATLAS RLS R4.0 route-project JSON file and try again."); return
-        self.project = project; self.path = path; self.path_edit.setText(path); self._load_project_fields(); self.validate_button.setEnabled(True); self.export_button.setEnabled(True); self._render_review()
+        self.project = project; self.path = path; self.attached_diagram = None; self.path_edit.setText(path); self._load_project_fields(); self.validate_button.setEnabled(True); self.export_button.setEnabled(True); self._render_review(); self.diagram_status.setText("Original diagram must be reattached" if project.diagram_source.get("workbook_diagram") else "No diagram required")
 
     def _new(self) -> None:
-        self.project = new_route_project(); self.path = ""; self.path_edit.clear(); self._load_project_fields(); self.validate_button.setEnabled(True); self.export_button.setEnabled(True); self._clear_shelf_editor(); self._render_review()
+        self.project = new_route_project(); self.path = ""; self.attached_diagram = None; self.path_edit.clear(); self._load_project_fields(); self.validate_button.setEnabled(True); self.export_button.setEnabled(True); self._clear_shelf_editor(); self._render_review(); self.diagram_status.setText("No diagram attached")
 
     def _load_project_fields(self) -> None:
         project = self.project; self.route_edit.setText(project.route_code); self.title_edit.setText(project.title); self.revision_edit.setText(project.revision); self.ospf_edit.setText(project.ospf_area); self.notes_edit.setText(project.notes); self.route_label.setText(f"{project.route_code or '(new route)'} — {project.title or '(untitled)'}  |  Revision {project.revision}")
@@ -281,7 +301,7 @@ class RlsRouteProjectPage(QWidget):
         self._apply_project_fields()
         directory = QFileDialog.getExistingDirectory(self, "Choose route bundle output folder")
         if not directory: return
-        self.thread = QThread(self); self.worker = RouteBundleWorker(self.project, directory); self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run); self.worker.succeeded.connect(self._exported); self.worker.failed.connect(self._export_failed); self.worker.finished.connect(self.thread.quit); self.worker.finished.connect(self.worker.deleteLater); self.thread.finished.connect(self.thread.deleteLater); self.export_button.setEnabled(False); self.status.setText("Exporting audited bundle…"); self.thread.start()
+        self.thread = QThread(self); self.worker = RouteBundleWorker(self.project, directory, self.attached_diagram); self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run); self.worker.succeeded.connect(self._exported); self.worker.failed.connect(self._export_failed); self.worker.finished.connect(self.thread.quit); self.worker.finished.connect(self.worker.deleteLater); self.thread.finished.connect(self.thread.deleteLater); self.export_button.setEnabled(False); self.status.setText("Exporting audited bundle…"); self.thread.start()
 
     @Slot(object)
     def _exported(self, files) -> None:
@@ -368,3 +388,34 @@ class RlsRouteProjectPage(QWidget):
         shelf_id = self.selected_shelf_id; self._render_review(); row = next((i for i, shelf in enumerate(self.project.shelves) if shelf.shelf_id == shelf_id), -1)
         if row >= 0: self.table.selectRow(row)
         self.status.setText(f"Exact provider applied ({artifact.command_count} candidate commands) — save the project draft")
+
+    def _upload_diagram(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Upload customer Ciena RLS route diagram", "", "Supported diagrams (*.docx *.png *.jpg *.jpeg);;All files (*)")
+        if not path: return
+        if self.project is not None and self.project.shelves and QMessageBox.question(self, "Replace route from diagram", "A successful complete transcription will replace the current route project and shelves. Continue?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) != QMessageBox.StandardButton.Yes: return
+        raman = QMessageBox.question(self, "RAMAN slot/port convention", "Does this source use small red N/5 and N/6 boxes as RAMAN slot/port annotations? Choose Yes only when that customer convention is confirmed.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+        privacy = QMessageBox.question(self, "External AI privacy confirmation", f"Normalized images from {path} will be sent to the configured external AI provider for transcription. No credentials are included by ATLAS. Continue?", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No)
+        if privacy != QMessageBox.StandardButton.Yes: return
+        self.thread = QThread(self); self.worker = DiagramTranscriptionWorker(path, raman); self.worker.moveToThread(self.thread); self.thread.started.connect(self.worker.run); self.worker.succeeded.connect(self._diagram_transcribed); self.worker.failed.connect(self._diagram_failed); self.worker.finished.connect(self.thread.quit); self.worker.finished.connect(self.worker.deleteLater); self.thread.finished.connect(self.thread.deleteLater); self.status.setText("Transcribing diagram…"); self.diagram_status.setText("External AI transcription running"); self.thread.start()
+
+    @Slot(object)
+    def _diagram_transcribed(self, result) -> None:
+        try: project, diagram = apply_diagram_transcription(result)
+        except Exception as exc:
+            self._diagram_failed(str(exc)); return
+        self.project = project; self.attached_diagram = diagram; self.path = ""; self.path_edit.clear(); self._load_project_fields(); self._clear_shelf_editor(); self._render_review(); self.diagram_status.setText(f"Attached: {diagram.source_file_name} ({len(diagram.images)} image(s))"); self.status.setText("Diagram draft imported — every pending field requires human review")
+        review = review_route(project); QMessageBox.warning(self, "Diagram imported — human review required", f"Imported {len(project.shelves)} active shelf draft(s) and {len(project.links)} route link(s).\n\nValidation errors: {len(review.errors)}\nDeployment blockers: {len(review.blockers)}\n\nReview every shelf, link, fiber value, provider selection, and source discrepancy before export. Diagram transcription does not authorize deployment.")
+
+    @Slot(str)
+    def _diagram_failed(self, detail: str) -> None:
+        self.status.setText("Diagram transcription failed — current route unchanged"); self.diagram_status.setText("Diagram not applied"); self._error(detail, "Verify the source type and AI configuration, then correct every reported topology or evidence blocker before trying again. The current route was not changed.")
+
+    def _reattach_diagram(self) -> None:
+        if self.project is None:
+            self._error("No route project is loaded.", "Open the saved route project before reattaching its original diagram."); return
+        path, _ = QFileDialog.getOpenFileName(self, "Reattach original customer route diagram", "", "Supported diagrams (*.docx *.png *.jpg *.jpeg);;All files (*)")
+        if not path: return
+        try: diagram = reattach_route_diagram(self.project, path)
+        except Exception as exc:
+            self._error(str(exc), "Select the exact original source whose hash and normalized image provenance match this project."); return
+        self.attached_diagram = diagram; self.diagram_status.setText(f"Reattached locally: {diagram.source_file_name}"); self.status.setText("Original diagram reattached — no external AI processing used")
