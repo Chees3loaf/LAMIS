@@ -7,7 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
-from gui.raw_frame import AUTO_DETECT_NOKIA, SALES_BOM_IMPORT, SCRIPT_OPTIONS
+from services.raw_processing_core import AUTO_DETECT_NOKIA, SALES_BOM_IMPORT, SCRIPT_OPTIONS
 from services.raw_processing_service import RawProcessingRequest, run_raw_processing
 
 

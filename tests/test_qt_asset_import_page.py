@@ -28,7 +28,7 @@ def test_pilot_window_constructs() -> None:
     _application()
     window = AtlasPilotWindow()
 
-    assert window.windowTitle() == "ATLAS — PySide6 Proof of Concept"
+    assert window.windowTitle() == "ATLAS"
     assert window.page_stack.currentWidget() is window.pages["overview"]
     assert isinstance(window.pages["asset-import"], AssetImportPage)
     assert isinstance(window.pages["bom-build"], BomBuildPage)

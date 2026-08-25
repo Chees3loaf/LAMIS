@@ -1,4 +1,4 @@
-"""Application entry point for the ATLAS PySide6 pilot."""
+"""Application entry point for ATLAS."""
 from __future__ import annotations
 
 import sys
@@ -50,7 +50,7 @@ ATLAS_STYLESHEET = (
 )
 
 
-def run_asset_import_pilot() -> int:
+def run_atlas_qt() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("ATLAS")
     app.setOrganizationName("LightRiver Technologies")
@@ -58,3 +58,7 @@ def run_asset_import_pilot() -> int:
     window = AtlasPilotWindow()
     window.show()
     return app.exec()
+
+
+# Compatibility for pilot-era launchers and tests.
+run_asset_import_pilot = run_atlas_qt

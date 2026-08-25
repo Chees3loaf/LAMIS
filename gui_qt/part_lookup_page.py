@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from gui.part_lookup_dialog import lookup_part
+from services.part_lookup_service import lookup_part
 from utils.helpers import get_database_path
 
 

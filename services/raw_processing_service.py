@@ -9,15 +9,15 @@ from typing import Any, Callable, Dict
 import pandas as pd
 
 import script_interface
-from gui.raw_frame import (
+from services.raw_processing_core import (
     AUTO_DETECT_NOKIA,
-    _FAMILY_BY_MODULE,
-    _normalize_device_id,
-    _normalize_device_map,
-    _read_excel_sheets,
-    _read_text_folder,
-    _resolve_script_module,
-    _split_raw_output_by_commands,
+    FAMILY_BY_MODULE,
+    normalize_device_id,
+    normalize_device_map,
+    read_excel_sheets,
+    read_text_folder,
+    resolve_script_module,
+    split_raw_output_by_commands,
 )
 from gui.workbook_builder import WorkbookBuilder
 from utils.helpers import get_data_dir, get_database_path
@@ -57,13 +57,13 @@ def create_raw_workbook_builder() -> WorkbookBuilder:
 
 def load_raw_sources(path: Path, device_id: str = "") -> Dict[str, str]:
     if path.is_dir():
-        return _normalize_device_map(_read_text_folder(str(path)))
+        return normalize_device_map(read_text_folder(str(path)))
     if not path.is_file():
         raise FileNotFoundError(f"Raw input not found: {path}")
     if path.suffix.lower() in (".xlsx", ".xls"):
-        return _normalize_device_map(_read_excel_sheets(str(path)))
+        return normalize_device_map(read_excel_sheets(str(path)))
     text = path.read_text(encoding="utf-8", errors="replace")
-    return {_normalize_device_id(device_id or path.stem): text}
+    return {normalize_device_id(device_id or path.stem): text}
 
 
 def _parse_device(
@@ -85,7 +85,7 @@ def _parse_device(
             db_path=db_path,
         )
         commands = script.get_commands()
-        sections = _split_raw_output_by_commands(raw_text, commands)
+        sections = split_raw_output_by_commands(raw_text, commands)
         found = sum(1 for section in sections if section.strip())
         progress(f"{device_id}: {found}/{len(commands)} command sections matched")
         if found == 0:
@@ -146,7 +146,7 @@ def run_raw_processing(
     modules: list[str] = []
     parsed = 0
     for device_id, raw_text in sources.items():
-        module_path = _resolve_script_module(raw_text, device_id, request.script_name)
+        module_path = resolve_script_module(raw_text, device_id, request.script_name)
         emit(f"Processing {device_id} with {module_path}")
         if _parse_device(
             raw_text,
@@ -168,7 +168,7 @@ def run_raw_processing(
         key = "Manual" if index == 1 else f"Manual_{str(index).zfill(width)}"
         manual_outputs[key] = data
 
-    families = {_FAMILY_BY_MODULE.get(module, "default") for module in modules}
+    families = {FAMILY_BY_MODULE.get(module, "default") for module in modules}
     non_default = families - {"default"}
     family = next(iter(non_default)) if len(non_default) == 1 else "default"
     workbook_builder = builder or create_raw_workbook_builder()

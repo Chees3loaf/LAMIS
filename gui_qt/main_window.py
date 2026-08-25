@@ -1,4 +1,4 @@
-"""Main window and navigation shell for the PySide6 proof of concept."""
+"""Main window and navigation shell for ATLAS."""
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
@@ -22,7 +22,7 @@ from gui_qt.pages import OverviewPage, PlannedPage
 class AtlasPilotWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("ATLAS — PySide6 Proof of Concept")
+        self.setWindowTitle("ATLAS")
         self.resize(1120, 760)
         self.setMinimumSize(840, 600)
         self.page_stack = QStackedWidget()
@@ -57,7 +57,7 @@ class AtlasPilotWindow(QMainWindow):
         content_layout.addWidget(self.page_stack)
         shell_layout.addWidget(content, 1)
         self.setCentralWidget(shell)
-        self.statusBar().showMessage(f"PySide6 migration pilot  •  ATLAS {config.APP_VERSION}")
+        self.statusBar().showMessage(f"ATLAS {config.APP_VERSION}")
         self.show_page("overview")
 
     def _build_navigation(self) -> QWidget:
@@ -94,7 +94,7 @@ class AtlasPilotWindow(QMainWindow):
         self._add_section_label(layout, "TOOLS")
         self._add_nav_button(layout, "Part Lookup", "part-lookup")
         layout.addStretch(1)
-        pilot = QLabel("PYSIDE6 PILOT")
+        pilot = QLabel("ATLAS")
         pilot.setObjectName("pilotBadge")
         pilot.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(pilot)

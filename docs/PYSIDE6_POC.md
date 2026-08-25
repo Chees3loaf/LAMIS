@@ -1,7 +1,7 @@
 # PySide6 proof of concept
 
-ATLAS currently keeps its production Tkinter interface as the default. The
-PySide6 proof of concept is an opt-in ATLAS navigation shell with a working
+ATLAS launches its PySide6 interface by default. The former proof of concept
+has become the primary ATLAS navigation shell with working
 Asset Import, BOM Build/Refresh, BOM Compare, Raw Processing, Sales BOM Import,
 Packing Slip Generator, Inventory, Diagnostics, Part Lookup, and live
 Provisioning pages that share production logic through UI-independent
@@ -12,7 +12,7 @@ boundaries. Workflows that have not been migrated are visibly disabled.
 Install the project requirements, then run from the repository root:
 
 ```powershell
-python main.py --qt-pilot asset-import
+python main.py
 ```
 
 The pilot asks for an ATLAS inventory workbook and an ASN asset document. It
@@ -61,8 +61,9 @@ server shutdown, and DHCP/DNS restoration. PSI/PSS inputs must contain an
 unzipped release beneath `CC/`; Waveserver 5 retains its serial-plus-DCN
 preflight requirements.
 
-Running `python main.py` without the pilot flag continues to launch the
-existing Tkinter application.
+Use `python main.py --tk-legacy` only when the fallback Tkinter interface is
+required. The former `--qt-pilot asset-import` command remains a compatibility
+alias for existing shortcuts.
 
 ## Test the pilot
 
