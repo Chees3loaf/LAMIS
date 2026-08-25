@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMainWindow, QPushBut
 
 import config
 from gui_qt.asset_import_page import AssetImportPage
+from gui_qt.inventory_page import InventoryPage
 from gui_qt.bom_build_page import BomBuildPage
 from gui_qt.bom_compare_page import BomComparePage
 from gui_qt.part_lookup_page import PartLookupPage
@@ -30,7 +31,7 @@ class AtlasPilotWindow(QMainWindow):
             "part-lookup": PartLookupPage(),
             "raw-processing": RawProcessingPage(),
             "sales-bom-import": SalesBomImportPage(),
-            "inventory": PlannedPage("Inventory"),
+            "inventory": InventoryPage(),
             "diagnostics": PlannedPage("Diagnostics"),
             "packing-slip": PackingSlipPage(),
             "file-processing": PlannedPage("File Processing"),
@@ -74,7 +75,7 @@ class AtlasPilotWindow(QMainWindow):
         self._add_nav_button(layout, "Overview", "overview")
         layout.addSpacing(14)
         self._add_section_label(layout, "WORKFLOWS")
-        self._add_nav_button(layout, "Inventory", "inventory", available=False)
+        self._add_nav_button(layout, "Inventory", "inventory")
         self._add_nav_button(layout, "Diagnostics", "diagnostics", available=False)
         self._add_nav_button(layout, "Packing Slips", "packing-slip")
         self._add_nav_button(layout, "Provisioning", "provisioning", available=False)

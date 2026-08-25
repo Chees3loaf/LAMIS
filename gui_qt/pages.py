@@ -48,7 +48,7 @@ class OverviewPage(QWidget):
             ("Raw Processing", "Convert captured CLI transcripts into a Device Report.", "raw-processing", True),
             ("Sales BOM Import", "Turn selected Sales BOM sheets into per-site packing workbooks.", "sales-bom-import", True),
             ("Packing Slips", "Generate packing-slip workbooks from inventory files.", "packing-slip", True),
-            ("Inventory", "Collect and assemble network inventory workbooks.", "inventory", False),
+            ("Inventory", "Collect live LAN or serial inventory into report workbooks.", "inventory", True),
             ("Diagnostics", "Run TDS and Nokia network-audit workflows.", "diagnostics", False),
             ("Provisioning", "Generate and execute supported provisioning workflows.", "provisioning", False),
         )
