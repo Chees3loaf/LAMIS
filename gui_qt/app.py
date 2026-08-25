@@ -31,6 +31,7 @@ ATLAS_STYLESHEET = (
     "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
     "QLineEdit, QPlainTextEdit { color: #172033; background: white; "
     "border: 1px solid #bcccdc; border-radius: 5px; padding: 6px; }"
+    "QLineEdit { min-height: 20px; }"
     "QPushButton { color: #172033; background: #ffffff; border: 1px solid #9fb3c8; "
     "border-radius: 5px; padding: 7px 13px; }"
     "QPushButton:hover { color: #ffffff; background: #243b53; border-color: #243b53; }"

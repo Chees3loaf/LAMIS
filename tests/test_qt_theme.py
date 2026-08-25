@@ -14,3 +14,7 @@ def test_combo_popup_has_explicit_readable_colors() -> None:
     assert "background: #ffffff; border-color: #2f80ed;" in ATLAS_STYLESHEET
     assert "QComboBox QAbstractItemView { color: #172033; background: #ffffff;" in ATLAS_STYLESHEET
     assert "selection-background-color: #243b53" in ATLAS_STYLESHEET
+
+
+def test_line_edits_cannot_collapse_below_readable_height() -> None:
+    assert "QLineEdit { min-height: 20px; }" in ATLAS_STYLESHEET
