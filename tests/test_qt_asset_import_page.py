@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QApplication
 from gui_qt.asset_import_page import AssetImportPage
 from gui_qt.bom_build_page import BomBuildPage
 from gui_qt.part_lookup_page import PartLookupPage
+from gui_qt.raw_processing_page import RawProcessingPage
 from gui_qt.main_window import AtlasPilotWindow
 
 
@@ -26,6 +27,7 @@ def test_pilot_window_constructs() -> None:
     assert isinstance(window.pages["asset-import"], AssetImportPage)
     assert isinstance(window.pages["bom-build"], BomBuildPage)
     assert isinstance(window.pages["part-lookup"], PartLookupPage)
+    assert isinstance(window.pages["raw-processing"], RawProcessingPage)
     assert window.nav_buttons["overview"].isChecked()
     window.close()
 
@@ -57,6 +59,15 @@ def test_shell_navigates_to_part_lookup() -> None:
     window.show_page("part-lookup")
     assert window.page_stack.currentWidget() is window.pages["part-lookup"]
     assert window.nav_buttons["part-lookup"].isChecked()
+    window.close()
+
+
+def test_shell_navigates_to_raw_processing() -> None:
+    _application()
+    window = AtlasPilotWindow()
+    window.show_page("raw-processing")
+    assert window.page_stack.currentWidget() is window.pages["raw-processing"]
+    assert window.nav_buttons["raw-processing"].isChecked()
     window.close()
 
 

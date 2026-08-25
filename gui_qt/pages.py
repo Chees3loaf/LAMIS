@@ -44,6 +44,7 @@ class OverviewPage(QWidget):
             ("Asset Import", "Apply ASN asset tags and customer purchase orders with an automatic backup.", "asset-import", True),
             ("Build / Refresh BOM", "Create an Inventory by Site BOM from an inventory workbook.", "bom-build", True),
             ("Part Lookup", "Search the runtime parts database by complete or partial SKU.", "part-lookup", True),
+            ("Raw Processing", "Convert captured CLI transcripts into a Device Report.", "raw-processing", True),
             ("Inventory", "Collect and assemble network inventory workbooks.", "inventory", False),
             ("Diagnostics", "Run TDS and Nokia network-audit workflows.", "diagnostics", False),
             ("Provisioning", "Generate and execute supported provisioning workflows.", "provisioning", False),
