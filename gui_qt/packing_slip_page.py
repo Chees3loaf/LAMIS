@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtWidgets import QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from services.packing_slip_service import PackingSlipRequest, PackingSlipSource, inspect_packing_slip_source, run_packing_slip_generation
 
@@ -59,10 +59,14 @@ class PackingSlipPage(QWidget):
         self.project_edit = QLineEdit()
         self.po_edit = QLineEdit()
         self.so_edit = QLineEdit()
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("Individual device sheets", "individual")
+        self.mode_combo.addItem("Consolidated single sheet", "consolidated")
         metadata_form.addRow("Customer", self.customer_edit)
         metadata_form.addRow("Project", self.project_edit)
         metadata_form.addRow("Purchase order", self.po_edit)
         metadata_form.addRow("Sales order", self.so_edit)
+        metadata_form.addRow("Output mode", self.mode_combo)
 
         controls = QHBoxLayout()
         self.run_button = QPushButton("Generate Packing Slips")
@@ -131,6 +135,7 @@ class PackingSlipPage(QWidget):
             project=self.project_edit.text(),
             purchase_order=self.po_edit.text(),
             sales_order=self.so_edit.text(),
+            mode=self.mode_combo.currentData(),
         )
         self.log.clear()
         self.run_button.setEnabled(False)

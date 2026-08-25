@@ -18,6 +18,10 @@ The pilot asks for an ATLAS inventory workbook and an ASN asset document. It
 creates a timestamped backup next to the inventory workbook before updating
 asset tags and customer purchase-order values.
 
+Packing Slip Generator supports both a workbook containing individual device
+sheets and a consolidated single-sheet output. Device counts exclude Summary
+and aggregate BOM sheets.
+
 Running `python main.py` without the pilot flag continues to launch the
 existing Tkinter application.
 
