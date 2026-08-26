@@ -9,7 +9,7 @@ from typing import Callable
 import openpyxl
 import pandas as pd
 
-from gui.packing_slip_frame import PackingSlipFrame
+from services.packing_slip_core import extract_workbook_metadata, process_multisheet_device_file, process_packing_slip_frame
 from services.raw_processing_service import create_raw_workbook_builder
 from utils.helpers import get_data_dir, sanitize_filename_component, strip_dataframe_strings, validate_uploaded_file
 
@@ -75,20 +75,15 @@ def inspect_packing_slip_source(path: str | Path) -> PackingSlipSource:
         multisheet = bool(device_sheets)
         device_count = len(device_sheets) if multisheet else len(pd.read_excel(source))
 
-    engine = PackingSlipFrame.__new__(PackingSlipFrame)
-    engine._last_customer = ""
-    engine._last_project = ""
-    engine._last_customer_po = ""
-    engine._last_sales_order = ""
-    engine._refresh_info_display = lambda: None
+    customer = project = purchase_order = sales_order = ""
     if source.suffix.lower() in (".xlsx", ".xls"):
-        engine._try_populate_fields_from_file(str(source))
+        customer, project, purchase_order, sales_order = extract_workbook_metadata(source)
     return PackingSlipSource(
         path=source,
-        customer=engine._last_customer,
-        project=engine._last_project,
-        purchase_order=engine._last_customer_po or "TBD",
-        sales_order=engine._last_sales_order or "TBD",
+        customer=customer,
+        project=project,
+        purchase_order=purchase_order or "TBD",
+        sales_order=sales_order or "TBD",
         device_count=device_count,
         multisheet=multisheet,
     )
@@ -107,12 +102,11 @@ def run_packing_slip_generation(
         raise ValueError(f"Unknown packing-slip mode: {request.mode}")
     request.output_directory.mkdir(parents=True, exist_ok=True)
 
-    engine = PackingSlipFrame.__new__(PackingSlipFrame)
-    engine._family_by_ip = {}
-    engine._display_ip_for_key = {}
+    family_by_ip: dict[str, str] = {}
+    display_ip_for_key: dict[str, str] = {}
     if request.source.multisheet:
         emit("Reading device sheets…")
-        processed = engine._process_multisheet_device_file(str(request.source.path))
+        processed, family_by_ip, display_ip_for_key = process_multisheet_device_file(request.source.path)
     else:
         emit("Reading source rows…")
         if request.source.path.suffix.lower() == ".csv":
@@ -120,7 +114,7 @@ def run_packing_slip_generation(
         else:
             data = pd.read_excel(request.source.path)
         strip_dataframe_strings(data)
-        processed = engine._process_file_for_packing_slip(data)
+        processed = process_packing_slip_frame(data)
     if not processed:
         raise RuntimeError("No valid packing-slip data was found in the source.")
 
@@ -140,8 +134,8 @@ def run_packing_slip_generation(
             request.purchase_order.strip() or "TBD",
             request.sales_order.strip() or "TBD",
             str(build_directory),
-            family_for_ip=engine._family_by_ip,
-            display_ip_for_key=engine._display_ip_for_key,
+            family_for_ip=family_by_ip,
+            display_ip_for_key=display_ip_for_key,
         )
         if request.mode == "consolidated":
             safe_customer = sanitize_filename_component(request.customer)

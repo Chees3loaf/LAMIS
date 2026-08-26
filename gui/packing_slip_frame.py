@@ -5,6 +5,7 @@ import tempfile
 import logging
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from services.packing_slip_core import extract_workbook_metadata, process_multisheet_device_file, process_packing_slip_frame
 from typing import Dict, List
 
 import openpyxl
@@ -177,122 +178,18 @@ class PackingSlipFrame(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _try_populate_fields_from_file(self, file_path: str) -> None:
-        """Extract Customer, Project, PO, and SO from the uploaded workbook
-        and store them on ``self._last_*`` so generation has values to pass
-        through. Also refreshes the read-only display labels.
-
-        Two source layouts are supported:
-
-        * **Inventory / BoM workbook** — Summary sheet has Customer at
-          B7 and Project at D7. Per-device "Device Report" tabs carry
-          Customer at C5, Project at C6, Customer PO at C7, Sales
-          Order at D7. PO/SO come from the first Device Report tab.
-        * **Existing packing slip workbook** — per-device sheets carry
-          Customer at C5 and Project at C6, but B7 is ``Device ID:``
-          (not a PO marker), so PO/SO default to TBD.
-
-        A sheet is recognized as a Device Report when its ``B7`` cell
-        starts with ``Customer PO`` (the label adjacent to the PO/SO
-        values). Without that marker we don't read C7/D7 — that
-        prevents the BOM aggregate's column headers ("Equipment
-        Description" at C7, first device name at D7) from being
-        mis-read as PO/SO, which was the reported bug.
-        """
-        def _is_device_report(ws) -> bool:
-            try:
-                b7 = ws["B7"].value
-            except Exception:
-                return False
-            return (
-                isinstance(b7, str)
-                and b7.strip().lower().startswith("customer po")
-            )
-
-        customer, project, po, so = "", "", "", ""
         try:
-            wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-            summary_sheets = [n for n in wb.sheetnames if "summary" in n.lower()]
-
-            # Strategy 1a: any sheet that LOOKS like a Device Report.
-            # The structural marker on B7 keeps the BOM aggregate (which
-            # has "Equipment Description" at C7 and the first device
-            # name at D7) from being mistaken for a Device Report.
-            device_report_sheets = [
-                n for n in wb.sheetnames if _is_device_report(wb[n])
-            ]
-            if device_report_sheets:
-                ws = wb[device_report_sheets[0]]
-                for coord, target in (
-                    ("C5", "customer"), ("C6", "project"),
-                    ("C7", "po"),       ("D7", "so"),
-                ):
-                    val = ws[coord].value
-                    if val and str(val).strip() not in ("", "nan", "None"):
-                        if target == "customer":
-                            customer = str(val).strip()
-                        elif target == "project":
-                            project = str(val).strip()
-                        elif target == "po":
-                            po = str(val).strip()
-                        elif target == "so":
-                            so = str(val).strip()
-
-            # Strategy 1b: Packing-Slip-style per-device sheet supplies
-            # Customer + Project (B5='Customer:' C5=name, B6='Project:'
-            # C6=name) but NOT PO/SO. Only consult when 1a missed.
-            if not customer or not project:
-                for name in wb.sheetnames:
-                    if name in device_report_sheets:
-                        continue
-                    low = name.lower()
-                    if (
-                        "summary" in low
-                        or low == "bom"
-                        or low == "inventory by site"
-                    ):
-                        continue
-                    ws = wb[name]
-                    b5 = ws["B5"].value
-                    b6 = ws["B6"].value
-                    if (
-                        isinstance(b5, str)
-                        and b5.strip().lower().startswith("customer")
-                        and isinstance(b6, str)
-                        and b6.strip().lower().startswith("project")
-                    ):
-                        if not customer:
-                            v = ws["C5"].value
-                            if v and str(v).strip() not in ("", "nan", "None"):
-                                customer = str(v).strip()
-                        if not project:
-                            v = ws["C6"].value
-                            if v and str(v).strip() not in ("", "nan", "None"):
-                                project = str(v).strip()
-                        break
-
-            # Strategy 2: inventory report summary sheet
-            # Summary sheet: B7 = Customer value, D7 = Project value
-            if (not customer or not project) and summary_sheets:
-                ws = wb[summary_sheets[0]]
-                b7 = ws["B7"].value
-                d7 = ws["D7"].value
-                if not customer and b7 and str(b7).strip() not in ("", "nan", "None"):
-                    customer = str(b7).strip()
-                if not project and d7 and str(d7).strip() not in ("", "nan", "None"):
-                    project = str(d7).strip()
-
-            wb.close()
-        except Exception as e:
-            logging.debug(f"Could not extract metadata from uploaded file: {e}")
-
-        # Stash extracted values for the generate / print steps.
+            values = extract_workbook_metadata(file_path)
+        except Exception as exc:
+            logging.debug("Could not extract metadata from uploaded file: %s", exc)
+            values = ("", "", "", "")
+        customer, project, purchase_order, sales_order = values
         self._last_customer = customer
         self._last_project = project
-        self._last_customer_po = po or "TBD"
-        self._last_sales_order = so or "TBD"
-
-        # Refresh the read-only display.
+        self._last_customer_po = purchase_order or "TBD"
+        self._last_sales_order = sales_order or "TBD"
         self._refresh_info_display()
+
 
     def _refresh_info_display(self) -> None:
         """Update the read-only project-info labels to reflect what was
@@ -715,163 +612,11 @@ class PackingSlipFrame(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _process_multisheet_device_file(self, file_path: str) -> Dict[str, pd.DataFrame]:
-        """Read a multi-sheet device-report Excel file where each sheet is one device.
+        processed, self._family_by_ip, self._display_ip_for_key = (
+            process_multisheet_device_file(file_path)
+        )
+        return processed
 
-        Auto-detects the header row by scanning for 'PART NUMBER' / 'SERIAL NUMBER'.
-        Extracts the source IP from sheet metadata and uses it as the dict key.
-        Adds a 'System Name' column (= sheet name) so the workbook builder can
-        use the sheet name as the device name.
-
-        Side effect: populates ``self._family_by_ip`` with detected device family
-        per IP based on the System Type metadata cell (Excel F7).
-        """
-        processed_data: Dict[str, pd.DataFrame] = {}
-        self._family_by_ip = {}
-        # Maps disambiguated key (e.g. "10.0.0.1_us..._com") back to the bare
-        # source IP ("10.0.0.1") so the Summary column shows the real IP
-        # rather than the synthetic dict key. Pre-seeded for every device,
-        # even when no dedup was needed, so the workbook builder never
-        # silently falls through to the mangled key.
-        self._display_ip_for_key: Dict[str, str] = {}
-        try:
-            xl = pd.ExcelFile(file_path)
-            for sheet_name in xl.sheet_names:
-                df_raw = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
-
-                # Extract source IP from metadata (typically row 4, column 5)
-                ip_address = sheet_name  # fallback to sheet name
-                try:
-                    val = str(df_raw.iloc[4, 5]).strip()
-                    if val and val.lower() != "nan":
-                        ip_address = val
-                except (IndexError, KeyError):
-                    pass
-
-                # Extract System Type from F7 (iloc row 6, col 5) for family detection.
-                system_type = ""
-                try:
-                    st = str(df_raw.iloc[6, 5]).strip()
-                    if st and st.lower() != "nan":
-                        system_type = st
-                except (IndexError, KeyError):
-                    pass
-
-                # Remember the bare IP BEFORE we mangle the key. The display
-                # map lets the workbook builder show "10.0.0.1" on the Summary
-                # row even when the dict key is "10.0.0.1_<sheetname>".
-                bare_ip = ip_address
-
-                # Ensure key uniqueness if multiple devices share the same IP
-                if ip_address in processed_data:
-                    ip_address = f"{ip_address}_{sheet_name}"
-
-                # Find the header row: first row containing 'PART NUMBER' or 'SERIAL NUMBER'
-                header_row = None
-                for idx, row in df_raw.iterrows():
-                    row_vals = [str(v).upper() for v in row if str(v).lower() != "nan"]
-                    joined = " ".join(row_vals)
-                    if "PART NUMBER" in joined or "SERIAL NUMBER" in joined:
-                        header_row = idx
-                        break
-
-                if header_row is None:
-                    logging.warning(f"Sheet '{sheet_name}': no header row found, skipping")
-                    continue
-
-                df = pd.read_excel(file_path, sheet_name=sheet_name, header=header_row)
-                strip_dataframe_strings(df)
-
-                # Truncate at the "ADDITIONAL NODE INFORMATION" sentinel row — everything
-                # after that line (software, slots, redundancy, power, topology) is not
-                # needed in a packing slip.
-                sentinel_mask = df.apply(
-                    lambda row: row.astype(str).str.upper().str.contains(
-                        r"ADDITIONAL\s+NODE\s+INFORMATION", regex=True
-                    ).any(),
-                    axis=1,
-                )
-                if sentinel_mask.any():
-                    cutoff = sentinel_mask.idxmax()
-                    df = df.loc[:cutoff - 1] if cutoff > df.index[0] else pd.DataFrame(columns=df.columns)
-
-                # Drop rows where all key columns are empty
-                relevant_cols = [
-                    c for c in df.columns
-                    if any(k in str(c).upper() for k in ("PART NUMBER", "SERIAL NUMBER", "DESCRIPTION"))
-                ]
-                if relevant_cols:
-                    df = df.dropna(subset=relevant_cols, how="all")
-                    df = df[
-                        ~df[relevant_cols].apply(
-                            lambda r: all(str(v).strip() in ("", "nan") for v in r), axis=1
-                        )
-                    ]
-
-                # Add System Name column so workbook builder uses sheet name as device name
-                df.insert(0, "System Name", sheet_name)
-
-                if not df.empty:
-                    processed_data[ip_address] = df.reset_index(drop=True)
-                    self._display_ip_for_key[ip_address] = bare_ip
-                    # Map system type to family.
-                    st_l = system_type.lower()
-                    if "rls" in st_l or "ciena" in st_l:
-                        self._family_by_ip[ip_address] = "rls"
-                    elif "psi" in st_l or "1830" in st_l or "nokia" in st_l:
-                        self._family_by_ip[ip_address] = "psi"
-                    else:
-                        self._family_by_ip[ip_address] = "default"
-
-            return processed_data
-
-        except Exception as e:
-            logging.error(f"Error processing multi-sheet device file: {e}")
-            raise
 
     def _process_file_for_packing_slip(self, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        """Convert uploaded DataFrame to per-device dict for the workbook builder."""
-        processed_data: Dict[str, pd.DataFrame] = {}
-        try:
-            # Truncate at "ADDITIONAL NODE INFORMATION" sentinel — not needed in packing slips.
-            sentinel_mask = df.apply(
-                lambda row: row.astype(str).str.upper().str.contains(
-                    r"ADDITIONAL\s+NODE\s+INFORMATION", regex=True
-                ).any(),
-                axis=1,
-            )
-            if sentinel_mask.any():
-                cutoff = sentinel_mask.idxmax()
-                df = df.loc[:cutoff - 1] if cutoff > df.index[0] else pd.DataFrame(columns=df.columns)
-
-            # Use lowercased column names only for device key detection; preserve
-            # original column casing so the workbook builder can access "Part Number" etc.
-            col_lower_map = {col: str(col).lower() for col in df.columns}
-
-            # Check patterns from most specific to least specific to avoid
-            # matching unrelated columns like "Part Name" or "File Name".
-            # "ip" is NOT used as a bare substring because it matches "Description".
-            device_key = None
-            priority_patterns = ["system name", "device", "ip address", " ip"]
-            fallback_patterns = ["name"]
-            for pattern_list in (priority_patterns, fallback_patterns):
-                for pattern in pattern_list:
-                    for col, col_lower in col_lower_map.items():
-                        if pattern in col_lower or (col_lower.strip() == "ip" and pattern == " ip"):
-                            device_key = col
-                            break
-                    if device_key:
-                        break
-                if device_key:
-                    break
-
-            if device_key:
-                for device_id, group in df.groupby(device_key, sort=False):
-                    processed_data[str(device_id)] = group.reset_index(drop=True)
-            else:
-                processed_data["Device_0"] = df.reset_index(drop=True)
-
-            return processed_data
-
-        except Exception as e:
-            logging.error(f"Error processing file: {e}")
-            raise
+        return process_packing_slip_frame(df)
