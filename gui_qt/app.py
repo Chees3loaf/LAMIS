@@ -6,6 +6,7 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from gui_qt.main_window import AtlasPilotWindow
+from gui_qt.interaction import ComboBoxWheelGuard
 
 
 ATLAS_STYLESHEET = (
@@ -26,9 +27,12 @@ ATLAS_STYLESHEET = (
     "QLabel#pageIntro, QLabel#mutedText { color: #52616f; }"
     "QLabel#cardHeading { font-size: 13pt; font-weight: 600; }"
     "QFrame#workflowCard { background: white; border: 1px solid #d9e2ec; border-radius: 8px; }"
+    "QScrollArea { background: #f5f7fb; border: 0; }"
+    "QScrollArea > QWidget > QWidget { background: #f5f7fb; }"
     "QGroupBox { background: white; border: 1px solid #d9e2ec; "
-    "border-radius: 7px; font-weight: 600; margin-top: 14px; padding: 10px 8px 8px 8px; }"
-    "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+    "border-radius: 7px; font-weight: 600; margin-top: 18px; padding: 12px 8px 8px 8px; }"
+    "QGroupBox::title { subcontrol-origin: margin; subcontrol-position: top left; "
+    "left: 10px; top: 2px; padding: 2px 5px; background: white; color: #172033; }"
     "QLineEdit, QPlainTextEdit { color: #172033; background: white; "
     "border: 1px solid #bcccdc; border-radius: 5px; padding: 6px; }"
     "QLineEdit { min-height: 24px; }"
@@ -58,6 +62,9 @@ def run_atlas_qt() -> int:
     app.setApplicationName("ATLAS")
     app.setOrganizationName("LightRiver Technologies")
     app.setStyleSheet(ATLAS_STYLESHEET)
+    wheel_guard = ComboBoxWheelGuard(app)
+    app.installEventFilter(wheel_guard)
+    app._atlas_combo_wheel_guard = wheel_guard
     window = AtlasPilotWindow()
     window.show()
     return app.exec()

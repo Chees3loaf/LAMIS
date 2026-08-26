@@ -20,3 +20,6 @@ def test_line_edits_cannot_collapse_below_readable_height() -> None:
     assert "QLineEdit { min-height: 24px; }" in ATLAS_STYLESHEET
     assert "QHeaderView::section" in ATLAS_STYLESHEET
     assert "QTableWidget::item { padding: 5px; }" in ATLAS_STYLESHEET
+    assert "QScrollArea > QWidget > QWidget { background: #f5f7fb; }" in ATLAS_STYLESHEET
+    assert "subcontrol-position: top left" in ATLAS_STYLESHEET
+    assert "background: white; color: #172033" in ATLAS_STYLESHEET
