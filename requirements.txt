@@ -1,10 +1,11 @@
-﻿# Core Application Dependencies
+# Core Application Dependencies
 pandas==2.2.2
 openpyxl==3.1.2
 Pillow==10.4.0
 paramiko==3.4.0
 pyserial==3.5
 ping3==4.0.4
+requests==2.31.0
 
 # Supporting Libraries
 numpy==1.26.3
