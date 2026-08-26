@@ -14,7 +14,7 @@ from gui_qt.part_lookup_page import PartLookupPage
 from gui_qt.raw_processing_page import RawProcessingPage
 from gui_qt.sales_bom_import_page import SalesBomImportPage
 from gui_qt.packing_slip_page import PackingSlipPage
-from gui_qt.provisioning_page import ProvisioningPage
+from gui_qt.provisioning_page import LiveProvisioningWorkspace, RlsRouteWorkspace
 from gui_qt.software_upgrade_page import SoftwareUpgradePage
 from gui_qt.pages import OverviewPage, PlannedPage
 
@@ -23,8 +23,8 @@ class AtlasPilotWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("ATLAS")
-        self.resize(1120, 760)
-        self.setMinimumSize(840, 600)
+        self.resize(1180, 800)
+        self.setMinimumSize(920, 640)
         self.page_stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {
             "overview": OverviewPage(),
@@ -38,7 +38,8 @@ class AtlasPilotWindow(QMainWindow):
             "diagnostics": DiagnosticsPage(),
             "packing-slip": PackingSlipPage(),
             "file-processing": PlannedPage("File Processing"),
-            "provisioning": ProvisioningPage(),
+            "live-provisioning": LiveProvisioningWorkspace(),
+            "route-builder": RlsRouteWorkspace(),
             "upgrades": SoftwareUpgradePage(),
         }
         for page in self.pages.values():
@@ -81,7 +82,8 @@ class AtlasPilotWindow(QMainWindow):
         self._add_nav_button(layout, "Inventory", "inventory")
         self._add_nav_button(layout, "Diagnostics", "diagnostics")
         self._add_nav_button(layout, "Packing Slips", "packing-slip")
-        self._add_nav_button(layout, "Provisioning", "provisioning")
+        self._add_nav_button(layout, "Live Provisioning", "live-provisioning")
+        self._add_nav_button(layout, "Ciena Route Builder", "route-builder")
         self._add_nav_button(layout, "Software Upgrades", "upgrades")
         layout.addSpacing(14)
         self._add_section_label(layout, "FILE PROCESSING")

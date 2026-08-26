@@ -17,4 +17,6 @@ def test_combo_popup_has_explicit_readable_colors() -> None:
 
 
 def test_line_edits_cannot_collapse_below_readable_height() -> None:
-    assert "QLineEdit { min-height: 20px; }" in ATLAS_STYLESHEET
+    assert "QLineEdit { min-height: 24px; }" in ATLAS_STYLESHEET
+    assert "QHeaderView::section" in ATLAS_STYLESHEET
+    assert "QTableWidget::item { padding: 5px; }" in ATLAS_STYLESHEET

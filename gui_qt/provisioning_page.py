@@ -46,6 +46,7 @@ class LiveProvisioningPage(QWidget):
 
         source = QGroupBox("Target device")
         source_form = QFormLayout(source)
+        source_form.setHorizontalSpacing(16); source_form.setVerticalSpacing(10)
         self.file_edit = QLineEdit()
         file_row = QWidget(); file_layout = QHBoxLayout(file_row); file_layout.setContentsMargins(0, 0, 0, 0)
         browse = QPushButton("Browse…"); browse.clicked.connect(self._browse_devices)
@@ -59,6 +60,7 @@ class LiveProvisioningPage(QWidget):
 
         connection = QGroupBox("Connection and network")
         connection_form = QFormLayout(connection)
+        connection_form.setHorizontalSpacing(16); connection_form.setVerticalSpacing(10)
         self.connection_combo = QComboBox(); self.connection_combo.addItems(["LAN (SSH)", "Serial (Console)"]); self.connection_combo.currentIndexChanged.connect(self._connection_changed)
         self.connect_ip_edit = QLineEdit(); self.connect_ip_edit.setPlaceholderText("Defaults to target IP")
         self.serial_edit = QLineEdit("COM1")
@@ -72,6 +74,7 @@ class LiveProvisioningPage(QWidget):
 
         self.options = QGroupBox("Device options")
         options_form = QFormLayout(self.options)
+        options_form.setHorizontalSpacing(16); options_form.setVerticalSpacing(10)
         self.configure_card = QCheckBox("Configure card type"); self.sync = QCheckBox("Synchronize redundancy")
         self.vlan_edit = QLineEdit("4000"); self.iface_edit = QLineEdit("mgmt"); self.vlan_name_edit = QLineEdit("mgmt"); self.mgmt_port_edit = QLineEdit()
         self.update_existing = QCheckBox("Update existing configuration"); self.src_iface_edit = QLineEdit()
@@ -87,7 +90,7 @@ class LiveProvisioningPage(QWidget):
         controls.addWidget(self.run_button); controls.addWidget(self.stop_button); controls.addWidget(self.status, 1)
         self.log = QPlainTextEdit(); self.log.setReadOnly(True); self.log.setMinimumHeight(150)
 
-        content = QWidget(); layout = QVBoxLayout(content)
+        content = QWidget(); layout = QVBoxLayout(content); layout.setContentsMargins(4, 4, 4, 8); layout.setSpacing(14)
         layout.addWidget(source); layout.addWidget(connection); layout.addWidget(self.options); layout.addLayout(controls); layout.addWidget(self.log)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(content)
         outer = QVBoxLayout(self); outer.setContentsMargins(0, 0, 0, 0); outer.addWidget(scroll)
@@ -204,6 +207,7 @@ class RlsRouteProjectPage(QWidget):
         super().__init__(parent); self.project = None; self.path = ""; self.thread = None; self.worker = None; self.attached_diagram = None
         project_box = QGroupBox("Route project")
         project_form = QFormLayout(project_box)
+        project_form.setHorizontalSpacing(16); project_form.setVerticalSpacing(10)
         self.path_edit = QLineEdit(); self.path_edit.setReadOnly(True)
         new_button = QPushButton("New"); new_button.clicked.connect(self._new)
         open_button = QPushButton("Open project…"); open_button.clicked.connect(self._open)
@@ -211,10 +215,10 @@ class RlsRouteProjectPage(QWidget):
         path_row = QWidget(); path_layout = QHBoxLayout(path_row); path_layout.setContentsMargins(0, 0, 0, 0); path_layout.addWidget(self.path_edit, 1); path_layout.addWidget(new_button); path_layout.addWidget(open_button); path_layout.addWidget(save_button)
         self.route_label = QLabel("No project loaded")
         project_form.addRow("File", path_row); project_form.addRow("Route", self.route_label)
-        details = QGroupBox("Project details"); details_form = QFormLayout(details)
+        details = QGroupBox("Project details"); details_form = QFormLayout(details); details_form.setHorizontalSpacing(16); details_form.setVerticalSpacing(10)
         self.route_edit = QLineEdit(); self.title_edit = QLineEdit(); self.revision_edit = QLineEdit("1"); self.ospf_edit = QLineEdit(); self.notes_edit = QLineEdit()
         for label, widget in (("Route code", self.route_edit), ("Title", self.title_edit), ("Revision", self.revision_edit), ("OSPF area", self.ospf_edit), ("Notes", self.notes_edit)): details_form.addRow(label, widget)
-        self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Order", "Site", "TID", "Role", "OAM IP", "Review"]); self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection); self.table.itemSelectionChanged.connect(self._load_selected_shelf); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.table.horizontalHeader().setStretchLastSection(True)
+        self.table = QTableWidget(0, 6); self.table.setHorizontalHeaderLabels(["Order", "Site", "TID", "Role", "OAM IP", "Review"]); self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers); self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows); self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection); self.table.itemSelectionChanged.connect(self._load_selected_shelf); self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents); self.table.horizontalHeader().setStretchLastSection(True); self.table.verticalHeader().setDefaultSectionSize(34); self.table.setMinimumHeight(210)
         shelf_box = QGroupBox("Shelf editor"); shelf_form = QFormLayout(shelf_box)
         self.selected_shelf_id = ""; self.site_code_edit = QLineEdit(); self.site_name_edit = QLineEdit(); self.tid_edit = QLineEdit(); self.oam_edit = QLineEdit(); self.release_edit = QLineEdit("RLS R4.0"); self.variant_edit = QLineEdit("RLS"); self.power_edit = QLineEdit("A/B -48 VDC"); self.raman_edit = QLineEdit(); self.shelf_notes_edit = QLineEdit(); self.role_combo = QComboBox()
         for profile_id, label in route_profile_choices(): self.role_combo.addItem(label, profile_id)
@@ -237,8 +241,8 @@ class RlsRouteProjectPage(QWidget):
         controls = QHBoxLayout(); self.validate_button = QPushButton("Validate / Evaluate CLI"); self.validate_button.clicked.connect(self._validate); self.export_button = QPushButton("Export Route Bundle…"); self.export_button.clicked.connect(self._export); self.validate_button.setEnabled(False); self.export_button.setEnabled(False); self.status = QLabel("Open a route project to begin")
         controls.addWidget(self.validate_button); controls.addWidget(self.export_button); controls.addWidget(self.status, 1)
         self.results = QPlainTextEdit(); self.results.setReadOnly(True); self.results.setMinimumHeight(150)
-        note = QLabel("This migration slice preserves reviewed provider payloads and route ordering. Exact-provider editing and diagram transcription remain in the Tkinter Route Builder until their Qt panels complete."); note.setObjectName("mutedText"); note.setWordWrap(True)
-        editor_content = QWidget(); editor_layout = QVBoxLayout(editor_content); editor_layout.addWidget(project_box); editor_layout.addWidget(details); editor_layout.addWidget(self.table); editor_layout.addWidget(shelf_box); editor_layout.addWidget(exact_box); editor_layout.addWidget(diagram_box); editor_layout.addLayout(controls); editor_layout.addWidget(self.results); editor_layout.addWidget(note)
+        note = QLabel("Route drafts, exact-provider review, diagram transcription, validation, and audited bundle export are available in this workspace."); note.setObjectName("mutedText"); note.setWordWrap(True)
+        editor_content = QWidget(); editor_layout = QVBoxLayout(editor_content); editor_layout.setContentsMargins(4, 4, 4, 8); editor_layout.setSpacing(14); editor_layout.addWidget(project_box); editor_layout.addWidget(details); editor_layout.addWidget(self.table); editor_layout.addWidget(shelf_box); editor_layout.addWidget(exact_box); editor_layout.addWidget(diagram_box); editor_layout.addLayout(controls); editor_layout.addWidget(self.results); editor_layout.addWidget(note)
         scroll = QScrollArea(); scroll.setWidgetResizable(True); scroll.setWidget(editor_content)
         layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.addWidget(scroll)
 
@@ -419,3 +423,32 @@ class RlsRouteProjectPage(QWidget):
         except Exception as exc:
             self._error(str(exc), "Select the exact original source whose hash and normalized image provenance match this project."); return
         self.attached_diagram = diagram; self.diagram_status.setText(f"Reattached locally: {diagram.source_file_name}"); self.status.setText("Original diagram reattached — no external AI processing used")
+
+
+class _ProvisioningWorkspace(QWidget):
+    def __init__(self, title: str, description: str, workspace: QWidget, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        heading = QLabel(title); heading.setObjectName("pageHeading")
+        intro = QLabel(description); intro.setObjectName("pageIntro"); intro.setWordWrap(True)
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(12)
+        layout.addWidget(heading); layout.addWidget(intro); layout.addWidget(workspace, 1)
+
+
+class LiveProvisioningWorkspace(_ProvisioningWorkspace):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(
+            "Live Provisioning",
+            "Configure a directly connected Nokia or Ciena device over SSH or serial console.",
+            LiveProvisioningPage(),
+            parent,
+        )
+
+
+class RlsRouteWorkspace(_ProvisioningWorkspace):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(
+            "Ciena Route Builder",
+            "Build, review, validate, and export audited Ciena RLS R4.0 route projects.",
+            RlsRouteProjectPage(),
+            parent,
+        )
