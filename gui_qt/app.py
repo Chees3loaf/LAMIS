@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication, QSplashScreen
 
 from gui_qt.main_window import AtlasPilotWindow
 from gui_qt.interaction import ComboBoxWheelGuard
@@ -57,6 +60,32 @@ ATLAS_STYLESHEET = (
 )
 
 
+def atlas_splash_path() -> Path:
+    """Resolve the bundled splash asset in source and PyInstaller builds."""
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[1]))
+    return bundle_root / "ATLAS Logo.png"
+
+
+def create_atlas_splash(app: QApplication) -> QSplashScreen | None:
+    pixmap = QPixmap(str(atlas_splash_path()))
+    if pixmap.isNull():
+        return None
+    screen = app.primaryScreen()
+    if screen is not None:
+        available = screen.availableGeometry().size()
+        target_width = min(1280, max(640, int(available.width() * 0.78)))
+        target_height = min(720, max(360, int(available.height() * 0.78)))
+        pixmap = pixmap.scaled(
+            target_width,
+            target_height,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+    splash = QSplashScreen(pixmap)
+    splash.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+    return splash
+
+
 def run_atlas_qt() -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("ATLAS")
@@ -65,8 +94,14 @@ def run_atlas_qt() -> int:
     wheel_guard = ComboBoxWheelGuard(app)
     app.installEventFilter(wheel_guard)
     app._atlas_combo_wheel_guard = wheel_guard
+    splash = create_atlas_splash(app)
+    if splash is not None:
+        splash.show()
+        app.processEvents()
     window = AtlasPilotWindow()
     window.show()
+    if splash is not None:
+        splash.finish(window)
     return app.exec()
 
 
