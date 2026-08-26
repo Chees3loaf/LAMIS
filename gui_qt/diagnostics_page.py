@@ -7,7 +7,7 @@ from pathlib import Path
 from queue import Queue
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QTabWidget, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
 from services.network_audit_service import NetworkAuditRequest, run_network_audit, validate_network_audit_request
 from services.tds_service import TdsRequest, run_tds, validate_tds_request
@@ -96,6 +96,8 @@ class NetworkAuditPage(QWidget):
 
         config_box = QGroupBox("Network Audit configuration")
         form = QFormLayout(config_box)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
         self.type_combo = QComboBox()
         self.type_combo.addItems(["Ciena RLS", "Nokia PSI"])
         self.type_combo.currentTextChanged.connect(self._type_changed)
@@ -120,6 +122,7 @@ class NetworkAuditPage(QWidget):
 
         options = QGroupBox("Optional collection")
         options_layout = QVBoxLayout(options)
+        options_layout.setSpacing(10)
         self.capture_alarms = QCheckBox("Capture active alarms")
         self.capture_history = QCheckBox("Capture alarm history")
         self.debug = QCheckBox("Debug mode (verbose logging)")
@@ -137,6 +140,8 @@ class NetworkAuditPage(QWidget):
         self.log.setReadOnly(True)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 8)
+        layout.setSpacing(14)
         layout.addWidget(config_box)
         layout.addWidget(options)
         layout.addLayout(controls)
@@ -227,6 +232,8 @@ class TdsPage(QWidget):
 
         config_box = QGroupBox("TDS diagnostics")
         form = QFormLayout(config_box)
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
         self.host_edit = QLineEdit()
         self.host_edit.setPlaceholderText("Device IP address or hostname")
         self.platform_combo = QComboBox()
@@ -254,6 +261,8 @@ class TdsPage(QWidget):
         self.log.setReadOnly(True)
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 8)
+        layout.setSpacing(14)
         layout.addWidget(config_box)
         layout.addLayout(controls)
         layout.addWidget(self.log, 1)
@@ -348,18 +357,38 @@ class TdsPage(QWidget):
 
 
 class DiagnosticsPage(QWidget):
+    """Compatibility container retained for older callers."""
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        heading = QLabel("Diagnostics")
-        heading.setObjectName("pageHeading")
-        intro = QLabel("Run single-device TDS diagnostics and topology-aware network audits.")
-        intro.setObjectName("pageIntro")
-        tabs = QTabWidget()
-        self.tds_page = TdsPage()
-        self.network_audit_page = NetworkAuditPage()
-        tabs.addTab(self.tds_page, "TDS")
-        tabs.addTab(self.network_audit_page, "Network Audit")
-        layout = QVBoxLayout(self)
-        layout.addWidget(heading)
-        layout.addWidget(intro)
-        layout.addWidget(tabs, 1)
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(12)
+        layout.addWidget(QLabel("Diagnostics workflows are available as separate navigation sections."))
+
+
+class _DiagnosticsWorkspace(QWidget):
+    def __init__(self, title: str, description: str, workspace: QWidget, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        heading = QLabel(title); heading.setObjectName("pageHeading")
+        intro = QLabel(description); intro.setObjectName("pageIntro"); intro.setWordWrap(True)
+        layout = QVBoxLayout(self); layout.setContentsMargins(0, 0, 0, 0); layout.setSpacing(12)
+        layout.addWidget(heading); layout.addWidget(intro); layout.addWidget(workspace, 1)
+
+
+class TdsDiagnosticsWorkspace(_DiagnosticsWorkspace):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(
+            "TDS Diagnostics",
+            "Collect a single-device technical diagnostic snapshot from a Ciena RLS or 6500 platform.",
+            TdsPage(),
+            parent,
+        )
+
+
+class NetworkAuditWorkspace(_DiagnosticsWorkspace):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(
+            "Network Audit",
+            "Discover the connected Ciena RLS or Nokia PSI topology and create an Excel audit report.",
+            NetworkAuditPage(),
+            parent,
+        )

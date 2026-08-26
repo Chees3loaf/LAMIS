@@ -33,9 +33,8 @@ class OverviewPage(QWidget):
         heading = QLabel("ATLAS workspace")
         heading.setObjectName("pageHeading")
         intro = QLabel(
-            "The PySide6 migration is being introduced workflow by workflow. "
-            "Core file-processing workflows are ready for evaluation; the "
-            "production Tkinter application remains available during migration."
+            "Open an ATLAS operational workflow. The PySide6 interface is the "
+            "default application; the legacy Tk interface remains available as a fallback."
         )
         intro.setWordWrap(True)
         intro.setObjectName("pageIntro")
@@ -49,8 +48,10 @@ class OverviewPage(QWidget):
             ("Sales BOM Import", "Turn selected Sales BOM sheets into per-site packing workbooks.", "sales-bom-import", True),
             ("Packing Slips", "Generate packing-slip workbooks from inventory files.", "packing-slip", True),
             ("Inventory", "Collect live LAN or serial inventory into report workbooks.", "inventory", True),
-            ("Diagnostics", "Run Ciena RLS and Nokia PSI topology-aware network audits.", "diagnostics", True),
-            ("Provisioning", "Generate and execute supported provisioning workflows.", "provisioning", False),
+            ("TDS Diagnostics", "Collect a single-device Ciena technical diagnostic snapshot.", "tds-diagnostics", True),
+            ("Network Audit", "Run Ciena RLS and Nokia PSI topology-aware network audits.", "network-audit", True),
+            ("Live Provisioning", "Configure a directly connected supported Nokia or Ciena device.", "live-provisioning", True),
+            ("Ciena Route Builder", "Build and export audited Ciena RLS R4.0 route projects.", "route-builder", True),
         )
         for index, definition in enumerate(definitions):
             card = WorkflowCard(*definition[:3], available=definition[3])
