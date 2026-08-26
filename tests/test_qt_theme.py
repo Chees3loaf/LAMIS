@@ -2,6 +2,12 @@
 from gui_qt.app import ATLAS_STYLESHEET
 
 
+def test_navigation_uses_lightriver_brand_blues() -> None:
+    assert "QFrame#navigation { background: #064291; }" in ATLAS_STYLESHEET
+    assert "QPushButton#navButton:hover { background: #0d63bd; }" in ATLAS_STYLESHEET
+    assert "QPushButton#navButton:checked { color: white; background: #1688f8;" in ATLAS_STYLESHEET
+
+
 def test_buttons_have_contrasting_rest_hover_and_pressed_states() -> None:
     assert "QPushButton { color: #172033; background: #ffffff;" in ATLAS_STYLESHEET
     assert "QPushButton:hover { color: #ffffff; background: #243b53;" in ATLAS_STYLESHEET
