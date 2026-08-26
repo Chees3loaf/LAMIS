@@ -19,7 +19,7 @@ from services.raw_processing_core import (
     resolve_script_module,
     split_raw_output_by_commands,
 )
-from gui.workbook_builder import WorkbookBuilder
+from services.workbook_builder import WorkbookBuilder
 from utils.helpers import get_data_dir, get_database_path
 
 

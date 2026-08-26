@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from typing import Callable
 
 from gui.bom_frame import BomFrame
-from gui.workbook_builder import WorkbookBuilder
+from services.workbook_builder import WorkbookBuilder
 import script_interface
 from utils.helpers import get_data_dir
 

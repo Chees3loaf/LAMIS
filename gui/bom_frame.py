@@ -17,7 +17,7 @@ from tkinter import ttk, scrolledtext, filedialog, messagebox
 
 import openpyxl
 
-from gui.workbook_builder import (
+from services.workbook_builder import (
     INVENTORY_TAB_NAME,
     _LEGACY_INVENTORY_TAB_NAME,
     find_inventory_sheet_name,
