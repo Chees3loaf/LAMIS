@@ -30,11 +30,11 @@ CREDS_CONFIG_FILE = _get_user_data_dir() / "credentials_config.json"
 # Built-in seed defaults — used ONLY to populate the encrypted config on first
 # run. After seeding, defaults are read from the encrypted config file and these
 # constants are never consulted again. Override the seed values in a fresh
-# install by setting LAMIS_SEED_DEFAULTS=user1:pw1,user2:pw2 in the environment
+# install by setting ATLAS_SEED_DEFAULTS=user1:pw1,user2:pw2 in the environment
 # before first launch, or by editing this list before building.
 #
 # The defaults can be disabled entirely (e.g. for non-lab deployments) by
-# setting LAMIS_DISABLE_DEFAULT_CREDS=1; in that case the credential failure
+# setting ATLAS_DISABLE_DEFAULT_CREDS=1; in that case the credential failure
 # handler will jump straight to prompting the user.
 _BUILTIN_DEFAULT_SEED: List[Tuple[str, str]] = [
     # Most devices default to admin/admin (Smartoptics DCP, Nokia SAR/IXR).
@@ -57,7 +57,11 @@ _BUILTIN_DEFAULT_SEED: List[Tuple[str, str]] = [
 
 
 def _load_seed_from_env() -> Optional[List[Tuple[str, str]]]:
-    raw = os.environ.get("LAMIS_SEED_DEFAULTS", "").strip()
+    raw = (
+        os.environ.get("ATLAS_SEED_DEFAULTS")
+        or os.environ.get("LAMIS_SEED_DEFAULTS")  # legacy compatibility
+        or ""
+    ).strip()
     if not raw:
         return None
     out: List[Tuple[str, str]] = []
@@ -72,7 +76,12 @@ def _load_seed_from_env() -> Optional[List[Tuple[str, str]]]:
 
 
 def _defaults_disabled() -> bool:
-    return os.environ.get("LAMIS_DISABLE_DEFAULT_CREDS", "").strip() in ("1", "true", "yes")
+    raw = (
+        os.environ.get("ATLAS_DISABLE_DEFAULT_CREDS")
+        or os.environ.get("LAMIS_DISABLE_DEFAULT_CREDS")  # legacy compatibility
+        or ""
+    )
+    return raw.strip().lower() in ("1", "true", "yes")
 
 
 def _get_or_create_key() -> bytes:
@@ -237,7 +246,7 @@ def _seed_defaults_into_config() -> None:
     config.setdefault(
         "notes",
         "All credential values are encrypted with Fernet. "
-        "Set LAMIS_DISABLE_DEFAULT_CREDS=1 to skip default-credential attempts.",
+        "Set ATLAS_DISABLE_DEFAULT_CREDS=1 to skip default-credential attempts.",
     )
     if _write_config_file(config):
         if existing_raw and needs_reorder and not encrypted_new:
@@ -285,14 +294,14 @@ def load_credentials_from_config() -> Tuple[Optional[str], Optional[str]]:
     Returns:
         (username, password) of ``_BUILTIN_DEFAULT_SEED[0]`` after Fernet
         decrypt, else ``(None, None)`` if defaults are disabled via
-        ``LAMIS_DISABLE_DEFAULT_CREDS`` or the seed list is empty.
+        ``ATLAS_DISABLE_DEFAULT_CREDS`` or the seed list is empty.
     """
     # Make sure defaults are seeded on first run, and migrate away any
     # legacy user-credential block from older installs.
     _seed_defaults_into_config()
 
     if _defaults_disabled():
-        logging.debug("[CREDS] Default credentials disabled by LAMIS_DISABLE_DEFAULT_CREDS")
+        logging.debug("[CREDS] Default credentials disabled by ATLAS_DISABLE_DEFAULT_CREDS")
         return (None, None)
     defaults = _load_defaults_from_config()
     if defaults:
@@ -304,7 +313,7 @@ def get_default_credentials_to_try() -> List[Tuple[str, str]]:
     """Get list of default credentials to try (in order).
 
     Returns an empty list if defaults have been disabled via the
-    ``LAMIS_DISABLE_DEFAULT_CREDS`` environment variable.
+    ``ATLAS_DISABLE_DEFAULT_CREDS`` environment variable.
     """
     if _defaults_disabled():
         return []
@@ -481,4 +490,3 @@ def prompt_for_credentials_gui(parent_window=None) -> Optional[Tuple[str, str]]:
     except Exception as e:
         logging.error(f"[CREDS] Failed to show credential prompt: {e}")
         return None
-

@@ -76,7 +76,7 @@ python main.py
 **Option 2:** Re-seed defaults before launch
 
 ```bash
-set LAMIS_SEED_DEFAULTS=username:password
+set ATLAS_SEED_DEFAULTS=username:password
 python main.py
 ```
 

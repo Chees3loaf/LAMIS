@@ -1,6 +1,6 @@
 # ATLAS Build & Deployment Guide
 
-This document covers building ATLAS (formerly LAMIS) into a Windows installer.
+This document covers building ATLAS into a Windows installer.
 
 The pipeline is:
 
@@ -229,9 +229,9 @@ and verify:
 dir "dist\ATLAS\_internal\scripts\TDS\TDS_v6.2.py"
 ```
 
-**NSIS `LAMIS.nsi has been retired`**
+**Use the ATLAS installer script**
 
-You ran `makensis LAMIS.nsi` out of muscle memory. Use `makensis ATLAS.nsi`
+Use `makensis ATLAS.nsi`
 or just `build.bat`.
 
 ### Runtime issues (in the installed app)
@@ -326,7 +326,7 @@ Store `*.pfx` files outside the repo (the project's `.gitignore` excludes
 ## File checklist before distribution
 
 ```text
-LAMIS/                             ← (folder still named LAMIS, app is ATLAS)
+ATLAS/
 ├── dist\
 │   ├── ATLAS_Setup.exe            ← final deliverable
 │   └── ATLAS\                     ← (deleted by build.bat --release)

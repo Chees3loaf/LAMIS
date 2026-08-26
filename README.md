@@ -1,5 +1,7 @@
 # Automated Toolkit for Lightriver Asset & Systems (ATLAS)
 
+Copyright © 2024–2026 ZeroToil. All rights reserved.
+
 A comprehensive network device management platform supporting Nokia (7705 SAR-8, 7250 IXR, 1830), Ciena 6500, and Smartoptics DCP devices.
 
 **Key Features:**
@@ -46,8 +48,8 @@ Supported devices:
 1. **Clone the repository:**
 
    ```bash
-   git clone https://github.com/Chees3loaf/Network-Inventory-Update.git
-   cd Network-Inventory-Update
+   git clone https://github.com/ZeroToil/ATLAS.git
+   cd ATLAS
    ```
 
 2. **Create a virtual environment (optional but recommended):**
@@ -92,7 +94,7 @@ Supported devices:
    - Test/Diagnostic/Showcase mode (not currently active)
 
 5. **Logging:**
-   - All operations logged to `logs/LAMIS_YYYY-MM-DD_HH-MM-SS.log`
+   - All operations logged to `logs/ATLAS_YYYY-MM-DD_HH-MM-SS.log`
    - Paramiko (SSH library) log level suppressed to reduce verbosity
 
 ## Key Features & Recent Improvements
@@ -121,7 +123,7 @@ Supported devices:
 
 ### Logging & Debugging
 
-- **Timestamped logs** — Each run creates `logs/LAMIS_YYYY-MM-DD_HH-MM-SS.log`
+- **Timestamped logs** — Each run creates `logs/ATLAS_YYYY-MM-DD_HH-MM-SS.log`
 - **Paramiko suppression** — SSH key exchange debug noise filtered; kept at WARNING level
 - **Query logging** — All commands and responses logged at DEBUG level
 - **Part lookup caching** — SQLite database avoids repeated lookups
@@ -134,7 +136,7 @@ Supported devices:
 
 ## Building & Deployment
 
-LAMIS uses a **two-stage build process** for professional deployment:
+ATLAS uses a **two-stage build process** for professional deployment:
 
 1. **Build onedir executable** — Fast startup, separate dependencies
 2. **Package installer** — Professional Windows installer (NSIS)
@@ -150,10 +152,10 @@ choco install nsis -y
 # or download from https://nsis.sourceforge.io/Download
 
 # Step 3: Build installer
-makensis LAMIS.nsi
+makensis ATLAS.nsi
 ```
 
-**Output:** `dist/LAMIS_Setup.exe` (~120-150MB) — ready for distribution
+**Output:** `dist/ATLAS_Setup.exe` (~120-150MB) — ready for distribution
 
 ### Detailed Guide
 
@@ -171,7 +173,7 @@ See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for:
 
 - Check SSH/Telnet connectivity: `ssh user@device_ip` or `telnet device_ip`
 - Verify credentials are correct (same user/password for all devices)
-- Review `logs/LAMIS_*.log` for SSH error details
+- Review `logs/ATLAS_*.log` for SSH error details
 
 **No port data in inventory:**
 
@@ -186,7 +188,7 @@ See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for:
 ## Project Structure
 
 ```text
-LAMIS/
+ATLAS/
 ├── main.py                              # Entry point; logging configuration
 ├── script_interface.py                  # Device identification, script selection, command caching
 ├── config.py                            # Configuration (log levels, paths, etc.)
@@ -195,8 +197,8 @@ LAMIS/
 │
 ├── data/
 │   ├── network_inventory.db             # SQLite cache: part number → description mappings
-│   ├── LAMIS_Packing_Slip.xlsx          # Template for individual packing slips (per device)
-│   ├── LAMIS_Consolidated_Packing_Slip.xlsx  # Template for consolidated packing slips
+│   ├── ATLAS_Packing_Slip.xlsx          # Template for individual packing slips (per device)
+│   ├── ATLAS_Consolidated_Packing_Slip.xlsx  # Template for consolidated packing slips
 │   └── Device_Report_Template.xlsx      # Template for inventory reports
 │
 ├── gui/
@@ -226,7 +228,7 @@ LAMIS/
 │   └── helpers.py                       # Utility functions
 │
 ├── logs/
-│   └── LAMIS_YYYY-MM-DD_HH-MM-SS.log   # Timestamped log files (auto-created)
+│   └── ATLAS_YYYY-MM-DD_HH-MM-SS.log   # Timestamped log files (auto-created)
 │
 └── tests/
 │   └── test_*.py                        # Unit tests (44 tests covering all major components)

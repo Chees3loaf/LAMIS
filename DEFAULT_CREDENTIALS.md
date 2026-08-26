@@ -34,12 +34,12 @@ Retry connection
   `0600`, git-ignored).
 - The seed values used to populate that file on first run are defined in
   `utils/credentials.py` as `_BUILTIN_DEFAULT_SEED`. Override them at install
-  time by setting `LAMIS_SEED_DEFAULTS=user1:pw1,user2:pw2` in the environment
+  time by setting `ATLAS_SEED_DEFAULTS=user1:pw1,user2:pw2` in the environment
   before launching the app for the first time.
 
 ## Disabling defaults
 
-Set `LAMIS_DISABLE_DEFAULT_CREDS=1` in the environment to skip default
+Set `ATLAS_DISABLE_DEFAULT_CREDS=1` in the environment to skip default
 credential attempts entirely — the app will prompt on first failure. Use this
 for any deployment outside the lab environment.
 
@@ -56,11 +56,11 @@ The `CredentialFilter` (`utils/helpers.py`) additionally redacts any
 2. Delete `credentials_config.json` (and optionally `.creds_key` to also
    rotate the encryption key).
 3. Either edit `_BUILTIN_DEFAULT_SEED` in `utils/credentials.py` and rebuild,
-   or set `LAMIS_SEED_DEFAULTS` in the environment before the next launch.
+   or set `ATLAS_SEED_DEFAULTS` in the environment before the next launch.
 4. Restart the app — fresh defaults are encrypted and seeded automatically.
 
 ## Recommended for non-lab use
 
-- Set `LAMIS_DISABLE_DEFAULT_CREDS=1`.
-- Re-seed lab defaults only when necessary via `LAMIS_SEED_DEFAULTS`, or
+- Set `ATLAS_DISABLE_DEFAULT_CREDS=1`.
+- Re-seed lab defaults only when necessary via `ATLAS_SEED_DEFAULTS`, or
     rely on the in-app prompt for operator-entered credentials.

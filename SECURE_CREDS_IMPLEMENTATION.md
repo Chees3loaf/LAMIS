@@ -44,7 +44,7 @@ On auth failure:
 #### Re-seed Defaults (One-Time Setup For Fresh Install)
 
 ```bash
-set LAMIS_SEED_DEFAULTS=admin:admin,cli:admin
+set ATLAS_SEED_DEFAULTS=admin:admin,cli:admin
 python main.py
 ```
 
@@ -56,7 +56,7 @@ default, and the auth-failure path tries the rest before prompting.
 #### Rotate / Reset Defaults
 
 Delete `%APPDATA%\ATLAS\credentials_config.json` and restart ATLAS with a new
-`LAMIS_SEED_DEFAULTS` value, or rebuild with an updated `_BUILTIN_DEFAULT_SEED`.
+`ATLAS_SEED_DEFAULTS` value, or rebuild with an updated `_BUILTIN_DEFAULT_SEED`.
 
 ### Security Features
 
@@ -94,7 +94,7 @@ Verified:
 ### Next Steps for User
 
 1. Decide whether lab defaults should be enabled.
-2. Optionally set `LAMIS_SEED_DEFAULTS` before first launch.
+2. Optionally set `ATLAS_SEED_DEFAULTS` before first launch.
 3. Run the app - it will automatically use the encrypted seeded defaults for initial attempts.
 4. If the device needs other credentials, use the in-app prompt when ATLAS asks.
 
@@ -102,4 +102,4 @@ Verified:
 
 ✓ If no `credentials_config.json` exists, ATLAS seeds one on first launch
 ✓ User-entered credentials are not persisted automatically
-✓ Default attempts can be disabled entirely with `LAMIS_DISABLE_DEFAULT_CREDS=1`
+✓ Default attempts can be disabled entirely with `ATLAS_DISABLE_DEFAULT_CREDS=1`

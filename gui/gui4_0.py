@@ -729,7 +729,7 @@ class InventoryGUI:
             f"Automated Toolkit for Lightriver Asset & Systems\n"
             f"Version: {version}    Update channel: {repo_str}\n"
             f"Logs folder: {log_dir_str}\n"
-            f"© Chees3loaf/LightRiver Technologies"
+            "Copyright © 2024–2026 ZeroToil. All rights reserved."
         )
         self._show_about_dialog(manifesto + footer)
 

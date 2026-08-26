@@ -70,7 +70,7 @@ The script finds the audit package by walking up from its own location
 environment variable so it can still find the package:
 
 ```powershell
-setx NOKIA_AUDIT_REPO "C:\Users\<you>\Downloads\LAMIS"
+setx NOKIA_AUDIT_REPO "C:\Users\<you>\Downloads\ATLAS"
 ```
 
 Without it the button still captures the transcript — it just skips the audit

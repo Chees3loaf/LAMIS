@@ -536,7 +536,7 @@ class PackingSlipFrame(ttk.Frame):
                     return
 
                 # Build a fresh single-sheet workbook from the consolidated template
-                # (data/LAMIS_Consolidated_Packing_Slip.xlsx) which has Device ID in col B
+                # (data/ATLAS_Consolidated_Packing_Slip.xlsx) which has Device ID in col B
                 base_slip_template = self.controller.workbook_builder.packing_slip_template
                 consolidated_template = os.path.join(
                     os.path.dirname(base_slip_template),

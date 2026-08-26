@@ -10,7 +10,7 @@ The three layered defenses:
 
     A. Warn-and-log — every accepted Telnet session writes a SECURITY-tagged
        WARNING to the rotating log and emits a one-shot GUI banner the first
-       time per process. Setting ``LAMIS_REQUIRE_ENCRYPTED_TRANSPORT=1``
+       time per process. Setting ``ATLAS_REQUIRE_ENCRYPTED_TRANSPORT=1``
        converts every Telnet attempt into a hard refusal.
 
     B. Per-host allowlist — ``data/telnet_allowlist.json`` (created on demand)
@@ -56,8 +56,10 @@ __all__ = [
 # Configuration & module state
 # ---------------------------------------------------------------------------
 
-ENV_REQUIRE_ENCRYPTED = "LAMIS_REQUIRE_ENCRYPTED_TRANSPORT"
-ENV_DISABLE_SSH_PROBE = "LAMIS_DISABLE_SSH_PROBE"
+ENV_REQUIRE_ENCRYPTED = "ATLAS_REQUIRE_ENCRYPTED_TRANSPORT"
+ENV_DISABLE_SSH_PROBE = "ATLAS_DISABLE_SSH_PROBE"
+_LEGACY_ENV_REQUIRE_ENCRYPTED = "LAMIS_REQUIRE_ENCRYPTED_TRANSPORT"
+_LEGACY_ENV_DISABLE_SSH_PROBE = "LAMIS_DISABLE_SSH_PROBE"
 
 _ALLOWLIST_FILENAME = "telnet_allowlist.json"
 _SSH_PROBE_TIMEOUT_S = 1.0
@@ -69,6 +71,13 @@ _SSH_PROBE_CACHE_TTL_S = 600.0  # 10 minutes
 
 _warned_hosts: set = set()  # hosts we've already logged a warning for
 _banner_emitted = False
+
+
+def _env_enabled(primary: str, legacy: str) -> bool:
+    value = os.environ.get(primary)
+    if value is None:
+        value = os.environ.get(legacy, "")
+    return value.strip().lower() in ("1", "true", "yes")
 
 
 class TelnetPolicyError(RuntimeError):
@@ -195,7 +204,7 @@ def ssh_port_open(host: str, *, timeout: float = _SSH_PROBE_TIMEOUT_S,
     Result is cached per host for ``_SSH_PROBE_CACHE_TTL_S`` seconds so we don't
     probe the same device repeatedly during one inventory run.
     """
-    if os.environ.get(ENV_DISABLE_SSH_PROBE, "").strip() in ("1", "true", "yes"):
+    if _env_enabled(ENV_DISABLE_SSH_PROBE, _LEGACY_ENV_DISABLE_SSH_PROBE):
         return False
 
     now = time.monotonic()
@@ -273,7 +282,7 @@ def enforce_telnet_policy(host: str, port: int = 23, *,
     tag = f" purpose={purpose}" if purpose else ""
 
     # Layer A: hard kill-switch via env var.
-    if os.environ.get(ENV_REQUIRE_ENCRYPTED, "").strip() in ("1", "true", "yes"):
+    if _env_enabled(ENV_REQUIRE_ENCRYPTED, _LEGACY_ENV_REQUIRE_ENCRYPTED):
         logging.error("SECURITY: telnet refused host=%s port=%d (%s=1)%s",
                       host, port, ENV_REQUIRE_ENCRYPTED, tag)
         raise TelnetPolicyError(

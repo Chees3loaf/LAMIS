@@ -8,10 +8,10 @@ REM Usage:
 REM   tools\verify_update.bat <owner>/<repo>
 REM
 REM Example:
-REM   tools\verify_update.bat Chees3loaf/LAMIS-staging
+REM   tools\verify_update.bat ZeroToil/ATLAS-staging
 REM
 REM What this does:
-REM   1. Sets LAMIS_UPDATE_REPO so utils.update.Updater queries your staging
+REM   1. Sets ATLAS_UPDATE_REPO so utils.update.Updater queries your staging
 REM      repo instead of the production one.
 REM   2. Launches the installed ATLAS.exe under that override.
 REM
@@ -32,12 +32,12 @@ setlocal
 
 if "%~1"=="" (
     echo Usage: %~nx0 ^<owner^>/^<repo^>
-    echo Example: %~nx0 Chees3loaf/LAMIS-staging
+    echo Example: %~nx0 ZeroToil/ATLAS-staging
     exit /b 1
 )
 
-set "LAMIS_UPDATE_REPO=%~1"
-echo [verify_update] Pointing ATLAS at %LAMIS_UPDATE_REPO%
+set "ATLAS_UPDATE_REPO=%~1"
+echo [verify_update] Pointing ATLAS at %ATLAS_UPDATE_REPO%
 
 set "ATLAS_EXE=%LOCALAPPDATA%\Programs\ATLAS\ATLAS.exe"
 if not exist "%ATLAS_EXE%" (

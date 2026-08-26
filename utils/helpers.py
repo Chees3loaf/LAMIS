@@ -97,7 +97,7 @@ def get_data_dir() -> Path:
 
 def get_project_root() -> Path:
     """
-    Get the LAMIS project root directory.
+    Get the ATLAS project root directory.
     
     The project root is identified by the presence of main.py and config.py.
     Searches upward from the utils directory until found.
@@ -130,7 +130,7 @@ def get_project_root() -> Path:
 
 def get_database_path() -> Path:
     """
-    Get the path to the LAMIS inventory database file.
+    Get the path to the ATLAS inventory database file.
     
     Resolves the database path relative to the project root, ensuring
     consistency across all modules.
@@ -1179,11 +1179,11 @@ def strip_dataframe_strings(df, *, columns: Optional[List[str]] = None):
 
 
 # F023: temp-file leak protection ------------------------------------------------
-_LAMIS_TEMP_PREFIXES: Tuple[str, ...] = ("ATLAS_", "PackingSlip_", "lamis_")
+_ATLAS_TEMP_PREFIXES: Tuple[str, ...] = ("ATLAS_", "PackingSlip_")
 
 
-def cleanup_stale_lamis_tempfiles(max_age_hours: float = 24.0) -> int:
-    """Remove leftover LAMIS temp files/dirs older than *max_age_hours*.
+def cleanup_stale_atlas_tempfiles(max_age_hours: float = 24.0) -> int:
+    """Remove leftover ATLAS temp files/dirs older than *max_age_hours*.
 
     Runtime code uses ``try/finally`` to clean up temp artifacts, but if the
     process is killed (OS shutdown, kill -9, hard crash) the artifacts leak.
@@ -1201,12 +1201,12 @@ def cleanup_stale_lamis_tempfiles(max_age_hours: float = 24.0) -> int:
     try:
         entries = list(tmp_root.iterdir())
     except OSError as exc:
-        logging.debug("cleanup_stale_lamis_tempfiles: cannot list %s: %s", tmp_root, exc)
+        logging.debug("cleanup_stale_atlas_tempfiles: cannot list %s: %s", tmp_root, exc)
         return 0
 
     for entry in entries:
         name = entry.name
-        if not any(name.startswith(p) for p in _LAMIS_TEMP_PREFIXES):
+        if not any(name.startswith(p) for p in _ATLAS_TEMP_PREFIXES):
             continue
         try:
             if entry.stat().st_mtime > cutoff:
@@ -1220,10 +1220,10 @@ def cleanup_stale_lamis_tempfiles(max_age_hours: float = 24.0) -> int:
                 entry.unlink(missing_ok=True)  # type: ignore[arg-type]
             removed += 1
         except OSError as exc:
-            logging.debug("cleanup_stale_lamis_tempfiles: skip %s: %s", entry, exc)
+            logging.debug("cleanup_stale_atlas_tempfiles: skip %s: %s", entry, exc)
 
     if removed:
-        logging.info("Removed %d stale LAMIS temp entr%s",
+        logging.info("Removed %d stale ATLAS temp entr%s",
                      removed, "y" if removed == 1 else "ies")
     return removed
 
@@ -1300,7 +1300,7 @@ def get_credentials(service: str = "ATLAS") -> Tuple[Optional[str], Optional[str
     Returns:
         Tuple of (username, password) of the first default, or
         ``(None, None)`` when defaults are disabled via
-        ``LAMIS_DISABLE_DEFAULT_CREDS``.
+        ``ATLAS_DISABLE_DEFAULT_CREDS``.
     """
     try:
         from utils.credentials import load_credentials_from_config
@@ -1324,7 +1324,7 @@ def set_host_key_prompt(callback: Optional[Callable[[str, str, str], bool]]) -> 
 
     The callback receives (hostname, key_type, sha256_fingerprint) and must
     return True to accept the key, False to reject. If unset, unknown keys
-    are rejected unless LAMIS_AUTO_ACCEPT_HOSTKEYS=1 is set in the env.
+    are rejected unless ATLAS_AUTO_ACCEPT_HOSTKEYS=1 is set in the env.
     """
     global _HOST_KEY_PROMPT
     _HOST_KEY_PROMPT = callback
@@ -1442,26 +1442,26 @@ def get_host_key_policy():
     """Return the configured paramiko host-key policy.
 
     Resolution order:
-      1. ``LAMIS_PROMPT_HOSTKEYS=1``  → force interactive prompting
+      1. ``ATLAS_PROMPT_HOSTKEYS=1``  → force interactive prompting
          (security override — useful in suspicious environments).
-      2. ``LAMIS_AUTO_ACCEPT_HOSTKEYS=1`` → force AutoAdd (legacy env knob).
+      2. ``ATLAS_AUTO_ACCEPT_HOSTKEYS=1`` → force AutoAdd.
       3. ``config.SSH_AUTO_ACCEPT_HOST_KEYS`` → project default
          (True for unattended bulk automation).
       4. Otherwise → PromptingHostKeyPolicy (Tk dialog).
 
     AutoAdd here is Trust-On-First-Use: the new key is persisted to the
-    LAMIS known_hosts file, and any *changed* key on a later connection
+    ATLAS known_hosts file, and any *changed* key on a later connection
     still raises (paramiko enforces this independent of the policy).
     """
     if paramiko is None:
         raise RuntimeError("paramiko is not installed")
 
-    if os.environ.get("LAMIS_PROMPT_HOSTKEYS") == "1":
+    if (os.environ.get("ATLAS_PROMPT_HOSTKEYS") or os.environ.get("LAMIS_PROMPT_HOSTKEYS")) == "1":
         return PromptingHostKeyPolicy()
 
-    if os.environ.get("LAMIS_AUTO_ACCEPT_HOSTKEYS") == "1":
+    if (os.environ.get("ATLAS_AUTO_ACCEPT_HOSTKEYS") or os.environ.get("LAMIS_AUTO_ACCEPT_HOSTKEYS")) == "1":
         logging.warning(
-            "LAMIS_AUTO_ACCEPT_HOSTKEYS=1 — auto-accepting unknown SSH host keys (TOFU)"
+            "ATLAS_AUTO_ACCEPT_HOSTKEYS=1 — auto-accepting unknown SSH host keys (TOFU)"
         )
         return SafeAutoAddPolicy(get_known_hosts_path())
 
@@ -1472,7 +1472,7 @@ def get_host_key_policy():
     if SSH_AUTO_ACCEPT_HOST_KEYS:
         logging.info(
             "[HOSTKEY] Auto-accepting unknown host keys (TOFU). "
-            "Set LAMIS_PROMPT_HOSTKEYS=1 to require operator confirmation."
+            "Set ATLAS_PROMPT_HOSTKEYS=1 to require operator confirmation."
         )
         return SafeAutoAddPolicy(get_known_hosts_path())
 
@@ -1562,7 +1562,7 @@ def ensure_host_key_known(
     max_retries: int = 3,
     retry_delay: float = 1.5,
 ) -> bool:
-    """Ensure *host*'s SSH host key is recorded in the LAMIS known_hosts file.
+    """Ensure *host*'s SSH host key is recorded in the ATLAS known_hosts file.
 
     Used by the spawn-based scripts (Nokia_1830, Nokia_PSI, Ciena_6500,
     Ciena_RLS) and the TDS launcher to perform host-key verification *before*
@@ -1590,7 +1590,7 @@ def ensure_host_key_known(
         log line that distinguishes "host key issue" from "network
         unreachable" so the operator gets an actionable signal.
 
-    Honors ``LAMIS_AUTO_ACCEPT_HOSTKEYS=1`` for headless contexts.
+    Honors ``ATLAS_AUTO_ACCEPT_HOSTKEYS=1`` for headless contexts.
     """
     if paramiko is None:
         logging.warning(
@@ -1623,7 +1623,7 @@ def ensure_host_key_known(
                 client.connect(
                     host,
                     port=port,
-                    username="__lamis_hostkey_probe__",
+                    username="__atlas_hostkey_probe__",
                     password="",
                     timeout=timeout,
                     banner_timeout=timeout,

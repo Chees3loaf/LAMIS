@@ -15,13 +15,13 @@ and easier to customize across different environments.
 APP_VERSION = "2.1.0.2"
 
 # GitHub release feed used by utils.update.Updater when running as an
-# installed (frozen) build. Overridable via the LAMIS_UPDATE_REPO env var.
+# installed (frozen) build. Overridable via the ATLAS_UPDATE_REPO env var.
 # The repo named here only needs to host the GitHub Releases — it doesn't
 # have to be the source repo. Releases live in a dedicated public
 # "Network-Inventory-Update" repo so source can stay wherever it lives
 # while update distribution gets its own home.
-GITHUB_OWNER = "Chees3loaf"
-GITHUB_REPO = "Network-Inventory-Update"
+GITHUB_OWNER = "ZeroToil"
+GITHUB_REPO = "ATLAS"
 
 # Filename of the installer asset attached to each release.
 INSTALLER_ASSET_NAME = "ATLAS_Setup.exe"
@@ -83,12 +83,12 @@ RLS_AUDIT_SSH_POOL_SIZE = 3
 # ATLAS is intended for unattended bulk operations across 100+ devices,
 # where prompting the operator to accept each new SSH host key defeats
 # the automation. By default we Trust-On-First-Use (TOFU): any unknown
-# host key is silently recorded in the LAMIS known_hosts file the first
+# host key is silently recorded in the ATLAS known_hosts file the first
 # time we see it, and enforced strictly thereafter (a *changed* key on a
 # subsequent connection still raises and aborts — protecting against
 # spoofing once the device is known).
 #
-# To restore interactive prompting, set env var LAMIS_PROMPT_HOSTKEYS=1
+# To restore interactive prompting, set env var ATLAS_PROMPT_HOSTKEYS=1
 # or flip SSH_AUTO_ACCEPT_HOST_KEYS to False below.
 SSH_AUTO_ACCEPT_HOST_KEYS = True
 
@@ -167,7 +167,7 @@ AI_ASSISTANT_ENABLED = True
 #     in the environment so the key never lives in the repo or the binary.
 #   - Company rollout: point AI_BASE_URL at the server-side proxy that holds
 #     the real key; the field laptops then carry no secret at all.
-# Both are overridable at runtime via the LAMIS_AI_BASE_URL / OPENAI_API_KEY
+# Both are overridable at runtime via the ATLAS_AI_BASE_URL / OPENAI_API_KEY
 # environment variables (see utils/ai/provider.py).
 AI_BASE_URL = None
 

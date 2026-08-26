@@ -5,7 +5,7 @@
 - Logging configured → writes to `%APPDATA%\ATLAS\logs\ATLAS_YYYY-MM-DD_HH-MM-SS.log`
   - PIL debug logs suppressed: `logging.getLogger("PIL").setLevel(WARNING)`
   - Paramiko debug logs suppressed: `logging.getLogger("paramiko").setLevel(WARNING)` (eliminates kex handshake noise per connection)
-- **cleanup_stale_lamis_tempfiles()** sweeps temp files left by prior crashed runs (max age 24h)
+- **cleanup_stale_atlas_tempfiles()** sweeps temp files left by prior crashed runs (max age 24h)
 - **LoadingScreen** appears with logo
 - **check_updates()** checks for program updates via `utils.update.Updater`
 - **start_gui()** creates:

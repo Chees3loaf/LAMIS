@@ -80,8 +80,8 @@ def main():
     if cov_para is not None:
         for run in cov_para.runs:
             run.text = run.text.replace(
-                "All 135 tests pass on the current LAMIS_2.0 branch",
-                "All 327 tests pass on the current LAMIS_2.0 branch",
+                "All 135 tests pass on the current ATLAS branch",
+                "All 327 tests pass on the current ATLAS branch",
             )
     pytest_out = find_paragraph(doc, lambda p: p.text.strip() == "135 passed")
     if pytest_out is not None:

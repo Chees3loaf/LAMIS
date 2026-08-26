@@ -266,7 +266,7 @@ def main() -> int:
         print(f"  1. build.bat --clean --release         (signed setup.exe)")
         print(f"  2. Create GitHub Release at:")
         print(
-            f"     https://github.com/Chees3loaf/Network-Inventory-Update/releases/new"
+            "     https://github.com/ZeroToil/ATLAS/releases/new"
             f"?tag=v{new_version}"
         )
         print(f"  3. Attach dist\\ATLAS_Setup.exe, paste the SHA-256 line.")

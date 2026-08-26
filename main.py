@@ -116,7 +116,7 @@ from utils.helpers import (
     get_database_path,
     set_host_key_prompt,
     default_tk_host_key_prompt,
-    cleanup_stale_lamis_tempfiles,
+    cleanup_stale_atlas_tempfiles,
     scrub_known_hosts,
     get_known_hosts_path,
 )
@@ -178,7 +178,7 @@ if getattr(config, "SERIAL_DEBUG", False):
 
 # F023: sweep stale temp files left behind by prior crashed runs (best-effort).
 try:
-    cleanup_stale_lamis_tempfiles(max_age_hours=24)
+    cleanup_stale_atlas_tempfiles(max_age_hours=24)
 except Exception as _cleanup_exc:  # pragma: no cover - defensive
     logging.debug("Startup tempfile cleanup skipped: %s", _cleanup_exc)
 

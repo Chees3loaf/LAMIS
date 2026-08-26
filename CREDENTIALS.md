@@ -40,10 +40,10 @@ To change the seeded defaults for a fresh install:
 1. Stop ATLAS.
 2. Delete `%APPDATA%\ATLAS\credentials_config.json`.
 3. Optionally delete `%APPDATA%\ATLAS\.creds_key` to rotate the encryption key too.
-4. Set `LAMIS_SEED_DEFAULTS=user1:pw1,user2:pw2` before the next launch, or edit `_BUILTIN_DEFAULT_SEED` in `utils/credentials.py` before building.
+4. Set `ATLAS_SEED_DEFAULTS=user1:pw1,user2:pw2` before the next launch, or edit `_BUILTIN_DEFAULT_SEED` in `utils/credentials.py` before building.
 5. Launch ATLAS again so the encrypted defaults are re-seeded.
 
 ## Disabling Defaults
 
-Set `LAMIS_DISABLE_DEFAULT_CREDS=1` to skip default-credential attempts
+Set `ATLAS_DISABLE_DEFAULT_CREDS=1` to skip default-credential attempts
 entirely. In that mode ATLAS will prompt once authentication fails.

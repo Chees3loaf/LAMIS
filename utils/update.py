@@ -115,7 +115,11 @@ class Updater:
         self.installed_mode = _running_as_frozen()
 
         # ----- Installed-mode config -----
-        env_repo = os.environ.get("LAMIS_UPDATE_REPO", "").strip()
+        env_repo = (
+            os.environ.get("ATLAS_UPDATE_REPO")
+            or os.environ.get("LAMIS_UPDATE_REPO")  # legacy compatibility
+            or ""
+        ).strip()
         if env_repo and "/" in env_repo:
             env_owner, env_name = env_repo.split("/", 1)
         else:
@@ -132,7 +136,11 @@ class Updater:
         self._installer_path: Optional[str] = None
 
         # ----- Dev-mode config -----
-        env_opt_out = os.environ.get("LAMIS_ALLOW_UNSIGNED_UPDATES", "").strip() in (
+        env_opt_out = (
+            os.environ.get("ATLAS_ALLOW_UNSIGNED_UPDATES")
+            or os.environ.get("LAMIS_ALLOW_UNSIGNED_UPDATES")  # legacy compatibility
+            or ""
+        ).strip() in (
             "1", "true", "yes",
         )
         self.enforce_signatures = enforce_signatures and not env_opt_out
@@ -140,7 +148,7 @@ class Updater:
             logging.warning(
                 "[UPDATE] GPG signature enforcement DISABLED — updates may be "
                 "applied from unsigned/untrusted commits. Set "
-                "LAMIS_ALLOW_UNSIGNED_UPDATES=0 (or unset it) and pass "
+                "ATLAS_ALLOW_UNSIGNED_UPDATES=0 (or unset it) and pass "
                 "enforce_signatures=True to re-enable."
             )
 
@@ -654,7 +662,7 @@ class Updater:
                 "Update aborted: commit signature verification failed.\n"
                 f"  - {joined}\n"
                 "Resolve by importing the maintainer's GPG public key, or set "
-                "LAMIS_ALLOW_UNSIGNED_UPDATES=1 to override (NOT recommended)."
+                "ATLAS_ALLOW_UNSIGNED_UPDATES=1 to override (NOT recommended)."
             )
             logging.error(f"[UPDATE] {err}")
             return False, err
@@ -722,10 +730,14 @@ class Updater:
         original argv would echo those values into the new process and into any
         process listing. We keep only ``sys.argv[0]`` (the script path) and drop
         all user-supplied arguments. Callers needing arguments preserved must
-        explicitly opt in via the ``LAMIS_RESTART_ARGS`` environment variable.
+        explicitly opt in via the ``ATLAS_RESTART_ARGS`` environment variable.
         """
         script = sys.argv[0] if sys.argv else ""
-        extra = os.environ.get("LAMIS_RESTART_ARGS", "").strip()
+        extra = (
+            os.environ.get("ATLAS_RESTART_ARGS")
+            or os.environ.get("LAMIS_RESTART_ARGS")  # legacy compatibility
+            or ""
+        ).strip()
         argv = [script] if script else []
         if extra:
             safe = []

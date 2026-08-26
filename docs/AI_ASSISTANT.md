@@ -6,7 +6,7 @@ from the indexed manuals and answers **strictly from them**, with citations. It
 is a **documentation finder, not a config generator** (see "Extractive commands"
 below).
 
-Status: prototype on branch `LAMIS_2.0`. Gated behind `config.AI_ASSISTANT_ENABLED`.
+Status: integrated into ATLAS. Gated behind `config.AI_ASSISTANT_ENABLED`.
 **Not cleared to ship to field laptops** — see "Ship-blockers".
 
 ---

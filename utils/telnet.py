@@ -1,5 +1,5 @@
 """
-Synchronous Telnet client that matches the telnetlib.Telnet API used in LAMIS.
+Synchronous Telnet client that matches the telnetlib.Telnet API used in ATLAS.
 
 Replaces the standard-library `telnetlib` module, which was deprecated in
 Python 3.11 and removed in Python 3.13.  All socket I/O is handled here so

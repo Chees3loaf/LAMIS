@@ -19,7 +19,7 @@ def _resolve_ciena_default() -> tuple:
     source every other ATLAS component uses (``credentials_config.json``).
 
     Returns ``(None, None)`` when the encrypted store is unreachable or
-    defaults have been disabled via ``LAMIS_DISABLE_DEFAULT_CREDS`` so the
+    defaults have been disabled via ``ATLAS_DISABLE_DEFAULT_CREDS`` so the
     caller falls straight through to the operator prompt instead of
     attempting an unauthenticated login.
     """

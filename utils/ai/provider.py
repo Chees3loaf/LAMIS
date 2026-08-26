@@ -86,7 +86,7 @@ class OpenAIProvider:
 
     Resolution order for the two connection settings:
         key      -> ``OPENAI_API_KEY`` env var (never stored in repo/binary).
-        base_url -> ``LAMIS_AI_BASE_URL`` env var, else ``config.AI_BASE_URL``,
+        base_url -> ``ATLAS_AI_BASE_URL`` env var, else ``config.AI_BASE_URL``,
                     else the OpenAI default.
     """
 
@@ -124,7 +124,8 @@ class OpenAIProvider:
         self._api_key = api_key or os.environ.get("OPENAI_API_KEY")
         self._base_url = (
             base_url
-            or os.environ.get("LAMIS_AI_BASE_URL")
+            or os.environ.get("ATLAS_AI_BASE_URL")
+            or os.environ.get("LAMIS_AI_BASE_URL")  # legacy compatibility
             or config.AI_BASE_URL
         )
         self._chat_model = chat_model or config.AI_CHAT_MODEL
@@ -372,7 +373,11 @@ def check_api_key() -> str:
     at launch, and we shouldn't disable the tool for a transient network blip.
     """
     key = os.environ.get("OPENAI_API_KEY")
-    base = os.environ.get("LAMIS_AI_BASE_URL") or config.AI_BASE_URL
+    base = (
+        os.environ.get("ATLAS_AI_BASE_URL")
+        or os.environ.get("LAMIS_AI_BASE_URL")  # legacy compatibility
+        or config.AI_BASE_URL
+    )
     if not key:
         try:
             from utils.ai import keystore

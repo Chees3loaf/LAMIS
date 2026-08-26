@@ -89,7 +89,7 @@ class TestRestrictPathToOwner(unittest.TestCase):
         self.assertFalse(restrict_path_to_owner(r"C:\does\not\exist\zzz"))
 
     def test_restricts_real_file(self):
-        fd, path = tempfile.mkstemp(suffix=".lamis_acl_test")
+        fd, path = tempfile.mkstemp(suffix=".atlas_acl_test")
         os.close(fd)
         try:
             self.assertTrue(restrict_path_to_owner(path))
@@ -97,7 +97,7 @@ class TestRestrictPathToOwner(unittest.TestCase):
             os.remove(path)
 
     def test_restricts_directory(self):
-        d = tempfile.mkdtemp(prefix="lamis_acl_dir_")
+        d = tempfile.mkdtemp(prefix="atlas_acl_dir_")
         try:
             self.assertTrue(restrict_path_to_owner(d, is_dir=True))
         finally:
@@ -106,7 +106,7 @@ class TestRestrictPathToOwner(unittest.TestCase):
     @unittest.skipIf(os.name != "nt", "Windows-only ACL behavior")
     def test_windows_acl_strips_inherited_users(self):
         import subprocess
-        fd, path = tempfile.mkstemp(suffix=".lamis_acl_test")
+        fd, path = tempfile.mkstemp(suffix=".atlas_acl_test")
         os.close(fd)
         try:
             restrict_path_to_owner(path)
@@ -307,7 +307,7 @@ class TestRestartArgvSanitization(unittest.TestCase):
     def test_safe_restart_argv_allows_opt_in_safe_extras(self):
         from utils.update import Updater
         with mock.patch.object(sys, "argv", ["main.py"]), \
-             mock.patch.dict(os.environ, {"LAMIS_RESTART_ARGS": "--debug --safe"}):
+             mock.patch.dict(os.environ, {"ATLAS_RESTART_ARGS": "--debug --safe"}):
             argv = Updater._safe_restart_argv()
         self.assertEqual(argv, ["main.py", "--debug", "--safe"])
 
@@ -315,7 +315,7 @@ class TestRestartArgvSanitization(unittest.TestCase):
         from utils.update import Updater
         with mock.patch.object(sys, "argv", ["main.py"]), \
              mock.patch.dict(os.environ,
-                             {"LAMIS_RESTART_ARGS": "--ok ;rm $(whoami) `id`"}):
+                             {"ATLAS_RESTART_ARGS": "--ok ;rm $(whoami) `id`"}):
             argv = Updater._safe_restart_argv()
         self.assertIn("--ok", argv)
         for bad in (";rm", "$(whoami)", "`id`"):
@@ -443,7 +443,7 @@ class TestSanitizeFilenameComponent(unittest.TestCase):
 class TestSafeResolveUnder(unittest.TestCase):
 
     def setUp(self):
-        self.base = Path(tempfile.mkdtemp(prefix="lamis_resolve_"))
+        self.base = Path(tempfile.mkdtemp(prefix="atlas_resolve_"))
 
     def tearDown(self):
         import shutil
@@ -528,7 +528,7 @@ class TestTelnetPolicy(unittest.TestCase):
         self.tp = telnet_policy
         self.tp.reset_policy_caches()
         # Redirect the allowlist file to a per-test temp location.
-        self.tmp = Path(tempfile.mkdtemp(prefix="lamis_tnp_"))
+        self.tmp = Path(tempfile.mkdtemp(prefix="atlas_tnp_"))
         self._patch = mock.patch.object(self.tp, "_allowlist_path",
                                         return_value=self.tmp / "telnet_allowlist.json")
         self._patch.start()
@@ -633,7 +633,7 @@ class TestTelnetPolicy(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# F023 — cleanup_stale_lamis_tempfiles
+# F023 — cleanup_stale_atlas_tempfiles
 # ---------------------------------------------------------------------------
 
 class TestStaleTempfileCleanup(unittest.TestCase):
@@ -641,7 +641,7 @@ class TestStaleTempfileCleanup(unittest.TestCase):
     def setUp(self):
         from utils import helpers
         self.helpers = helpers
-        self.tmp_root = Path(tempfile.mkdtemp(prefix="lamis_test_root_"))
+        self.tmp_root = Path(tempfile.mkdtemp(prefix="atlas_test_root_"))
         self._patch = mock.patch("tempfile.gettempdir",
                                  return_value=str(self.tmp_root))
         self._patch.start()
@@ -663,23 +663,23 @@ class TestStaleTempfileCleanup(unittest.TestCase):
 
     def test_removes_old_atlas_dir(self):
         old = self._make("ATLAS_oldjob", age_seconds=48 * 3600, is_dir=True)
-        n = self.helpers.cleanup_stale_lamis_tempfiles(max_age_hours=24)
+        n = self.helpers.cleanup_stale_atlas_tempfiles(max_age_hours=24)
         self.assertGreaterEqual(n, 1)
         self.assertFalse(old.exists())
 
     def test_removes_old_packing_slip_file(self):
         old = self._make("PackingSlip_abc.xlsx", age_seconds=48 * 3600)
-        self.helpers.cleanup_stale_lamis_tempfiles(max_age_hours=24)
+        self.helpers.cleanup_stale_atlas_tempfiles(max_age_hours=24)
         self.assertFalse(old.exists())
 
     def test_keeps_fresh_artifacts(self):
         fresh = self._make("ATLAS_running", age_seconds=60, is_dir=True)
-        self.helpers.cleanup_stale_lamis_tempfiles(max_age_hours=24)
+        self.helpers.cleanup_stale_atlas_tempfiles(max_age_hours=24)
         self.assertTrue(fresh.exists())
 
     def test_ignores_unrelated_files(self):
         other = self._make("not_ours.txt", age_seconds=999 * 3600)
-        self.helpers.cleanup_stale_lamis_tempfiles(max_age_hours=1)
+        self.helpers.cleanup_stale_atlas_tempfiles(max_age_hours=1)
         self.assertTrue(other.exists())
 
 
