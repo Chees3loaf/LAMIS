@@ -256,7 +256,7 @@ class TestSummaryIndexRefactorUnit(unittest.TestCase):
 
     def test_summary_index_doc_string_documents_sheet_title_key(self):
         import inspect
-        import gui.workbook_builder as wb_mod
+        import services.workbook_builder as wb_mod
         src = inspect.getsource(wb_mod)
         # The fix comment should still be present — guards against the
         # refactor being silently reverted.
@@ -271,7 +271,7 @@ class TestSummaryIndexRefactorUnit(unittest.TestCase):
         ``for sheet_title, (ip, device_name) in summary_index.items()`` —
         not the old ``for ip, (device_name, sheet_title) ...`` form."""
         import inspect
-        import gui.workbook_builder as wb_mod
+        import services.workbook_builder as wb_mod
         src = inspect.getsource(wb_mod)
         self.assertIn(
             "for sheet_title, (ip, device_name) in summary_index.items()",

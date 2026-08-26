@@ -231,7 +231,7 @@ def transcribe_route_diagram(path: str | Path, *, raman_callout_enabled: bool = 
 
 def apply_diagram_transcription(result):
     """Convert one accepted transcription using the established audited adapters."""
-    from gui.rls_route_frame import WORKBOOK_DIAGRAM_MARKER_KEY, _diagram_editor_rows, _diagram_route_links, _diagram_source_record, build_route_project, diagram_import_mutation_blockers
+    from services.rls_route_core import WORKBOOK_DIAGRAM_MARKER_KEY, _diagram_editor_rows, _diagram_route_links, _diagram_source_record, build_route_project, diagram_import_mutation_blockers
     from utils.rls_config.diagram_assets import workbook_diagram_from_source
     blockers = diagram_import_mutation_blockers(result)
     if blockers:

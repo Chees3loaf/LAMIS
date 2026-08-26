@@ -17,6 +17,7 @@ from utils.rls_config.r4_0_generator import R40_PAYLOAD_SCHEMA_VERSION
 
 _ROOT = Path(__file__).resolve().parents[1]
 _GUI_PATH = _ROOT / "gui" / "rls_route_frame.py"
+_CORE_PATH = _ROOT / "services" / "rls_route_core.py"
 
 
 def _source() -> str:
@@ -25,6 +26,11 @@ def _source() -> str:
 
 def _tree() -> ast.Module:
     return ast.parse(_source(), filename=str(_GUI_PATH))
+
+
+def _core_tree() -> ast.Module:
+    source = _CORE_PATH.read_text(encoding="utf-8")
+    return ast.parse(source, filename=str(_CORE_PATH))
 
 
 def _class(name: str) -> ast.ClassDef:
@@ -45,6 +51,10 @@ def _method(class_name: str, method_name: str) -> ast.FunctionDef:
 
 def _route_module():
     return importlib.import_module("gui.rls_route_frame")
+
+
+def _core_module():
+    return importlib.import_module("services.rls_route_core")
 
 
 def _row(module, **overrides):
@@ -6272,6 +6282,7 @@ def test_upload_requires_explicit_external_ai_privacy_confirmation_before_worker
     tmp_path: Path,
 ) -> None:
     module = _route_module()
+    core = _core_module()
     source = tmp_path / "customer-route.docx"
     source.write_bytes(b"test fixture")
     provider = object()
@@ -6315,7 +6326,7 @@ def test_upload_requires_explicit_external_ai_privacy_confirmation_before_worker
         lambda **_kwargs: str(source),
     )
     monkeypatch.setattr(module.messagebox, "askyesno", _confirm)
-    monkeypatch.setattr(module, "import_route_diagram", _fake_import)
+    monkeypatch.setattr(core, "import_route_diagram", _fake_import)
 
     module.RlsRouteFrame._upload_route_diagram(subject)
 
@@ -6868,7 +6879,7 @@ def test_project_save_and_open_use_draft_safe_model_paths() -> None:
 
 
 def test_route_table_includes_order_and_readiness_columns() -> None:
-    tree = _tree()
+    tree = _core_tree()
     table_assignment = next(
         node
         for node in tree.body
@@ -6903,6 +6914,7 @@ def test_provider_glance_distinguishes_suggestion_candidate_and_selection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _route_module()
+    core = _core_module()
     from utils.rls_config.r4_0_generator import (
         R40_PROVIDER_CATALOG,
         provider_profiles_for_role,
@@ -6926,12 +6938,12 @@ def test_provider_glance_distinguishes_suggestion_candidate_and_selection(
         "preselect_allowed": True,
     }
     monkeypatch.setattr(
-        module,
+        core,
         "_r40_provider_route_band_mismatches",
         lambda *_args: [],
     )
     monkeypatch.setattr(
-        module,
+        core,
         "_r4_0_provider_prepopulation",
         lambda *_args: (dict(resolution), {}),
     )
@@ -6979,8 +6991,9 @@ def test_provider_glance_gates_sra_and_stale_or_invalid_payloads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _route_module()
+    core = _core_module()
     monkeypatch.setattr(
-        module,
+        core,
         "_r4_0_provider_prepopulation",
         lambda *_args: (
             {
@@ -7083,6 +7096,7 @@ def test_provider_glance_marks_only_valid_current_request_applied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _route_module()
+    core = _core_module()
     generator = importlib.import_module(
         "utils.rls_config.r4_0_generator"
     )
@@ -7124,7 +7138,7 @@ def test_provider_glance_marks_only_valid_current_request_applied(
         _AcceptingGenerator,
     )
     monkeypatch.setattr(
-        module,
+        core,
         "_r40_provider_route_band_mismatches",
         lambda *_args: [],
     )
@@ -7141,6 +7155,7 @@ def test_provider_glance_treats_deferred_terminal_colan_warning_as_applied(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _route_module()
+    core = _core_module()
     generator = importlib.import_module(
         "utils.rls_config.r4_0_generator"
     )
@@ -7191,7 +7206,7 @@ def test_provider_glance_treats_deferred_terminal_colan_warning_as_applied(
         _WarningGenerator,
     )
     monkeypatch.setattr(
-        module,
+        core,
         "_r40_provider_route_band_mismatches",
         lambda *_args: [],
     )
@@ -7208,6 +7223,7 @@ def test_provider_glance_rejects_sra_payload_with_wrong_reviewed_slot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _route_module()
+    core = _core_module()
     generator = importlib.import_module(
         "utils.rls_config.r4_0_generator"
     )
@@ -7247,7 +7263,7 @@ def test_provider_glance_rejects_sra_payload_with_wrong_reviewed_slot(
         lambda _payload: request,
     )
     monkeypatch.setattr(
-        module,
+        core,
         "_r40_provider_route_band_mismatches",
         lambda *_args: [],
     )
@@ -7266,6 +7282,7 @@ def test_direction_glance_distinguishes_direct_derived_and_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _route_module()
+    core = _core_module()
     from utils.rls_config.r4_0_generator import provider_profiles_for_role
 
     profile = provider_profiles_for_role("ila")[0]
@@ -7291,12 +7308,12 @@ def test_direction_glance_distinguishes_direct_derived_and_blocked(
         "line_1_route_side": "Z",
     }
     monkeypatch.setattr(
-        module,
+        core,
         "_r40_provider_route_band_mismatches",
         lambda *_args: [],
     )
     monkeypatch.setattr(
-        module,
+        core,
         "_r4_0_provider_prepopulation",
         lambda *_args: (
             dict(provider_resolution),
