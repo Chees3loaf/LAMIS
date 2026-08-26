@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from gui_qt.dialogs import show_problem
 from services.asset_import_service import AssetImportOutcome, run_asset_import
 
 
@@ -126,10 +127,10 @@ class AssetImportPage(QWidget):
         inventory = self.inventory_edit.text().strip()
         asset_doc = self.asset_edit.text().strip()
         if not inventory or not asset_doc:
-            QMessageBox.warning(self, "Asset Import", "Select both workbooks first.")
+            show_problem(self, "Asset Import", "Both workbook paths are required.", "Select the inventory workbook and asset document, then retry.")
             return
         if not Path(inventory).is_file() or not Path(asset_doc).is_file():
-            QMessageBox.warning(self, "Asset Import", "One or both selected files do not exist.")
+            show_problem(self, "Asset Import", "One or both selected workbook paths do not exist.", "Browse to existing .xlsx workbooks, then retry.")
             return
 
         self.log.clear()
@@ -179,7 +180,7 @@ class AssetImportPage(QWidget):
     def _on_failure(self, message: str) -> None:
         self.status_label.setText("Failed")
         self._append_log(f"ERROR: {message}")
-        QMessageBox.critical(self, "Asset Import failed", message)
+        show_problem(self, "Asset Import failed", message, "Review the activity log, correct the reported workbook or matching issue, and retry.", critical=True)
 
     @Slot()
     def _on_thread_finished(self) -> None:

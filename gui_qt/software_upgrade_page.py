@@ -4,7 +4,7 @@ import logging
 import threading
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
-from services.software_upgrade_service import FAMILIES, SoftwareUpgradeRequest, list_upgrade_nics, run_software_upgrade, validate_software_upgrade
+from services.software_upgrade_service import FAMILIES, SoftwareUpgradeRequest, list_software_releases, list_upgrade_nics, run_software_upgrade, validate_software_upgrade
 
 
 class UpgradeWorker(QObject):
@@ -28,8 +28,9 @@ class SoftwareUpgradePage(QWidget):
         self.path = QLineEdit(); path_row = QWidget(); path_layout = QHBoxLayout(path_row); path_layout.setContentsMargins(0,0,0,0); file_button = QPushButton("File…"); file_button.clicked.connect(self._file); folder_button = QPushButton("Folder…"); folder_button.clicked.connect(self._folder); path_layout.addWidget(self.path,1); path_layout.addWidget(file_button); path_layout.addWidget(folder_button)
         self.nic = QComboBox(); refresh = QPushButton("Refresh"); refresh.clicked.connect(self._refresh_nics); nic_row=QWidget(); nic_layout=QHBoxLayout(nic_row); nic_layout.setContentsMargins(0,0,0,0); nic_layout.addWidget(self.nic,1); nic_layout.addWidget(refresh)
         self.ctm = QComboBox(); self.ctm.addItems(["CTM41","CTM42"])
+        self.release = QComboBox(); self.release.setPlaceholderText("Select an unzipped CC release")
         self.user=QLineEdit(); self.password=QLineEdit(); self.password.setEchoMode(QLineEdit.EchoMode.Password); self.inner_user=QLineEdit(); self.inner_password=QLineEdit(); self.inner_password.setEchoMode(QLineEdit.EchoMode.Password); self.serial=QLineEdit("COM1")
-        form.addRow("Device family",self.family); form.addRow("Software file / folder",path_row); form.addRow("Wired interface",nic_row); form.addRow("RLS CTM",self.ctm); form.addRow("Username",self.user); form.addRow("Password",self.password); form.addRow("Inner username",self.inner_user); form.addRow("Inner password",self.inner_password); form.addRow("Serial console",self.serial)
+        form.addRow("Device family",self.family); form.addRow("Software file / folder",path_row); form.addRow("Software release",self.release); form.addRow("Wired interface",nic_row); form.addRow("RLS CTM",self.ctm); form.addRow("Username",self.user); form.addRow("Password",self.password); form.addRow("Inner username",self.inner_user); form.addRow("Inner password",self.inner_password); form.addRow("Serial console",self.serial)
         warning=QLabel("Stop halts ATLAS polling where supported; it does not cancel an install already running on the device. Do not remove power during an upgrade."); warning.setWordWrap(True); warning.setObjectName("mutedText")
         controls=QHBoxLayout(); self.run_button=QPushButton("Run Upgrade"); self.run_button.clicked.connect(self._start); self.stop_button=QPushButton("Stop Monitoring"); self.stop_button.clicked.connect(self._stop); self.stop_button.setEnabled(False); self.status=QLabel("Ready"); controls.addWidget(self.run_button); controls.addWidget(self.stop_button); controls.addWidget(self.status,1)
         self.log=QPlainTextEdit(); self.log.setReadOnly(True)
@@ -39,10 +40,13 @@ class SoftwareUpgradePage(QWidget):
     def _error(self, detail, action): QMessageBox.critical(self,"Software Upgrade error",f"Error: {detail or 'Unknown error'}\n\nWhat to do: {action}")
     def _file(self):
         path,_=QFileDialog.getOpenFileName(self,"Select software artifact","","All files (*)")
-        if path:self.path.setText(path)
+        if path:self.path.setText(path);self._refresh_releases()
     def _folder(self):
         path=QFileDialog.getExistingDirectory(self,"Select software folder")
-        if path:self.path.setText(path)
+        if path:self.path.setText(path);self._refresh_releases()
+    def _refresh_releases(self):
+        current=self.release.currentText(); self.release.clear(); self.release.addItems(list_software_releases(self.path.text().strip())); index=self.release.findText(current)
+        if index>=0:self.release.setCurrentIndex(index)
     def _refresh_nics(self):
         current=self.nic.currentText(); self.nic.clear(); self.nic.addItems(list_upgrade_nics()); index=self.nic.findText(current)
         if index>=0:self.nic.setCurrentIndex(index)
@@ -50,10 +54,10 @@ class SoftwareUpgradePage(QWidget):
         rls=family=="Ciena RLS"; inner=family in {"Nokia PSI","Nokia PSS"}; ws=family=="Ciena Waveserver 5"
         self.ctm.setVisible(rls); self.serial.setVisible(ws)
         form=self.ctm.parentWidget().layout()
-        for widget,visible in ((self.ctm,rls),(self.serial,ws),(self.inner_user,inner),(self.inner_password,inner)):
+        for widget,visible in ((self.ctm,rls),(self.release,inner),(self.serial,ws),(self.inner_user,inner),(self.inner_password,inner)):
             widget.setVisible(visible); label=form.labelForField(widget); label.setVisible(visible) if label else None
-        defaults={"Ciena RLS":"su","Nokia G42":"admin","Nokia PSI":"cli","Nokia PSS":"cli","Ciena Waveserver 5":""}; self.user.setText(defaults[family]); self.inner_user.setText("admin" if inner else "")
-    def _request(self): return SoftwareUpgradeRequest(self.family.currentText(),self.path.text().strip(),self.nic.currentText().strip(),self.ctm.currentText(),self.user.text(),self.password.text(),self.inner_user.text(),self.inner_password.text(),self.serial.text().strip())
+        defaults={"Ciena RLS":"su","Nokia G42":"admin","Nokia PSI":"cli","Nokia PSS":"cli","Ciena Waveserver 5":""}; self.user.setText(defaults[family]); self.inner_user.setText("admin" if inner else ""); self._refresh_releases()
+    def _request(self): return SoftwareUpgradeRequest(self.family.currentText(),self.path.text().strip(),self.nic.currentText().strip(),self.ctm.currentText(),self.user.text(),self.password.text(),self.inner_user.text(),self.inner_password.text(),self.serial.text().strip(),self.release.currentText().strip())
     def _start(self):
         request=self._request()
         try: validate_software_upgrade(request)

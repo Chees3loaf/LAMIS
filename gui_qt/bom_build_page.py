@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QFileDialog, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
+from gui_qt.dialogs import show_problem
 from services.bom_build_service import run_bom_build
 
 
@@ -87,7 +88,7 @@ class BomBuildPage(QWidget):
     def _start(self) -> None:
         source = self.source_edit.text().strip()
         if not source or not Path(source).is_file():
-            QMessageBox.warning(self, "BOM Build", "Select a valid .xlsx workbook first.")
+            show_problem(self, "BOM Build", "A valid inventory .xlsx workbook was not selected.", "Browse to an existing inventory workbook, then retry.")
             return
         self.log.clear()
         self.run_button.setEnabled(False)
@@ -117,7 +118,7 @@ class BomBuildPage(QWidget):
     def _on_failure(self, message: str) -> None:
         self.log.appendPlainText(f"ERROR: {message}")
         self.status_label.setText("Failed")
-        QMessageBox.critical(self, "BOM Build failed", message)
+        show_problem(self, "BOM Build failed", message, "Review the log, correct the reported workbook issue, and run the BOM build again.", critical=True)
 
     @Slot()
     def _on_finished(self) -> None:

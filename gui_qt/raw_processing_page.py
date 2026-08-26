@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
+from gui_qt.dialogs import show_problem
 from services.raw_processing_core import AUTO_DETECT_NOKIA, SALES_BOM_IMPORT, SCRIPT_OPTIONS
 from services.raw_processing_service import RawProcessingRequest, run_raw_processing
 
@@ -128,10 +129,10 @@ class RawProcessingPage(QWidget):
         input_path = Path(input_text)
         output_path = Path(output_text)
         if not input_text or not input_path.exists():
-            QMessageBox.warning(self, "Raw Processing", "Select a valid input file or folder.")
+            show_problem(self, "Raw Processing", "The input file or folder does not exist.", "Select an existing transcript file or folder, then retry.")
             return
         if not output_text or output_path.suffix.lower() != ".xlsx":
-            QMessageBox.warning(self, "Raw Processing", "Select an .xlsx output file.")
+            show_problem(self, "Raw Processing", "The output path is not an .xlsx workbook.", "Choose an .xlsx output workbook, then retry.")
             return
         request = RawProcessingRequest(
             input_path=input_path,
@@ -168,7 +169,7 @@ class RawProcessingPage(QWidget):
     def _on_failure(self, message: str) -> None:
         self.log.appendPlainText(f"ERROR: {message}")
         self.status_label.setText("Failed")
-        QMessageBox.critical(self, "Raw Processing failed", message)
+        show_problem(self, "Raw Processing failed", message, "Review the log, correct the reported input or workbook issue, and run processing again.", critical=True)
 
     @Slot()
     def _on_finished(self) -> None:

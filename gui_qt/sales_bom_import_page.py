@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QAbstractItemView, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QListWidget, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
+from gui_qt.dialogs import show_problem
 from services.sales_bom_import_service import SalesBomSource, inspect_sales_bom, run_sales_bom_import
 
 
@@ -115,7 +116,7 @@ class SalesBomImportPage(QWidget):
         try:
             source = inspect_sales_bom(path)
         except Exception as exc:
-            QMessageBox.critical(self, "Sales BOM Import", str(exc))
+            show_problem(self, "Sales BOM Import", exc, "Select a readable Sales BOM workbook, then retry.", critical=True)
             return
         self._source = source
         self.source_edit.setText(str(source.path))
@@ -138,13 +139,13 @@ class SalesBomImportPage(QWidget):
         selected = [item.text() for item in self.sheet_list.selectedItems()]
         output = self.output_edit.text().strip()
         if self._source is None:
-            QMessageBox.warning(self, "Sales BOM Import", "Select a Sales BOM workbook first.")
+            show_problem(self, "Sales BOM Import", "No Sales BOM workbook has been loaded.", "Select and load a Sales BOM workbook, then retry.")
             return
         if not selected:
-            QMessageBox.warning(self, "Sales BOM Import", "Select at least one worksheet.")
+            show_problem(self, "Sales BOM Import", "No worksheet is selected.", "Select at least one worksheet to import, then retry.")
             return
         if not output or Path(output).suffix.lower() != ".xlsx":
-            QMessageBox.warning(self, "Sales BOM Import", "Choose an .xlsx output file.")
+            show_problem(self, "Sales BOM Import", "The output path is not an .xlsx workbook.", "Choose an .xlsx output workbook, then retry.")
             return
 
         self.log.clear()
@@ -175,7 +176,7 @@ class SalesBomImportPage(QWidget):
     def _on_failure(self, message: str) -> None:
         self.log.appendPlainText(f"ERROR: {message}")
         self.status_label.setText("Failed")
-        QMessageBox.critical(self, "Sales BOM Import failed", message)
+        show_problem(self, "Sales BOM Import failed", message, "Review the log, correct the reported workbook issue, and run the import again.", critical=True)
 
     @Slot()
     def _on_finished(self) -> None:

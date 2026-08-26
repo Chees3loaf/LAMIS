@@ -18,10 +18,10 @@ class Server:
 @pytest.fixture
 def lifecycle(monkeypatch):
     calls = []
-    import gui.software_upgrade_frame as legacy
-    monkeypatch.setattr(legacy, "_set_static_ipv4", lambda nic, ip, mask: (calls.append(("static", nic, ip, mask)) or (True, "OK")))
-    monkeypatch.setattr(legacy, "_run_netsh", lambda args: (calls.append(("netsh", args)) or (True, "OK")))
-    monkeypatch.setattr(legacy, "_UpgradeHTTPServer", Server)
+    import services.software_upgrade_lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "_set_static_ipv4", lambda nic, ip, mask: (calls.append(("static", nic, ip, mask)) or (True, "OK")))
+    monkeypatch.setattr(lifecycle, "_run_netsh", lambda args: (calls.append(("netsh", args)) or (True, "OK")))
+    monkeypatch.setattr(lifecycle, "_UpgradeHTTPServer", Server)
     monkeypatch.setattr(service.time, "sleep", lambda _n: None)
     return calls
 
@@ -58,7 +58,7 @@ def test_file_upgrade_dispatch_and_cleanup(tmp_path, monkeypatch, lifecycle, fam
 def test_cc_upgrade_dispatch(tmp_path, monkeypatch, lifecycle, family, module, class_name):
     release = tmp_path / "CC" / "1830OLS-25.3-3"; release.mkdir(parents=True)
     captured = _script_module(monkeypatch, module, class_name)
-    run_software_upgrade(SoftwareUpgradeRequest(family, str(tmp_path), "Ethernet", inner_username="admin"))
+    run_software_upgrade(SoftwareUpgradeRequest(family, str(tmp_path), "Ethernet", inner_username="admin", release_name=release.name))
     assert captured["software_filename"] == release.name and captured["inner_username"] == "admin"
 
 
@@ -73,4 +73,11 @@ def test_failure_still_restores_network(tmp_path, monkeypatch, lifecycle):
 def test_validation_explains_unzipped_cc_requirement(tmp_path):
     (tmp_path / "CC").mkdir()
     with pytest.raises(ValueError, match="unzipped software release"):
+        validate_software_upgrade(SoftwareUpgradeRequest("Nokia PSI", str(tmp_path), "Ethernet"))
+
+
+def test_validation_requires_explicit_release_selection(tmp_path):
+    (tmp_path / "CC" / "1830OLS-25.3-2").mkdir(parents=True)
+    (tmp_path / "CC" / "1830OLS-25.3-3").mkdir()
+    with pytest.raises(ValueError, match="Select the PSI/PSS software release"):
         validate_software_upgrade(SoftwareUpgradeRequest("Nokia PSI", str(tmp_path), "Ethernet"))

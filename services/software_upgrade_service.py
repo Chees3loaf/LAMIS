@@ -30,6 +30,7 @@ class SoftwareUpgradeRequest:
     inner_username: str = ""
     inner_password: str = ""
     serial_port: str = ""
+    release_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -40,8 +41,17 @@ class SoftwareUpgradeOutcome:
 
 
 def list_upgrade_nics() -> list[str]:
-    from gui.software_upgrade_frame import _list_nics
+    from services.software_upgrade_lifecycle import _list_nics
     return _list_nics()
+
+
+def list_software_releases(software_path: str) -> list[str]:
+    """Return the unzipped PSI/PSS releases available beneath ``CC``."""
+    selected = Path(software_path)
+    cc = selected if selected.name.casefold() == "cc" else selected / "CC"
+    if not cc.is_dir():
+        return []
+    return sorted(item.name for item in cc.iterdir() if item.is_dir())
 
 
 def _resolve(request: SoftwareUpgradeRequest):
@@ -57,7 +67,12 @@ def _resolve(request: SoftwareUpgradeRequest):
         if not cc.is_dir(): raise ValueError("Select the software folder containing an unzipped CC directory.")
         releases = sorted(item for item in cc.iterdir() if item.is_dir())
         if not releases: raise ValueError("CC contains no unzipped software release folder. Extract the release into CC first.")
-        artifact = releases[0].name; root = cc.parent
+        if not request.release_name.strip():
+            raise ValueError("Select the PSI/PSS software release to install; ATLAS will not choose one automatically.")
+        release = cc / request.release_name.strip()
+        if not release.is_dir() or release.parent.resolve() != cc.resolve():
+            raise ValueError(f"Selected software release is not present beneath CC: {request.release_name}")
+        artifact = release.name; root = cc.parent
     else:
         if selected.is_dir():
             candidates = [item for item in selected.iterdir() if item.is_file()]
@@ -77,7 +92,7 @@ def validate_software_upgrade(request: SoftwareUpgradeRequest) -> None:
 
 def run_software_upgrade(request: SoftwareUpgradeRequest, *, progress: Callable[[str], None] = lambda _message: None, should_stop: Callable[[], bool] = lambda: False) -> SoftwareUpgradeOutcome:
     root, artifact, pc_ip, device_ip, mask = _resolve(request)
-    from gui.software_upgrade_frame import _UpgradeHTTPServer, _run_netsh, _set_static_ipv4
+    from services.software_upgrade_lifecycle import _UpgradeHTTPServer, _run_netsh, _set_static_ipv4
     server = None; server_thread = None; static_owned = False
     try:
         progress(f"Setting {request.nic} to {pc_ip}/{mask}…")

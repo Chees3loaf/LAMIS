@@ -7,6 +7,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtWidgets import QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QVBoxLayout, QWidget
 
+from gui_qt.dialogs import show_problem
 from services.packing_slip_service import PackingSlipRequest, PackingSlipSource, inspect_packing_slip_source, run_packing_slip_generation
 
 
@@ -102,7 +103,7 @@ class PackingSlipPage(QWidget):
         try:
             self.source = inspect_packing_slip_source(path)
         except Exception as exc:
-            QMessageBox.critical(self, "Packing Slip", str(exc))
+            show_problem(self, "Packing Slip", exc, "Select a supported inventory source and confirm the workbook is readable, then retry.", critical=True)
             return
         self.source_edit.setText(path)
         self.customer_edit.setText(self.source.customer)
@@ -122,11 +123,11 @@ class PackingSlipPage(QWidget):
     @Slot()
     def _start(self) -> None:
         if self.source is None:
-            QMessageBox.warning(self, "Packing Slip", "Select a source file first.")
+            show_problem(self, "Packing Slip", "No packing-slip source has been loaded.", "Select and load a supported inventory source, then retry.")
             return
         output_text = self.output_edit.text().strip()
         if not output_text:
-            QMessageBox.warning(self, "Packing Slip", "Select an output folder.")
+            show_problem(self, "Packing Slip", "No output folder was selected.", "Choose a writable output folder, then retry.")
             return
         request = PackingSlipRequest(
             source=self.source,
@@ -162,7 +163,7 @@ class PackingSlipPage(QWidget):
     def _on_failure(self, message: str) -> None:
         self.log.appendPlainText(f"ERROR: {message}")
         self.status_label.setText("Failed")
-        QMessageBox.critical(self, "Packing Slip generation failed", message)
+        show_problem(self, "Packing Slip generation failed", message, "Review the log, correct the source or output issue, and generate the packing slip again.", critical=True)
 
     @Slot()
     def _on_finished(self) -> None:
