@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
 
-from gui.bom_compare_frame import BomCompareFrame
+from services.bom_compare_core import BomCompareEngine
 from services.raw_processing_service import create_raw_workbook_builder
 from utils.helpers import validate_uploaded_file
 
@@ -39,7 +39,7 @@ def run_bom_compare(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     emit = progress or (lambda _message: None)
-    engine = BomCompareFrame.__new__(BomCompareFrame)
+    engine = BomCompareEngine()
     engine.gui = SimpleNamespace(
         workbook_builder=builder or create_raw_workbook_builder()
     )

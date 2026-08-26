@@ -5,7 +5,7 @@ from unittest.mock import patch
 import openpyxl
 import pytest
 
-from gui.bom_compare_frame import BomCompareFrame
+from services.bom_compare_core import BomCompareEngine
 from services.bom_compare_service import default_compare_output, run_bom_compare
 
 
@@ -27,7 +27,7 @@ def test_service_passes_explicit_output_and_progress(tmp_path) -> None:
     _workbook(sales)
     messages = []
 
-    with patch.object(BomCompareFrame, "_compare", autospec=True, return_value=str(output)) as compare:
+    with patch.object(BomCompareEngine, "_compare", autospec=True, return_value=str(output)) as compare:
         result = run_bom_compare(
             factory, sales, output_path=output, progress=messages.append,
             builder=object(),

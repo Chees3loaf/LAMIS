@@ -1546,7 +1546,7 @@ class WorkbookBuilder:
         """
         try:
             # Lazy import to avoid circular dependency at module load.
-            from gui.bom_compare_frame import load_part_kits
+            from services.bom_compare_core import load_part_kits
         except Exception:
             return 0
         kits = load_part_kits()
@@ -3111,8 +3111,8 @@ class WorkbookBuilder:
         Returns the absolute path of the saved file.
         """
         import time as _time
-        from gui.bom_compare_frame import (
-            BomCompareFrame, load_part_aliases, fold_aliased_parts,
+        from services.bom_compare_core import (
+            BomCompareEngine, load_part_aliases, fold_aliased_parts,
             canonical_part,
         )
 
@@ -3187,7 +3187,7 @@ class WorkbookBuilder:
             )
             try:
                 s_sites, s_parts, s_spares, s_groups = (
-                    BomCompareFrame._parse_per_site_bom(src_ws)
+                    BomCompareEngine._parse_per_site_bom(src_ws)
                 )
             except Exception:
                 logging.exception(

@@ -13,7 +13,7 @@ def test_run_bom_build_delegates_to_production_engine(tmp_path) -> None:
     output = tmp_path / "inventory.BOM.xlsx"
     builder = MagicMock()
 
-    with patch("services.bom_build_service.BomFrame._build", return_value=str(output)) as build:
+    with patch("services.bom_build_service.BomBuildEngine._build", return_value=str(output)) as build:
         result = run_bom_build(source, builder=builder)
 
     assert result == output

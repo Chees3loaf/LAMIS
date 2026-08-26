@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable
 
-from gui.bom_frame import BomFrame
+from services.bom_build_core import BomBuildEngine
 from services.workbook_builder import WorkbookBuilder
 import script_interface
 from utils.helpers import get_data_dir
@@ -43,7 +43,7 @@ def run_bom_build(
         raise ValueError("BOM Build requires an .xlsx workbook.")
 
     emit = progress or (lambda _message: None)
-    engine = BomFrame.__new__(BomFrame)
+    engine = BomBuildEngine()
     engine.gui = SimpleNamespace(
         workbook_builder=builder or create_workbook_builder()
     )
